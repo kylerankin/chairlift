@@ -30,11 +30,13 @@ appears on systems that update as a whole, so it's not in the shot above.
 
 ![System](screenshots/4-system.png)
 
-Your system details, what's installed now, and what's queued for the next
-restart. **Release Channel** switches between the stable version and the
-early one. **Graphics Driver** switches you to the NVIDIA driver if your card
-wants it. Neither appears unless there's actually something to switch to.
-**Mission Center** opens the system monitor.
+Your system details. **System Image** — what's installed now, and what's
+queued for the next restart — only appears on systems that update as a
+whole, so it's not in the shot above. **Release Channel** switches between
+the stable version and the early one. **Graphics Driver** switches you to
+the NVIDIA driver if your card wants it. Neither appears unless there's
+actually something to switch to. **Mission Center** opens the system
+monitor.
 
 ---
 
@@ -49,8 +51,9 @@ in the cloud, using your graphics card if you have one — the first start
 downloads several GB. **Enhanced Troubleshooting** sets up an AI assistant
 that can read your logs, services, and network to help work out what's wrong,
 then launches it — the row says which AI service answers your questions,
-since the default one is Google's. **System Features** is Snow Linux's
-feature manager, and is empty elsewhere.
+since the default one is Google's. It is only offered where Homebrew is
+installed, so it's not in the shot above. **System Features** is Snow
+Linux's feature manager, and is empty elsewhere.
 
 ---
 
