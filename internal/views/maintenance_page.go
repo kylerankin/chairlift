@@ -9,6 +9,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/projectbluefin/chairlift/internal/dryrun"
@@ -23,6 +24,27 @@ import (
 	"codeberg.org/puregotk/puregotk/v4/adw"
 	"codeberg.org/puregotk/puregotk/v4/gtk"
 )
+
+// maintenanceWaitDelay bounds how long Wait blocks after the process group has
+// been signalled. A configured maintenance script can spawn children (work
+// started through pkexec, for example) that inherit its pipes, so a straggler
+// could otherwise hold cmd.Run open forever even though the whole group is
+// already dead.
+const maintenanceWaitDelay = 5 * time.Second
+
+// runMaintenanceCommand runs a configured maintenance script under ctx. The
+// script runs in its own process group and cancellation kills the whole
+// group, so children the script spawns (including via pkexec) are reaped too
+// rather than orphaned and left running after ChairLift reports the timeout.
+func runMaintenanceCommand(ctx context.Context, name string, args ...string) error {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+	cmd.WaitDelay = maintenanceWaitDelay
+	return cmd.Run()
+}
 
 // buildMaintenancePage builds the Maintenance page content
 func (uh *UserHome) buildMaintenancePage() {
@@ -267,7 +289,7 @@ func (uh *UserHome) runMaintenanceAction(title, script string, sudo bool, button
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 			defer cancel()
 
-			err = exec.CommandContext(ctx, command.Name, command.Args...).Run()
+			err = runMaintenanceCommand(ctx, command.Name, command.Args...)
 		} else {
 			log.Printf("[DRY-RUN] Would execute: %s", strings.Join(wouldRun, " "))
 		}
