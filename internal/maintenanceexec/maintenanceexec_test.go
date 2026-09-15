@@ -1,4 +1,4 @@
-package views
+package maintenanceexec
 
 import (
 	"context"
@@ -11,11 +11,11 @@ import (
 	"time"
 )
 
-// TestRunMaintenanceCommandTerminatesProcessGroup verifies that cancelling a
-// maintenance command reaps the whole group, not just the direct child: the
-// script spawns a long-lived background child and waits, so if only the child
-// process were killed the backgrounded child would survive the timeout.
-func TestRunMaintenanceCommandTerminatesProcessGroup(t *testing.T) {
+// TestRunTerminatesProcessGroup verifies that cancelling a maintenance command
+// reaps the whole group, not just the direct child: the script spawns a long-lived
+// background child and waits, so if only the child process were killed the
+// backgrounded child would survive the timeout.
+func TestRunTerminatesProcessGroup(t *testing.T) {
 	dir := t.TempDir()
 	pidPath := filepath.Join(dir, "child.pid")
 	scriptPath := filepath.Join(dir, "spawn.sh")
@@ -31,7 +31,7 @@ func TestRunMaintenanceCommandTerminatesProcessGroup(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 
-	if err := runMaintenanceCommand(ctx, scriptPath); err == nil {
+	if err := Run(ctx, scriptPath); err == nil {
 		t.Fatalf("expected timeout error, got nil")
 	}
 
