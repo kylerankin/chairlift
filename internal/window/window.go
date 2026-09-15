@@ -47,7 +47,7 @@ type Window struct {
 	config      *config.Config
 	configError *config.LoadError
 	views       *views.UserHome
-	updateBadge *gtk.Button // Badge for updates count
+	updateBadge *gtk.Label // Noninteractive badge for the updates count
 	navItems    []navigation.Item
 }
 
@@ -195,7 +195,7 @@ func (w *Window) createNavRow(item navigation.Item) *adw.ActionRow {
 
 	// Add badge for updates row (hidden by default)
 	if item.Name == "updates" {
-		w.updateBadge = gtk.NewButton()
+		w.updateBadge = gtk.NewLabel("")
 		w.updateBadge.AddCssClass("circular")
 		w.updateBadge.AddCssClass("warning")
 		w.updateBadge.SetVisible(false)
