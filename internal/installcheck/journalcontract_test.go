@@ -71,7 +71,7 @@ var privilegedExecSites = []privilegedExecSite{
 		JournalledBy: execSite{File: "internal/stageexec/stageexec.go", Func: "Stage"},
 	},
 	{
-		Site:         execSite{File: "internal/views/maintenance_page.go", Func: "UserHome.runMaintenanceAction"},
+		Site:         execSite{File: "internal/views/maintenance_page.go", Func: "runMaintenanceCommand"},
 		JournalledBy: execSite{File: "internal/views/maintenance_page.go", Func: "UserHome.runMaintenanceAction"},
 	},
 }
