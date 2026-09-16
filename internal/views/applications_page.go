@@ -816,6 +816,13 @@ func (uh *UserHome) launchApp(appID string) {
 
 	// Don't wait for the command to finish - it's a GUI app
 	go func() {
-		_ = cmd.Wait()
+		if err := cmd.Wait(); err != nil {
+			// gtk-launch exits nonzero when the desktop app ID is missing or
+			// the launch fails; surface that async failure instead of silently
+			// dropping it. Must run on the GTK main thread.
+			sgtk.RunOnMainThread(func() {
+				uh.toastAdder.ShowErrorToast(fmt.Sprintf("Failed to launch %s", appID))
+			})
+		}
 	}()
 }
