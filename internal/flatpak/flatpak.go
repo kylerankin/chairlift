@@ -471,9 +471,31 @@ func Info(appID string, user bool) (*ApplicationInfo, error) {
 	return info, nil
 }
 
-// UninstallUnused removes unused Flatpak runtimes and extensions
+// UninstallUnused removes unused Flatpak runtimes and extensions in both the
+// user and system installation scopes. Flatpak defaults to the system
+// installation when no scope flag is given, so running without a scope would
+// leave unused user runtimes behind while reporting success. Each scope is run
+// independently; output is combined and an error from either scope is reported
+// (via errors.Join) rather than masking the other scope's result.
 func UninstallUnused() (string, error) {
-	return runFlatpakCommand("uninstall", "--unused", "-y")
+	var (
+		out  bytes.Buffer
+		errs []error
+	)
+	for _, flag := range []string{"--user", "--system"} {
+		scopeOut, scopeErr := runFlatpakCommand("uninstall", "--unused", "-y", flag)
+		if scopeOut != "" {
+			if out.Len() > 0 {
+				out.WriteByte('\n')
+			}
+			out.WriteString(scopeOut)
+		}
+		if scopeErr != nil {
+			errs = append(errs, fmt.Errorf("%s scope: %w", flag, scopeErr))
+		}
+	}
+
+	return out.String(), errors.Join(errs...)
 }
 
 // RemoveAllUser uninstalls every user-scope Flatpak application. It is
