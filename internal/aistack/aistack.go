@@ -76,35 +76,43 @@ func (s Stack) Accelerated() bool {
 	return s.Vendor != gpu.VendorNone
 }
 
-// stacks maps each vendor to its RamaLama image. Every reference was
-// verified against quay.io by manifest request on 2026-08-17: the
-// ramalama namespace publishes `ramalama` (CPU), `cuda`, `rocm`, and
-// `intel-gpu`, each returning 200 for :latest.
+// stacks maps each vendor to its RamaLama image. Every reference is pinned
+// by content digest, not by the mutable `:latest` tag, so a compromised or
+// mistakenly re-pushed tag in the ramalama namespace cannot silently replace
+// the image this unit runs (see issue #8: a `:latest` pull with
+// `--security-opt=label=disable` and GPU devices drops the only sandbox
+// boundary between the model server and the host).
+//
+// The digests below were recorded from quay.io on 2026-08-17. They go stale
+// by construction: to roll them, re-request each manifest
+// (`curl -sI https://quay.io/v2/ramalama/<name>/manifests/latest` ->
+// `Docker-Content-Digest`), replace the sha256 here, and re-run the aistack
+// tests. Do not swap a digest for a moving tag to "keep it current".
 var stacks = map[gpu.Vendor]Stack{
 	gpu.VendorNVIDIA: {
 		Vendor:      gpu.VendorNVIDIA,
-		Image:       "quay.io/ramalama/cuda:latest",
+		Image:       "quay.io/ramalama/cuda@sha256:498cbbac10d3ca8e97fa3e04bfbbd95f4a85f1395dbfcfed95171833568fefde",
 		Accelerator: "CUDA",
 		Devices:     []string{"nvidia.com/gpu=all"},
 		PodmanArgs:  []string{"--security-opt=label=disable"},
 	},
 	gpu.VendorAMD: {
 		Vendor:      gpu.VendorAMD,
-		Image:       "quay.io/ramalama/rocm:latest",
+		Image:       "quay.io/ramalama/rocm@sha256:0c5632e268ec4799e7f57e81c4b07f2c3357966711c17812d13ce29ef170b789",
 		Accelerator: "ROCm",
 		Devices:     []string{"/dev/kfd", "/dev/dri"},
 		PodmanArgs:  []string{"--security-opt=label=disable", "--group-add=video"},
 	},
 	gpu.VendorIntel: {
 		Vendor:      gpu.VendorIntel,
-		Image:       "quay.io/ramalama/intel-gpu:latest",
+		Image:       "quay.io/ramalama/intel-gpu@sha256:767e5472b7ca81ea9956b0ea920c773217b3a9d43afb51fe7e21719a2642d055",
 		Accelerator: "Intel oneAPI",
 		Devices:     []string{"/dev/dri"},
 		PodmanArgs:  []string{"--security-opt=label=disable"},
 	},
 	gpu.VendorNone: {
 		Vendor:      gpu.VendorNone,
-		Image:       "quay.io/ramalama/ramalama:latest",
+		Image:       "quay.io/ramalama/ramalama@sha256:24a518ba4a5bb7c149adb5742748cacbfe7845bc16a0fd228ab108870207c316",
 		Accelerator: "CPU",
 	},
 }

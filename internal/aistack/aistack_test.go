@@ -26,7 +26,7 @@ func TestSelectCoversEveryHardwareCase(t *testing.T) {
 			name:            "nvidia workstation",
 			set:             gpu.Set{NVIDIA: true},
 			wantVendor:      gpu.VendorNVIDIA,
-			wantImage:       "quay.io/ramalama/cuda:latest",
+			wantImage:       "quay.io/ramalama/cuda@sha256:498cbbac10d3ca8e97fa3e04bfbbd95f4a85f1395dbfcfed95171833568fefde",
 			wantAccelerator: "CUDA",
 			wantAccelerated: true,
 			wantDevices:     []string{"nvidia.com/gpu=all"},
@@ -35,7 +35,7 @@ func TestSelectCoversEveryHardwareCase(t *testing.T) {
 			name:            "amd workstation",
 			set:             gpu.Set{AMD: true},
 			wantVendor:      gpu.VendorAMD,
-			wantImage:       "quay.io/ramalama/rocm:latest",
+			wantImage:       "quay.io/ramalama/rocm@sha256:0c5632e268ec4799e7f57e81c4b07f2c3357966711c17812d13ce29ef170b789",
 			wantAccelerator: "ROCm",
 			wantAccelerated: true,
 			wantDevices:     []string{"/dev/kfd", "/dev/dri"},
@@ -44,7 +44,7 @@ func TestSelectCoversEveryHardwareCase(t *testing.T) {
 			name:            "intel laptop",
 			set:             gpu.Set{Intel: true},
 			wantVendor:      gpu.VendorIntel,
-			wantImage:       "quay.io/ramalama/intel-gpu:latest",
+			wantImage:       "quay.io/ramalama/intel-gpu@sha256:767e5472b7ca81ea9956b0ea920c773217b3a9d43afb51fe7e21719a2642d055",
 			wantAccelerator: "Intel oneAPI",
 			wantAccelerated: true,
 			wantDevices:     []string{"/dev/dri"},
@@ -53,7 +53,7 @@ func TestSelectCoversEveryHardwareCase(t *testing.T) {
 			name:            "no gpu",
 			set:             gpu.Set{},
 			wantVendor:      gpu.VendorNone,
-			wantImage:       "quay.io/ramalama/ramalama:latest",
+			wantImage:       "quay.io/ramalama/ramalama@sha256:24a518ba4a5bb7c149adb5742748cacbfe7845bc16a0fd228ab108870207c316",
 			wantAccelerator: "CPU",
 			wantAccelerated: false,
 		},
@@ -64,7 +64,7 @@ func TestSelectCoversEveryHardwareCase(t *testing.T) {
 			name:            "hybrid laptop prefers the discrete card",
 			set:             gpu.Set{Intel: true, NVIDIA: true},
 			wantVendor:      gpu.VendorNVIDIA,
-			wantImage:       "quay.io/ramalama/cuda:latest",
+			wantImage:       "quay.io/ramalama/cuda@sha256:498cbbac10d3ca8e97fa3e04bfbbd95f4a85f1395dbfcfed95171833568fefde",
 			wantAccelerator: "CUDA",
 			wantAccelerated: true,
 			wantDevices:     []string{"nvidia.com/gpu=all"},
@@ -462,7 +462,7 @@ func TestApplyOverridesReplacesTheImageAndModel(t *testing.T) {
 	}
 
 	// An override for one vendor leaves the others alone.
-	if Select(gpu.Set{AMD: true}).Image != "quay.io/ramalama/rocm:latest" {
+	if Select(gpu.Set{AMD: true}).Image != "quay.io/ramalama/rocm@sha256:0c5632e268ec4799e7f57e81c4b07f2c3357966711c17812d13ce29ef170b789" {
 		t.Error("overriding nvidia disturbed the amd stack")
 	}
 }
@@ -506,7 +506,7 @@ func TestNoOverridesIsANoOp(t *testing.T) {
 	if err := ApplyOverrides(nil, ""); err != nil {
 		t.Fatalf("ApplyOverrides(nil, \"\"): %v", err)
 	}
-	if Select(gpu.Set{}).Image != "quay.io/ramalama/ramalama:latest" {
+	if Select(gpu.Set{}).Image != "quay.io/ramalama/ramalama@sha256:24a518ba4a5bb7c149adb5742748cacbfe7845bc16a0fd228ab108870207c316" {
 		t.Error("an empty override changed the CPU stack")
 	}
 }
