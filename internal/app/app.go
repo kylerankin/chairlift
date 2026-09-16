@@ -122,9 +122,29 @@ func (a *Application) onActivate() {
 	win := window.New(a.Application)
 	a.window = win
 	a.AddWindow(&win.Window)
+	// Register the application actions the advertised shortcuts rely on.
+	// setupKeyboardShortcuts wires <Primary>q to the "app.quit" action, but a
+	// custom adw.Application subtype never gains the standard quit action that
+	// a plain gio.Application gets for free — register it so Ctrl+Q actually
+	// closes ChairLift instead of wiring an accelerator to nothing.
+	a.registerQuitAction()
 	a.setupKeyboardShortcuts(win.NavigationItems())
 	win.Present()
 	log.Printf("app: window presented in %s (since activate)", time.Since(activateStart))
+}
+
+// registerQuitAction registers the standard app.quit action so the
+// <Primary>q accelerator set up in setupKeyboardShortcuts closes the
+// application. A custom adw.Application subtype does not inherit the quit
+// action a plain gio.Application provides, so without this Ctrl+Q is an
+// accelerator attached to no action and does nothing.
+func (a *Application) registerQuitAction() {
+	quitAction := gio.NewSimpleAction("quit", nil)
+	quitActivateCb := func(action gio.SimpleAction, param uintptr) {
+		a.Quit()
+	}
+	quitAction.ConnectActivate(&quitActivateCb)
+	a.AddAction(quitAction)
 }
 
 // setupKeyboardShortcuts sets up application-wide keyboard shortcuts
