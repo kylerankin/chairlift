@@ -163,7 +163,6 @@ esac`
 			},
 			want: []string{"info", "--show-metadata", "--user", "org.mozilla.firefox"},
 		},
-		{name: "remove unused", run: func() error { _, err := UninstallUnused(); return err }, want: []string{"uninstall", "--unused", "-y"}},
 		{name: "remove all user apps", run: RemoveAllUser, want: []string{"uninstall", "--user", "--all", "-y"}},
 	}
 
@@ -176,6 +175,52 @@ esac`
 				t.Fatalf("flatpak arguments = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestUninstallUnusedRunsBothScopes(t *testing.T) {
+	dryrun.Set(false)
+	t.Cleanup(func() { dryrun.Set(false) })
+
+	dir := t.TempDir()
+	capture := filepath.Join(dir, "args")
+	script := filepath.Join(dir, "flatpak")
+	// Append (not overwrite) so both scope invocations are recorded.
+	source := "#!/bin/sh\necho \"$@\" >> \"$CHAIRLIFT_FLATPAK_ARGS\"\n"
+	if err := os.WriteFile(script, []byte(source), 0o755); err != nil {
+		t.Fatalf("write fake flatpak: %v", err)
+	}
+	t.Setenv("PATH", dir)
+	t.Setenv("CHAIRLIFT_FLATPAK_ARGS", capture)
+
+	_, err := UninstallUnused()
+	if err != nil {
+		t.Fatalf("UninstallUnused() error = %v", err)
+	}
+
+	got := capturedFlatpakArgs(t, capture)
+	want := []string{
+		"uninstall --unused -y --user",
+		"uninstall --unused -y --system",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("flatpak arguments = %v, want %v", got, want)
+	}
+}
+
+// TestUninstallUnusedReportsScopeError ensures an error from either scope is
+// surfaced (wrapped with its scope) instead of being swallowed, so the UI can
+// report that cleanup did not fully succeed.
+func TestUninstallUnusedReportsScopeError(t *testing.T) {
+	dryrun.Set(false)
+	t.Cleanup(func() { dryrun.Set(false) })
+
+	// Fail only the system-scope invocation.
+	installCapturingFlatpak(t, `case "$@" in *--system*) echo 'system failed' >&2; exit 1;; esac`)
+
+	_, err := UninstallUnused()
+	if err == nil || !strings.Contains(err.Error(), "system scope") || !strings.Contains(err.Error(), "system failed") {
+		t.Fatalf("error = %v, want it to mention the system scope and its failure", err)
 	}
 }
 
