@@ -306,6 +306,17 @@ func stripTag(ref string) string {
 	return ref[:index]
 }
 
+// hasTag reports whether ref carries a trailing image tag, e.g.
+// "ghcr.io/org/img:latest". A colon that sits before the first slash is a
+// registry port ("registry.example:5000/org/img"), which the channel-table
+// validation accepts; only a trailing tag is rejected.
+func hasTag(ref string) bool {
+	if index := strings.LastIndex(ref, ":"); index >= 0 {
+		return !strings.Contains(ref[index:], "/")
+	}
+	return false
+}
+
 // EffectiveTag returns the running image tag, falling back to the tag
 // embedded in the image ref when the descriptor omits image-tag.
 func (i Info) EffectiveTag() string {

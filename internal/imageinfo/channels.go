@@ -181,7 +181,7 @@ func parseTables(reader io.Reader) (map[string]imageChannels, map[string][]drive
 // present — a host on the base image that could not switch back to it would
 // be stranded on a driver image.
 func convertDriverEntry(ref string, entry map[string][]string) ([]driverStreams, error) {
-	if strings.Contains(ref, ":") {
+	if hasTag(ref) {
 		return nil, fmt.Errorf("driver table key %q must be a registry path without a tag", ref)
 	}
 	if !strings.Contains(ref, "/") {
@@ -235,7 +235,7 @@ func convertEntry(ref string, entry rawImageChannels) (imageChannels, error) {
 	if ref == "" {
 		return imageChannels{}, fmt.Errorf("channel table has an entry with an empty image reference")
 	}
-	if strings.Contains(ref, ":") {
+	if hasTag(ref) {
 		return imageChannels{}, fmt.Errorf("channel table key %q must be a registry path without a tag", ref)
 	}
 	if !strings.Contains(ref, "/") {
