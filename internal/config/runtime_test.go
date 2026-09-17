@@ -223,6 +223,61 @@ func TestLoadAuthoritativeFailureLogsHighSignalDiagnostic(t *testing.T) {
 	}
 }
 
+func TestLoadDanglingAuthoritativeSymlinkFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "missing-target.yml")
+	link := filepath.Join(dir, "config.yml")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("creating dangling symlink: %v", err)
+	}
+	// The issue's reproduction: ReadFile follows the link and reports ENOENT,
+	// indistinguishable from an absent path without an Lstat on the candidate.
+	if _, err := os.ReadFile(link); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("setup: ReadFile(dangling symlink) err = %v, want ENOENT", err)
+	}
+	withConfigPaths(t, []string{link})
+
+	cfg, loadErr := Load()
+	if loadErr == nil {
+		t.Fatal("Load() error = nil, want authoritative failure for dangling symlink")
+	}
+	if loadErr.Kind != KindRead {
+		t.Fatalf("Load() error kind = %q, want %q", loadErr.Kind, KindRead)
+	}
+	if loadErr.Path != link {
+		t.Fatalf("Load() error path = %q, want %q", loadErr.Path, link)
+	}
+	if cfg == nil {
+		t.Fatal("Load() config = nil on authoritative failure")
+	}
+	// A dangling authoritative symlink must not fall back to package defaults:
+	// every known group stays disabled with a persistent error.
+	assertAllKnownGroupsDisabled(t, cfg)
+}
+
+func TestLoadDanglingHigherPriorityDoesNotFallThroughToValidCandidate(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "missing-target.yml")
+	high := filepath.Join(dir, "high.yml")
+	low := writeConfigFile(t, "system_page:\n  health_group:\n    enabled: true\n")
+	if err := os.Symlink(target, high); err != nil {
+		t.Fatalf("creating dangling symlink: %v", err)
+	}
+	withConfigPaths(t, []string{high, low})
+
+	cfg, loadErr := Load()
+	if loadErr == nil {
+		t.Fatal("Load() error = nil, want authoritative failure for dangling symlink")
+	}
+	if loadErr.Path != high {
+		t.Fatalf("Load() error path = %q, want the dangling %q", loadErr.Path, high)
+	}
+	if cfg.SystemPage["health_group"].Enabled {
+		t.Fatal("dangling authoritative symlink fell through to a valid lower-priority candidate")
+	}
+	assertAllKnownGroupsDisabled(t, cfg)
+}
+
 func TestLoadAllCandidatesAbsentReturnsDefaultsWithoutError(t *testing.T) {
 	dir := t.TempDir()
 	withConfigPaths(t, []string{
