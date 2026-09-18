@@ -83,36 +83,49 @@ func (s Stack) Accelerated() bool {
 // `--security-opt=label=disable` and GPU devices drops the only sandbox
 // boundary between the model server and the host).
 //
-// The digests below were recorded from quay.io on 2026-08-17. They go stale
-// by construction: to roll them, re-request each manifest
-// (`curl -sI https://quay.io/v2/ramalama/<name>/manifests/latest` ->
-// `Docker-Content-Digest`), replace the sha256 here, and re-run the aistack
-// tests. Do not swap a digest for a moving tag to "keep it current".
+// Each digest is the multi-arch INDEX (manifest list) digest, never an
+// architecture's child manifest. That distinction is load-bearing: CI's
+// matrix in .github/workflows/test.yml ships arm64 alongside amd64, and an
+// amd64 child digest is simply unpullable on an arm64 host. The index
+// digests below were resolved from quay.io on 2026-09-18.
+//
+// They go stale by construction. To roll one, request the manifest with the
+// index media types so the registry returns the list rather than an
+// architecture-specific child:
+//
+//	curl -sS -D - -o /tmp/m.json \
+//	  -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json' \
+//	  https://quay.io/v2/ramalama/<name>/manifests/latest
+//
+// Confirm the response's `mediaType` is an index or manifest list before
+// taking its `Docker-Content-Digest`, replace the sha256 here, and re-run the
+// aistack tests. Do not swap a digest for a moving tag to "keep it current",
+// and do not substitute a `.manifests[]` child digest.
 var stacks = map[gpu.Vendor]Stack{
 	gpu.VendorNVIDIA: {
 		Vendor:      gpu.VendorNVIDIA,
-		Image:       "quay.io/ramalama/cuda@sha256:498cbbac10d3ca8e97fa3e04bfbbd95f4a85f1395dbfcfed95171833568fefde",
+		Image:       "quay.io/ramalama/cuda@sha256:e6a6ccfe9e60ed05708a88eb3303711c188c155cee69500d21b9166871afba9e",
 		Accelerator: "CUDA",
 		Devices:     []string{"nvidia.com/gpu=all"},
 		PodmanArgs:  []string{"--security-opt=label=disable"},
 	},
 	gpu.VendorAMD: {
 		Vendor:      gpu.VendorAMD,
-		Image:       "quay.io/ramalama/rocm@sha256:0c5632e268ec4799e7f57e81c4b07f2c3357966711c17812d13ce29ef170b789",
+		Image:       "quay.io/ramalama/rocm@sha256:e592700576a4a5bc7c3eebbbe8af4ae2c2351adb05f03e66aaaa822b4d31298f",
 		Accelerator: "ROCm",
 		Devices:     []string{"/dev/kfd", "/dev/dri"},
 		PodmanArgs:  []string{"--security-opt=label=disable", "--group-add=video"},
 	},
 	gpu.VendorIntel: {
 		Vendor:      gpu.VendorIntel,
-		Image:       "quay.io/ramalama/intel-gpu@sha256:767e5472b7ca81ea9956b0ea920c773217b3a9d43afb51fe7e21719a2642d055",
+		Image:       "quay.io/ramalama/intel-gpu@sha256:02dc186b6eb9a4dba886cbdc05490e297ffee590b093c0293940273f663f025b",
 		Accelerator: "Intel oneAPI",
 		Devices:     []string{"/dev/dri"},
 		PodmanArgs:  []string{"--security-opt=label=disable"},
 	},
 	gpu.VendorNone: {
 		Vendor:      gpu.VendorNone,
-		Image:       "quay.io/ramalama/ramalama@sha256:24a518ba4a5bb7c149adb5742748cacbfe7845bc16a0fd228ab108870207c316",
+		Image:       "quay.io/ramalama/ramalama@sha256:a3c0ee8d06554add6808fffe7476a16db8c821de34949fa6213449ac9d95f9f3",
 		Accelerator: "CPU",
 	},
 }
