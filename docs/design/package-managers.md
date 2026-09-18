@@ -67,12 +67,18 @@ The outcomes are deliberately lossless and deterministic:
 `loadBrewBundles` on the Applications page calls discovery from a worker
 goroutine and applies every widget change through one
 `sgtk.RunOnMainThread` closure. `brew_bundles_group` is independent of
-`brew_group`, so this path neither reads nor refreshes the formulae/casks
-expanders. A successful live `BundleInstall` leaves the clicked row labelled
-`Installed` and permanently insensitive. A failed install restores the
-`Install` action. A successful dry-run uses
+`brew_group`, so this path never assumes the formulae/casks expanders exist.
+A successful live `BundleInstall` leaves the clicked row labelled `Installed`
+and permanently insensitive, then requests `loadHomebrewPackages()` because a
+bundle can install formulae and casks the current inventory snapshot predates.
+That refresh is safe in both configurations: `loadHomebrewPackages` nil-guards
+each expander, so it does nothing visible when `brew_group` is disabled, and
+it takes a `brewPackagesRefresh` generation, so a slower bundle-triggered
+refresh cannot overwrite newer rows. A failed install restores the `Install`
+action. A successful dry-run uses
 `actionmsg.BundleInstall(...).Complete == false`, shows an explicit preview,
-and restores the action because nothing was installed. Each row owns a
+and restores the action because nothing was installed — and for the same
+reason it does not refresh the inventory. Each row owns a
 `bundleview.InstallGate`, so a second callback cannot overlap a running
 install even if invoked independently of GTK's insensitive-button guard.
 
