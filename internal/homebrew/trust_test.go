@@ -84,32 +84,29 @@ func TestFormulaeGroupedByTap(t *testing.T) {
 func TestCasksGroupedByTap(t *testing.T) {
 	caskroom := t.TempDir()
 	// A cask installed from an untrusted tap: its receipt records the source
-	// tap, which is the authoritative origin current Homebrew writes.
-	writeFile(t, filepath.Join(caskroom, "somecask", "INSTALL_RECEIPT.json"),
+	// tap, which is the authoritative origin current Homebrew writes to
+	// <token>/.metadata/INSTALL_RECEIPT.json.
+	writeFile(t, filepath.Join(caskroom, "somecask", ".metadata", "INSTALL_RECEIPT.json"),
 		`{"source": {"tap": "ublue-os/tap"}}`)
-	// API-installed cask (homebrew/cask) is always trusted; no receipt tap.
-	writeFile(t, filepath.Join(caskroom, "codex", "INSTALL_RECEIPT.json"),
-		`{"installed_on_request": false}`)
+	// API-installed cask: the receipt still records homebrew/cask, which the
+	// trust check treats as trusted further up.
+	writeFile(t, filepath.Join(caskroom, "codex", ".metadata", "INSTALL_RECEIPT.json"),
+		`{"source": {"tap": "homebrew/cask"}}`)
 	// A cask from another untrusted tap.
-	writeFile(t, filepath.Join(caskroom, "multitap", "INSTALL_RECEIPT.json"),
+	writeFile(t, filepath.Join(caskroom, "multitap", ".metadata", "INSTALL_RECEIPT.json"),
 		`{"source": {"tap": "fresh-org/tap"}}`)
 	// Cask with no receipt is skipped silently (not attributed to any tap).
 	if err := os.MkdirAll(filepath.Join(caskroom, "broke"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
-	byTap := installedCasksByTap(caskroom)
-	if got := byTap["ublue-os/tap"]; !reflect.DeepEqual(got, []string{"ublue-os/tap/somecask"}) {
-		t.Errorf("ublue-os/tap = %v", got)
+	want := map[string][]string{
+		"ublue-os/tap":  {"ublue-os/tap/somecask"},
+		"homebrew/cask": {"homebrew/cask/codex"},
+		"fresh-org/tap": {"fresh-org/tap/multitap"},
 	}
-	if _, ok := byTap["homebrew/cask"]; ok {
-		t.Error("API cask should not be attributed to any tap")
-	}
-	if got := byTap["fresh-org/tap"]; !reflect.DeepEqual(got, []string{"fresh-org/tap/multitap"}) {
-		t.Errorf("fresh-org/tap = %v, want [fresh-org/tap/multitap]", got)
-	}
-	if _, ok := byTap["stale-org/tap"]; ok {
-		t.Error("cask with no receipt should not be attributed to any tap")
+	if got := installedCasksByTap(caskroom); !reflect.DeepEqual(got, want) {
+		t.Errorf("installedCasksByTap() = %v, want %v", got, want)
 	}
 }
 

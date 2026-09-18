@@ -80,13 +80,15 @@ func installedFormulaeByTap(cellarDir string) map[string][]string {
 }
 
 // installedCasksByTap maps tap name -> qualified installed cask tokens by
-// reading each cask's INSTALL_RECEIPT.json, whose source.tap field is the
-// authoritative origin Homebrew records at install time. This mirrors
-// installedFormulaeByTap: the receipt is the only reliable source, because
-// brew itself refuses to load (and therefore list) casks from untrusted
-// taps. The older versioned Casks/<token>.json metadata is not used: current
-// Homebrew no longer records the source tap there, so casks from untrusted
-// taps would otherwise be silently omitted from the remediation UI.
+// reading each cask's .metadata/INSTALL_RECEIPT.json (the path
+// Cask::Tab.create writes: <prefix>/Caskroom/<token>/.metadata/
+// INSTALL_RECEIPT.json), whose source.tap field is the authoritative origin
+// Homebrew records at install time. This mirrors installedFormulaeByTap: the
+// receipt is the only reliable source, because brew itself refuses to load
+// (and therefore list) casks from untrusted taps. The older versioned
+// Casks/<token>.json metadata is not used: current Homebrew no longer records
+// the source tap there, so casks from untrusted taps would otherwise be
+// silently omitted from the remediation UI.
 func installedCasksByTap(caskroomDir string) map[string][]string {
 	byTap := make(map[string][]string)
 	entries, err := os.ReadDir(caskroomDir)
@@ -98,7 +100,7 @@ func installedCasksByTap(caskroomDir string) map[string][]string {
 			continue
 		}
 		token := entry.Name()
-		receiptPath := filepath.Join(caskroomDir, token, "INSTALL_RECEIPT.json")
+		receiptPath := filepath.Join(caskroomDir, token, ".metadata", "INSTALL_RECEIPT.json")
 		data, err := os.ReadFile(receiptPath)
 		if err != nil {
 			continue
