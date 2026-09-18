@@ -99,10 +99,7 @@ func ParseConfig(data []byte) State {
 	// A malformed config is treated as not wired, never as wired.
 	_ = yaml.Unmarshal(data, &cfg)
 
-	var state State
-	if cfg.Provider != "" {
-		state.Provider = cfg.Provider
-	}
+	state := State{Provider: cfg.Provider}
 	if ext, ok := cfg.Extensions["linux-tools"]; ok && ext.enabled() && ext.valid() {
 		state.Wired = true
 	}

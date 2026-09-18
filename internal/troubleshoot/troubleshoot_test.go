@@ -68,6 +68,14 @@ func TestParseConfig(t *testing.T) {
 			data:      "extensions:\n  linux-tools:\n    enabled: true\n    type: stdio\n",
 			wantWired: false,
 		},
+		{
+			// Issue #57's literal repro: a stray top-level key that merely
+			// shares the extension's name wires up nothing.
+			name:         "stray top-level linux-tools key",
+			data:         "GOOSE_PROVIDER: anthropic\nlinux-tools: disabled\n",
+			wantWired:    false,
+			wantProvider: "anthropic",
+		},
 	}
 
 	for _, tt := range tests {
