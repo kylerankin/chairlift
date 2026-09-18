@@ -1215,9 +1215,12 @@ nothing. `Detect` therefore reads the file for the `linux-tools` extension,
 and `Setup` returns the state it actually left rather than the one it aimed
 for — `TroubleshootSetupSubtitle` has a case for exactly that outcome.
 
-`ParseConfig` scans lines instead of decoding YAML on purpose: ChairLift
-neither owns nor rewrites that file, needs only two facts from it, and a line
-scan cannot corrupt a document another tool wrote. The provider is read and
+`ParseConfig` decodes the file as YAML rather than scanning lines: a
+`linux-tools` key anywhere is not the same fact as an enabled `linux-tools`
+extension under `extensions:` carrying a type and a command, and only the
+second one means the feature can actually run. The decode is read-only —
+ChairLift still neither owns nor rewrites that file — and a malformed or
+extension-less config yields `Wired` false. The provider is read and
 displayed, never written — the default the setup script installs is
 `gemini-cli`, which sends system details to Google, and the row says so.
 
