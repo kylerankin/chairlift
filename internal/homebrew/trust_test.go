@@ -7,7 +7,6 @@ import (
 	"reflect"
 	"sort"
 	"testing"
-	"time"
 )
 
 const tapInfoJSON = `[
@@ -84,42 +83,30 @@ func TestFormulaeGroupedByTap(t *testing.T) {
 
 func TestCasksGroupedByTap(t *testing.T) {
 	caskroom := t.TempDir()
-	writeFile(t, filepath.Join(caskroom, "somecask", ".metadata", "1.0", "20260101", "Casks", "somecask.json"),
-		`{"token": "somecask", "tap": "ublue-os/tap"}`)
-	// API-installed cask without Casks/*.json metadata is skipped (trusted)
+	// A cask installed from an untrusted tap: its receipt records the source
+	// tap, which is the authoritative origin current Homebrew writes to
+	// <token>/.metadata/INSTALL_RECEIPT.json.
+	writeFile(t, filepath.Join(caskroom, "somecask", ".metadata", "INSTALL_RECEIPT.json"),
+		`{"source": {"tap": "ublue-os/tap"}}`)
+	// API-installed cask: the receipt still records homebrew/cask, which the
+	// trust check treats as trusted further up.
 	writeFile(t, filepath.Join(caskroom, "codex", ".metadata", "INSTALL_RECEIPT.json"),
-		`{"loaded_from_api": true}`)
-
-	// Two metadata snapshots whose directory names sort in the opposite
-	// order of their actual chronology ("9" sorts lexically after "10",
-	// even though it is the older snapshot). Each snapshot claims a
-	// different tap so we can tell which one installedCasksByTap picked.
-	oldMetaPath := filepath.Join(caskroom, "multitap", ".metadata", "9", "20260101", "Casks", "multitap.json")
-	newMetaPath := filepath.Join(caskroom, "multitap", ".metadata", "10", "20260201", "Casks", "multitap.json")
-	writeFile(t, oldMetaPath, `{"token": "multitap", "tap": "stale-org/tap"}`)
-	writeFile(t, newMetaPath, `{"token": "multitap", "tap": "fresh-org/tap"}`)
-
-	oldTime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	newTime := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
-	if err := os.Chtimes(oldMetaPath, oldTime, oldTime); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chtimes(newMetaPath, newTime, newTime); err != nil {
+		`{"source": {"tap": "homebrew/cask"}}`)
+	// A cask from another untrusted tap.
+	writeFile(t, filepath.Join(caskroom, "multitap", ".metadata", "INSTALL_RECEIPT.json"),
+		`{"source": {"tap": "fresh-org/tap"}}`)
+	// Cask with no receipt is skipped silently (not attributed to any tap).
+	if err := os.MkdirAll(filepath.Join(caskroom, "broke"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
-	byTap := installedCasksByTap(caskroom)
-	if got := byTap["ublue-os/tap"]; !reflect.DeepEqual(got, []string{"ublue-os/tap/somecask"}) {
-		t.Errorf("ublue-os/tap = %v", got)
+	want := map[string][]string{
+		"ublue-os/tap":  {"ublue-os/tap/somecask"},
+		"homebrew/cask": {"homebrew/cask/codex"},
+		"fresh-org/tap": {"fresh-org/tap/multitap"},
 	}
-	if _, ok := byTap["homebrew/cask"]; ok {
-		t.Error("API cask should not be attributed to any tap")
-	}
-	if got := byTap["fresh-org/tap"]; !reflect.DeepEqual(got, []string{"fresh-org/tap/multitap"}) {
-		t.Errorf("fresh-org/tap (chronologically newest, lexically first dir) = %v, want [fresh-org/tap/multitap]", got)
-	}
-	if _, ok := byTap["stale-org/tap"]; ok {
-		t.Error("stale metadata (lexically last dir but chronologically older) should not win attribution")
+	if got := installedCasksByTap(caskroom); !reflect.DeepEqual(got, want) {
+		t.Errorf("installedCasksByTap() = %v, want %v", got, want)
 	}
 }
 
