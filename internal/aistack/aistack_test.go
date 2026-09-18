@@ -507,30 +507,35 @@ func TestApplyOverridesRejectsTheWholeOverrideWhenAnyEntryIsInvalid(t *testing.T
 	// Map iteration order is nondeterministic, so this is the case the bug hid:
 	// with the old per-entry mutation a valid earlier entry could survive even
 	// though a later entry was rejected.
-	nvidiaBefore := Select(gpu.Set{NVIDIA: true}).Image
-	amdBefore := Select(gpu.Set{AMD: true}).Image
-	modelBefore := servedModel
+	originalNVIDIA := stacks[gpu.VendorNVIDIA]
+	originalAMD := stacks[gpu.VendorAMD]
+	originalModel := servedModel
 	t.Cleanup(func() {
-		stacks[gpu.VendorNVIDIA] = Stack{Vendor: gpu.VendorNVIDIA, Image: nvidiaBefore, Accelerator: "CUDA", Devices: stacks[gpu.VendorNVIDIA].Devices, PodmanArgs: stacks[gpu.VendorNVIDIA].PodmanArgs}
-		stacks[gpu.VendorAMD] = Stack{Vendor: gpu.VendorAMD, Image: amdBefore, Accelerator: "ROCm", Devices: stacks[gpu.VendorAMD].Devices, PodmanArgs: stacks[gpu.VendorAMD].PodmanArgs}
-		servedModel = modelBefore
+		stacks[gpu.VendorNVIDIA] = originalNVIDIA
+		stacks[gpu.VendorAMD] = originalAMD
+		servedModel = originalModel
 	})
 
-	err := ApplyOverrides(
-		map[string]string{"nvidia": "registry.example.internal/ramalama/cuda:pinned", "matrox": "example.com/x:1"},
-		"ollama://qwen2.5:7b",
-	)
-	if err == nil {
-		t.Fatal("ApplyOverrides accepted an override containing an unknown vendor")
-	}
-	if got := Select(gpu.Set{NVIDIA: true}).Image; got != nvidiaBefore {
-		t.Errorf("the valid entry was committed anyway: image = %q", got)
-	}
-	if got := Select(gpu.Set{AMD: true}).Image; got != amdBefore {
-		t.Errorf("the amd stack was disturbed: image = %q", got)
-	}
-	if servedModel != modelBefore {
-		t.Errorf("the model was committed anyway: model = %q", servedModel)
+	// Map iteration order is randomized per range, so a single attempt only
+	// catches the per-entry mutation about half the time. Repeat until the
+	// invalid entry has certainly been reached after the valid one.
+	for range 32 {
+		err := ApplyOverrides(
+			map[string]string{"nvidia": "registry.example.internal/ramalama/cuda:pinned", "matrox": "example.com/x:1"},
+			"ollama://qwen2.5:7b",
+		)
+		if err == nil {
+			t.Fatal("ApplyOverrides accepted an override containing an unknown vendor")
+		}
+		if got := Select(gpu.Set{NVIDIA: true}).Image; got != originalNVIDIA.Image {
+			t.Fatalf("the valid entry was committed anyway: image = %q", got)
+		}
+		if got := Select(gpu.Set{AMD: true}).Image; got != originalAMD.Image {
+			t.Fatalf("the amd stack was disturbed: image = %q", got)
+		}
+		if servedModel != originalModel {
+			t.Fatalf("the model was committed anyway: model = %q", servedModel)
+		}
 	}
 }
 
