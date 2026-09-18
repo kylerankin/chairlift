@@ -26,7 +26,7 @@ func TestSelectCoversEveryHardwareCase(t *testing.T) {
 			name:            "nvidia workstation",
 			set:             gpu.Set{NVIDIA: true},
 			wantVendor:      gpu.VendorNVIDIA,
-			wantImage:       "quay.io/ramalama/cuda:latest",
+			wantImage:       "quay.io/ramalama/cuda@sha256:e6a6ccfe9e60ed05708a88eb3303711c188c155cee69500d21b9166871afba9e",
 			wantAccelerator: "CUDA",
 			wantAccelerated: true,
 			wantDevices:     []string{"nvidia.com/gpu=all"},
@@ -35,7 +35,7 @@ func TestSelectCoversEveryHardwareCase(t *testing.T) {
 			name:            "amd workstation",
 			set:             gpu.Set{AMD: true},
 			wantVendor:      gpu.VendorAMD,
-			wantImage:       "quay.io/ramalama/rocm:latest",
+			wantImage:       "quay.io/ramalama/rocm@sha256:e592700576a4a5bc7c3eebbbe8af4ae2c2351adb05f03e66aaaa822b4d31298f",
 			wantAccelerator: "ROCm",
 			wantAccelerated: true,
 			wantDevices:     []string{"/dev/kfd", "/dev/dri"},
@@ -44,7 +44,7 @@ func TestSelectCoversEveryHardwareCase(t *testing.T) {
 			name:            "intel laptop",
 			set:             gpu.Set{Intel: true},
 			wantVendor:      gpu.VendorIntel,
-			wantImage:       "quay.io/ramalama/intel-gpu:latest",
+			wantImage:       "quay.io/ramalama/intel-gpu@sha256:02dc186b6eb9a4dba886cbdc05490e297ffee590b093c0293940273f663f025b",
 			wantAccelerator: "Intel oneAPI",
 			wantAccelerated: true,
 			wantDevices:     []string{"/dev/dri"},
@@ -53,18 +53,21 @@ func TestSelectCoversEveryHardwareCase(t *testing.T) {
 			name:            "no gpu",
 			set:             gpu.Set{},
 			wantVendor:      gpu.VendorNone,
-			wantImage:       "quay.io/ramalama/ramalama:latest",
+			wantImage:       "quay.io/ramalama/ramalama@sha256:a3c0ee8d06554add6808fffe7476a16db8c821de34949fa6213449ac9d95f9f3",
 			wantAccelerator: "CPU",
 			wantAccelerated: false,
 		},
 		{
 			// The hybrid laptop is the case a vendor-directory catalog gets
 			// wrong: it has an Intel chip and an NVIDIA chip, and the model
-			// should run on the NVIDIA one.
+			// should run on the NVIDIA one. What this case proves is the
+			// selection, not the digest: leaving wantImage empty keeps a
+			// digest roll from having to be typed twice, and the pinned shape
+			// of every reference is asserted once by
+			// TestEveryStackIsPinnedByAnImmutableDigest.
 			name:            "hybrid laptop prefers the discrete card",
 			set:             gpu.Set{Intel: true, NVIDIA: true},
 			wantVendor:      gpu.VendorNVIDIA,
-			wantImage:       "quay.io/ramalama/cuda:latest",
 			wantAccelerator: "CUDA",
 			wantAccelerated: true,
 			wantDevices:     []string{"nvidia.com/gpu=all"},
@@ -78,7 +81,7 @@ func TestSelectCoversEveryHardwareCase(t *testing.T) {
 			if stack.Vendor != tt.wantVendor {
 				t.Errorf("vendor = %q, want %q", stack.Vendor, tt.wantVendor)
 			}
-			if stack.Image != tt.wantImage {
+			if tt.wantImage != "" && stack.Image != tt.wantImage {
 				t.Errorf("image = %q, want %q", stack.Image, tt.wantImage)
 			}
 			if stack.Accelerator != tt.wantAccelerator {
@@ -462,7 +465,7 @@ func TestApplyOverridesReplacesTheImageAndModel(t *testing.T) {
 	}
 
 	// An override for one vendor leaves the others alone.
-	if Select(gpu.Set{AMD: true}).Image != "quay.io/ramalama/rocm:latest" {
+	if Select(gpu.Set{AMD: true}).Image != "quay.io/ramalama/rocm@sha256:e592700576a4a5bc7c3eebbbe8af4ae2c2351adb05f03e66aaaa822b4d31298f" {
 		t.Error("overriding nvidia disturbed the amd stack")
 	}
 }
@@ -543,7 +546,23 @@ func TestNoOverridesIsANoOp(t *testing.T) {
 	if err := ApplyOverrides(nil, ""); err != nil {
 		t.Fatalf("ApplyOverrides(nil, \"\"): %v", err)
 	}
-	if Select(gpu.Set{}).Image != "quay.io/ramalama/ramalama:latest" {
+	if Select(gpu.Set{}).Image != "quay.io/ramalama/ramalama@sha256:a3c0ee8d06554add6808fffe7476a16db8c821de34949fa6213449ac9d95f9f3" {
 		t.Error("an empty override changed the CPU stack")
+	}
+}
+
+// TestEveryStackIsPinnedByAnImmutableDigest guards the property the exact
+// digests cannot: a future edit that "refreshes" a reference back to a moving
+// tag reopens issue #8, because the unit runs with SELinux confinement
+// disabled and GPU devices attached and would adopt whatever the tag points
+// at on the next Restart=on-failure pull.
+func TestEveryStackIsPinnedByAnImmutableDigest(t *testing.T) {
+	for vendor, stack := range stacks {
+		if !strings.Contains(stack.Image, "@sha256:") {
+			t.Errorf("%s image %q is not pinned by digest", vendor, stack.Image)
+		}
+		if strings.Contains(stack.Image, ":latest") {
+			t.Errorf("%s image %q uses the mutable latest tag", vendor, stack.Image)
+		}
 	}
 }

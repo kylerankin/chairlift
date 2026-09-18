@@ -1268,6 +1268,9 @@ by the hardware. RamaLama publishes a per-accelerator image
 (`quay.io/ramalama/{cuda,rocm,intel-gpu,ramalama}`), so `Select(gpu.Set)` is
 the entire selection logic and every host — including Intel and GPU-less
 ones, which bluefinctl's catalog cannot serve at all — gets a working answer.
+Each of those four references is pinned to a multi-arch index digest rather
+than `:latest`, so a re-pushed tag cannot silently replace the image and the
+pin still resolves on CI's arm64 matrix leg.
 
 The package splits the same way the rest of the codebase does: `Select` and
 `RenderUnit` are pure and table-tested across all four hardware cases plus
