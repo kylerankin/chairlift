@@ -68,6 +68,7 @@ func (uh *UserHome) openURL(url string) {
 
 	go func() {
 		if err := cmd.Wait(); err != nil {
+			log.Printf("Failed to open URL %s: %v", url, err)
 			// xdg-open exits nonzero when the session has no URL handler or the
 			// URL is malformed; surface that async failure instead of silently
 			// dropping it. Must run on the GTK main thread.
