@@ -25,6 +25,8 @@ func TestApplicationsPageWiresTypedSearchInstallState(t *testing.T) {
 		`Search for and install Homebrew formulae and casks`,
 		`generation := uh.brewPackagesRefresh.Begin()`,
 		`if !uh.brewPackagesRefresh.IsCurrent(generation)`,
+		`generation := uh.flatpakPackagesRefresh.Begin()`,
+		`if !uh.flatpakPackagesRefresh.IsCurrent(generation)`,
 		`generation := uh.searchRefresh.Begin()`,
 		`if !uh.searchRefresh.IsCurrent(generation)`,
 		`uh.searchResultRows.Clear(func(row *adw.ActionRow)`,
