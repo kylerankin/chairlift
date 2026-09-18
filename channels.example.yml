@@ -23,7 +23,11 @@
 #
 # Every entry is validated before it is applied. A file that would produce a
 # reference ChairLift cannot switch back from, or that maps to a tag the
-# image does not declare, is rejected whole rather than partly applied.
+# image does not declare, is rejected whole rather than partly applied. The
+# file must also contain exactly one YAML document: content after a `---`
+# boundary is rejected rather than silently ignored, because the privileged
+# helper resolves `bootc switch` targets through this same table and must
+# never resolve a mapping the GUI did not read.
 
 images:
   # A TunaOS desktop image published with latest/stable/testing streams.

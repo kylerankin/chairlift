@@ -170,6 +170,23 @@ func parseTables(reader io.Reader) (map[string]imageChannels, map[string][]drive
 		return nil, nil, fmt.Errorf("parsing channel table: %w", err)
 	}
 
+	// The channel table decides image resolution on the privileged path, so
+	// content that the parser would otherwise silently ignore is dangerous:
+	// a second YAML document after `---` could carry a different mapping (or
+	// malformed YAML) than the one the helper resolved. Accept exactly one
+	// document and reject anything the decoder finds after it.
+	var extra any
+	switch err := decoder.Decode(&extra); err {
+	case io.EOF:
+		// No second document: exactly one document, as required.
+	case nil:
+		// A second document decoded successfully — still one too many.
+		return nil, nil, errors.New("channel table must contain exactly one YAML document; found additional content after the first document boundary")
+	default:
+		// A second document that is itself malformed YAML.
+		return nil, nil, fmt.Errorf("parsing channel table: %w", err)
+	}
+
 	table := builtinTable()
 	for ref, entry := range raw.Images {
 		channels, err := convertEntry(ref, entry)

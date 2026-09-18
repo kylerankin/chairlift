@@ -1384,12 +1384,15 @@ this same table, so a user-writable table would let a local user redirect an
 authenticated system switch. Both the GUI and the helper call
 `imageinfo.LoadSystemTable()` at startup so the two always agree. A file that
 fails validation is rejected whole — a half-applied mapping is exactly the
-situation that produces a wrong switch target. The file configures release
-channels under `images:` and graphics-driver variants under `drivers:`. Driver
-entries map a base image registry path to supported driver flavours
-(`standard` required, `nvidia`, `nvidia-open`) and their published streams.
-`channels.example.yml` documents both formats and is installed to
-`/usr/share/doc/chairlift/`; no live table is ever packaged.
+situation that produces a wrong switch target — and the file must contain
+exactly one YAML document, so content after a `---` boundary is rejected
+rather than silently ignored: the helper resolves its switch target through
+this same table and must never resolve a mapping the GUI did not read. The
+file configures release channels under `images:` and graphics-driver variants
+under `drivers:`. Driver entries map a base image registry path to supported
+driver flavours (`standard` required, `nvidia`, `nvidia-open`) and their
+published streams. `channels.example.yml` documents both formats and is
+installed to `/usr/share/doc/chairlift/`; no live table is ever packaged.
 
 Separately, `polkitd` reads application policies from the fixed directory
 `/usr/share/polkit-1/actions` — not `$XDG_DATA_DIRS`, not any
