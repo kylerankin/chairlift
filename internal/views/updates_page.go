@@ -11,6 +11,7 @@ import (
 	"github.com/projectbluefin/chairlift/internal/dryrun"
 	"github.com/projectbluefin/chairlift/internal/flatpak"
 	"github.com/projectbluefin/chairlift/internal/homebrew"
+	"github.com/projectbluefin/chairlift/internal/progresslog"
 	"github.com/projectbluefin/chairlift/internal/sysupdate"
 	"github.com/projectbluefin/chairlift/internal/ublue"
 	"github.com/projectbluefin/chairlift/internal/views/actionmsg"
@@ -676,6 +677,8 @@ func (uh *UserHome) onBootcStageClicked() {
 		}()
 
 		var lastMessage string
+		log := progresslog.New(progresslog.DefaultCap)
+		var logRows []*adw.ActionRow
 		for event := range progressCh {
 			evt := event
 			if evt.Type == bootc.EventMessage {
@@ -684,10 +687,18 @@ func (uh *UserHome) onBootcStageClicked() {
 			sgtk.RunOnMainThread(func() {
 				switch evt.Type {
 				case bootc.EventMessage:
+					// Cap retained rows: drop the oldest once the buffer overflows
+					// so verbose staging cannot accumulate unbounded widgets.
+					overflow := log.Add(evt.Message)
 					msgRow := adw.NewActionRow()
 					msgRow.SetTitle(evt.Message)
 					msgRow.SetSubtitle(time.Now().Format("15:04:05"))
 					logExpander.AddRow(&msgRow.Widget)
+					logRows = append(logRows, msgRow)
+					if overflow {
+						logExpander.Remove(&logRows[0].Widget)
+						logRows = logRows[1:]
+					}
 					activityRow.SetSubtitle(evt.Message)
 				case bootc.EventComplete:
 					activityRow.SetSubtitle("Complete")
@@ -815,6 +826,8 @@ func (uh *UserHome) onSysupdateStageClicked() {
 		}()
 
 		var lastMessage string
+		log := progresslog.New(progresslog.DefaultCap)
+		var logRows []*adw.ActionRow
 		for event := range progressCh {
 			evt := event
 			if evt.Type == sysupdate.EventMessage {
@@ -823,10 +836,18 @@ func (uh *UserHome) onSysupdateStageClicked() {
 			sgtk.RunOnMainThread(func() {
 				switch evt.Type {
 				case sysupdate.EventMessage:
+					// Cap retained rows: drop the oldest once the buffer overflows
+					// so verbose staging cannot accumulate unbounded widgets.
+					overflow := log.Add(evt.Message)
 					msgRow := adw.NewActionRow()
 					msgRow.SetTitle(evt.Message)
 					msgRow.SetSubtitle(time.Now().Format("15:04:05"))
 					logExpander.AddRow(&msgRow.Widget)
+					logRows = append(logRows, msgRow)
+					if overflow {
+						logExpander.Remove(&logRows[0].Widget)
+						logRows = logRows[1:]
+					}
 					activityRow.SetSubtitle(evt.Message)
 				case sysupdate.EventComplete:
 					activityRow.SetSubtitle("Complete")
