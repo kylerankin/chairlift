@@ -24,7 +24,11 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: stable
+          # Pinned to the exact toolchain in go.mod and every other job —
+          # `stable` would let an unchanged tag rebuild against a newer
+          # compiler. See ci pin Go and GoReleaser in the write-capable
+          # release job (#88).
+          go-version: "1.26.6"
       # GoReleaser OSS (free): publishes binaries, archives, and the rpm/deb/apk
       # nFPM packages straight to the GitHub Release for this tag. No Pro
       # license or external package-repo credentials needed.
@@ -32,8 +36,9 @@ jobs:
         uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
           distribution: goreleaser
-          # 'latest', 'nightly', or a semver
-          version: "~> v2"
+          # Exact reviewed release (latest stable v2 at time of #88);
+          # `~> v2` would let the same tag publish under a newer GoReleaser.
+          version: "v2.18.2"
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
