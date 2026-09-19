@@ -2,7 +2,7 @@
 name: gtk-headless-testing
 description: Use when deciding where tests can run without puregotk or GTK libraries.
 version: 1.0.0
-last_updated: 2026-09-08
+last_updated: 2026-09-19
 tags:
   - testing
   - gtk
@@ -66,6 +66,20 @@ The only safe signal is: the package does not import puregotk at all.
 itself plus the compliance review — do not add a `views`-package test for it.
 If a behavior genuinely needs a test, that is a signal to extract its decidable
 core into a puregotk-free package.
+
+**Invariants that must stay in the GTK package are enforced by a static AST
+scan in `internal/installcheck`.** Some rules — e.g. "every destructive action
+reachable from `internal/views` passes through a confirmation path" (the
+Powerwash/Factory Reset invariant in AGENTS.md) — live in the widget-wiring code
+and cannot be extracted without losing the very wiring they guard. Rather than
+add a `_test.go` to a puregotk package, write a headless scan in
+`internal/installcheck` (pure, under `internal/...`, so the gates run it) that
+parses the views sources with `go/parser` and asserts the invariant holds. The
+model is `TestDestructiveActionsRequireConfirmation`: it walks each `UserHome` method that calls a destructive run and fails unless
+that method both shows an `adw.NewAlertDialog` and gates on the `"confirm"`
+response. Parse with `parser.ParseDir` (this toolchain has no
+`parser.ParseFiles`). If a guard can be expressed as a source-level assertion,
+it belongs here, not in a GTK test binary.
 
 **Learned from:** issue #57's first mill run — a `_test.go` added to
 `internal/views` passed locally (linuxbrew had graphene) but panicked on CI at
