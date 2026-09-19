@@ -435,7 +435,7 @@ func Update(ctx context.Context) error {
 	defer cancel()
 
 	if dryrun.Enabled() {
-		msg := fmt.Sprintf("[DRY-RUN] Would execute: brew update")
+		msg := "[DRY-RUN] Would execute: brew update"
 		log.Println(msg)
 		return nil
 	}
