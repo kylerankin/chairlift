@@ -105,7 +105,7 @@ func Load() (*Config, *LoadError) {
 			log.Printf("Loaded config from %s", path)
 			return cfg, nil
 		}
-		if err.Kind == KindRead && errors.Is(err, fs.ErrNotExist) {
+		if err.Kind == KindRead && errors.Is(err, fs.ErrNotExist) && !danglingAuthoritativeSymlink(path) {
 			continue
 		}
 
@@ -142,6 +142,22 @@ func loadResolvedPath(path string) (*Config, *LoadError) {
 	}
 
 	return mergeConfig(defaultConfig(), raw), nil
+}
+
+// danglingAuthoritativeSymlink reports whether path is a symlink whose target
+// is missing. os.ReadFile follows the link and fails with ENOENT for such a
+// link exactly as it does for an absent path, so an Lstat on the candidate is
+// the only way to tell a present-but-unreadable authoritative symlink apart
+// from a genuinely missing candidate. A missing directory entry returns false
+// here (Lstat also fails ENOENT), so Load() still advances to the next
+// candidate for it; a regular file that exists is never read as ENOENT, so
+// the non-ENOENT branch already fails it closed.
+func danglingAuthoritativeSymlink(path string) bool {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return false
+	}
+	return info.Mode()&os.ModeSymlink != 0
 }
 
 // disabledConfig retains the canonical pages, groups, and non-visibility

@@ -108,6 +108,35 @@ images:
 	}
 }
 
+// A registry port in an image key is a colon before the first slash, not a
+// tag, so a private registry reference must be accepted by the channel table.
+func TestOverrideAcceptsARegistryPort(t *testing.T) {
+	applyTable(t, `
+images:
+  registry.example:5000/team/infra:
+    stable_tags: [latest, stable]
+    testing_tags: [testing]
+    to_testing:
+      latest: testing
+      stable: testing
+    to_stable:
+      testing: stable
+`)
+
+	info := Info{Name: "infra", Tag: "latest", Ref: "ostree-image-signed:docker://registry.example:5000/team/infra"}
+	if got := info.Channel(); got != ChannelStable {
+		t.Errorf("Channel() = %q, want %q", got, ChannelStable)
+	}
+
+	target, ok := info.SwitchTarget(ChannelTesting)
+	if !ok {
+		t.Fatal("SwitchTarget(testing) ok = false, want true for a registry-port override")
+	}
+	if target != "registry.example:5000/team/infra:testing" {
+		t.Errorf("SwitchTarget(testing) = %q, want %q", target, "registry.example:5000/team/infra:testing")
+	}
+}
+
 // Every rejection below would otherwise produce a `bootc switch` at a
 // reference that does not exist, or a one-way switch a host cannot undo.
 func TestParseTableRejectsUnusableOverrides(t *testing.T) {
@@ -129,6 +158,11 @@ func TestParseTableRejectsUnusableOverrides(t *testing.T) {
 		{
 			name:     "key carries a tag",
 			document: "images:\n  ghcr.io/x/y:latest:\n    stable_tags: [latest]\n    testing_tags: [testing]\n",
+			wantHas:  "without a tag",
+		},
+		{
+			name:     "tag after a registry port",
+			document: "images:\n  registry.example:5000/x/y:latest:\n    stable_tags: [latest]\n    testing_tags: [testing]\n",
 			wantHas:  "without a tag",
 		},
 		{
@@ -175,6 +209,46 @@ func TestParseTableAcceptsAnEmptyDocument(t *testing.T) {
 		if !reflect.DeepEqual(table, builtinTable()) {
 			t.Errorf("ParseTable(%q) changed the table, want the built-ins unchanged", document)
 		}
+	}
+}
+
+// A file with more than one YAML document (content after `---`) is rejected
+// wholesale: the parser decodes only the first document, so a second mapping
+// or malformed document would otherwise be silently dropped — exactly the
+// situation that could hide a different privileged image-resolution table.
+func TestParseTableRejectsAdditionalYAMLDocuments(t *testing.T) {
+	tests := []struct {
+		name     string
+		document string
+		wantHas  string
+	}{
+		{
+			name:     "additional mapping document",
+			document: tunaOSTable + "---\nimages:\n  ghcr.io/other/os:\n    stable_tags: [latest]\n    testing_tags: [testing]\n    to_testing:\n      latest: testing\n    to_stable:\n      testing: latest\n",
+			wantHas:  "exactly one YAML document",
+		},
+		{
+			name:     "additional empty document",
+			document: tunaOSTable + "---\n",
+			wantHas:  "exactly one YAML document",
+		},
+		{
+			name:     "malformed trailing document",
+			document: tunaOSTable + "---\n: : : not yaml\n",
+			wantHas:  "parsing channel table",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := ParseTable(strings.NewReader(test.document))
+			if err == nil {
+				t.Fatal("ParseTable() error = nil, want a rejection for additional YAML documents")
+			}
+			if !strings.Contains(err.Error(), test.wantHas) {
+				t.Errorf("ParseTable() error = %q, want it to mention %q", err, test.wantHas)
+			}
+		})
 	}
 }
 
@@ -257,6 +331,44 @@ func TestLoadTableLeavesTheActiveTableOnError(t *testing.T) {
 	}
 }
 
+// The views fail closed when the authoritative table is broken, so
+// SystemTableError must distinguish a rejected override from a clean load.
+func TestSystemTableErrorTracksTheLastLoad(t *testing.T) {
+	dir := t.TempDir()
+	broken := filepath.Join(dir, "broken.yml")
+	if err := os.WriteFile(broken, []byte("images:\n  ghcr.io/x/y:\n    stable_tags: [latest]\n"), 0o644); err != nil {
+		t.Fatalf("writing broken table: %v", err)
+	}
+	clean := filepath.Join(dir, "clean.yml")
+	if err := os.WriteFile(clean, []byte(tunaOSTable), 0o644); err != nil {
+		t.Fatalf("writing clean table: %v", err)
+	}
+
+	t.Cleanup(ResetTable)
+
+	if _, err := LoadTable([]string{broken}); err == nil {
+		t.Fatal("LoadTable() error = nil, want a rejection for the broken table")
+	}
+	if SystemTableError() == "" {
+		t.Error("SystemTableError() = \"\", want a message after a broken load")
+	}
+
+	// A subsequent clean load clears the error.
+	if _, err := LoadTable([]string{clean}); err != nil {
+		t.Fatalf("LoadTable() error = %v, want nil for the clean table", err)
+	}
+	if SystemTableError() != "" {
+		t.Errorf("SystemTableError() = %q, want \"\" after a clean load", SystemTableError())
+	}
+
+	// Reset restores the zero state too.
+	_, _ = LoadTable([]string{broken})
+	ResetTable()
+	if SystemTableError() != "" {
+		t.Errorf("SystemTableError() = %q, want \"\" after ResetTable", SystemTableError())
+	}
+}
+
 // The GUI and the privileged helper must resolve the same table, so both
 // read the same fixed, root-owned locations. A user-writable candidate here
 // would let a local user redirect a PolicyKit-authenticated bootc switch.
@@ -325,6 +437,35 @@ drivers:
 	}
 }
 
+func TestDriverOverrideAcceptsARegistryPort(t *testing.T) {
+	t.Cleanup(ResetTable)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "channels.yml")
+	if err := os.WriteFile(path, []byte(`
+drivers:
+  registry.example:5000/team/infra:
+    standard: [latest]
+    nvidia: [latest]
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := LoadTable([]string{path}); err != nil {
+		t.Fatalf("LoadTable: %v", err)
+	}
+
+	drivers := AvailableDrivers("registry.example:5000/team/infra", "latest")
+	if len(drivers) != 2 || drivers[0] != DriverStandard || drivers[1] != DriverNVIDIA {
+		t.Fatalf("AvailableDrivers = %v, want [standard nvidia]", drivers)
+	}
+
+	target, ok := DriverTarget("registry.example:5000/team/infra", "latest", DriverNVIDIA)
+	if !ok || target != "registry.example:5000/team/infra-nvidia:latest" {
+		t.Errorf("DriverTarget = %q, %v", target, ok)
+	}
+}
+
 func TestDriverOverrideRejectsBadEntries(t *testing.T) {
 	tests := []struct {
 		name string
@@ -334,6 +475,11 @@ func TestDriverOverrideRejectsBadEntries(t *testing.T) {
 		{
 			name: "key carries a tag",
 			yaml: "drivers:\n  ghcr.io/tuna-os/tromso:latest:\n    standard: [latest]\n",
+			want: "without a tag",
+		},
+		{
+			name: "tag after a registry port",
+			yaml: "drivers:\n  registry.example:5000/x/y:latest:\n    standard: [latest]\n",
 			want: "without a tag",
 		},
 		{
@@ -360,6 +506,11 @@ func TestDriverOverrideRejectsBadEntries(t *testing.T) {
 			name: "empty stream list",
 			yaml: "drivers:\n  ghcr.io/tuna-os/tromso:\n    standard: [latest]\n    nvidia: []\n",
 			want: "empty stream list",
+		},
+		{
+			name: "driver stream absent from standard",
+			yaml: "drivers:\n  ghcr.io/tuna-os/tromso:\n    standard: [latest]\n    nvidia: [testing]\n",
+			want: "could not switch back",
 		},
 	}
 

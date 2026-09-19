@@ -28,11 +28,16 @@ Configuration is searched in a fixed order of ownership tiers
    directory — development fallback (`internal/config/paths.go:20`).
 
 Only genuine absence advances the search: `Load`
-(`internal/config/config.go:89-108`) continues past a candidate only when
-the read fails with `fs.ErrNotExist`. The first existing file is
-authoritative. If it is present but unusable — unreadable, unparseable, or
-schema-invalid — `Load` returns `disabledConfig()`
-(`internal/config/config.go:139-156`), which keeps the canonical pages and
+(`internal/config/config.go:100-117`) continues past a candidate only when
+the read fails with `fs.ErrNotExist` **and the candidate is not a present
+authoritative symlink whose target is missing** (`danglingAuthoritativeSymlink`,
+`internal/config/config.go`). A dangling symlink reads back `fs.ErrNotExist`
+just like an absent path, but its directory entry exists, so it is treated as a
+present-but-unusable file and fails closed rather than falling through to a
+lower tier. The first existing file is
+authoritative. If it is present but unusable — unreadable, a dangling symlink,
+unparseable, or schema-invalid — `Load` returns `disabledConfig()`
+(`internal/config/config.go:166-183`), which keeps the canonical pages and
 groups but forces every feature group off, together with the diagnostic
 described in [ADR-0004](0004-configuration-error-diagnostic-vocabulary.md).
 Built-in defaults apply only when every candidate is absent.

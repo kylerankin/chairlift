@@ -250,6 +250,38 @@ func (i Info) Variant() Variant {
 	}
 }
 
+// gamingFlavor is the value ublue-os writes to image-flavor on the images
+// that ship the gaming stack preinstalled.
+const gamingFlavor = "gaming"
+
+// gamingSuffix is the image-name suffix those images carry, e.g.
+// "dakota-gaming" and "dakota-nvidia-gaming".
+const gamingSuffix = "-gaming"
+
+// IsGaming reports whether the running image already ships the gaming stack.
+//
+// The gaming images (dakota-gaming, dakota-nvidia-gaming) carry Steam and the
+// rest of the stack as system packages. ChairLift's gaming mode installs the
+// same applications as user Flatpaks, so offering it here would install a
+// second, shadowing copy of software the image already provides.
+//
+// Two signals are accepted because only the first is authoritative and it is
+// not present on every descriptor: the descriptor's own image-flavor, and the
+// "-gaming" suffix on the image name. Either one is enough. Both are compared
+// case-insensitively, and the suffix is checked against the image name and
+// the clean ref so a descriptor carrying only one of them still matches.
+func (i Info) IsGaming() bool {
+	if strings.EqualFold(strings.TrimSpace(i.Flavor), gamingFlavor) {
+		return true
+	}
+	for _, name := range []string{i.Name, i.CleanRef()} {
+		if strings.HasSuffix(strings.ToLower(strings.TrimSpace(name)), gamingSuffix) {
+			return true
+		}
+	}
+	return false
+}
+
 // CleanRef returns the image ref with any ostree/docker transport prefix and
 // any trailing tag removed — e.g. "ghcr.io/projectbluefin/dakota". It
 // mirrors bluefinctl's prefix stripping (core/system.py clean_image_ref plus
@@ -304,6 +336,17 @@ func stripTag(ref string) string {
 		return ref // the colon belongs to a host:port, not a tag
 	}
 	return ref[:index]
+}
+
+// hasTag reports whether ref carries a trailing image tag, e.g.
+// "ghcr.io/org/img:latest". A colon that sits before the first slash is a
+// registry port ("registry.example:5000/org/img"), which the channel-table
+// validation accepts; only a trailing tag is rejected.
+func hasTag(ref string) bool {
+	if index := strings.LastIndex(ref, ":"); index >= 0 {
+		return !strings.Contains(ref[index:], "/")
+	}
+	return false
 }
 
 // EffectiveTag returns the running image tag, falling back to the tag

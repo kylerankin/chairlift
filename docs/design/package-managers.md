@@ -67,12 +67,18 @@ The outcomes are deliberately lossless and deterministic:
 `loadBrewBundles` on the Applications page calls discovery from a worker
 goroutine and applies every widget change through one
 `sgtk.RunOnMainThread` closure. `brew_bundles_group` is independent of
-`brew_group`, so this path neither reads nor refreshes the formulae/casks
-expanders. A successful live `BundleInstall` leaves the clicked row labelled
-`Installed` and permanently insensitive. A failed install restores the
-`Install` action. A successful dry-run uses
+`brew_group`, so this path never assumes the formulae/casks expanders exist.
+A successful live `BundleInstall` leaves the clicked row labelled `Installed`
+and permanently insensitive, then requests `loadHomebrewPackages()` because a
+bundle can install formulae and casks the current inventory snapshot predates.
+That refresh is safe in both configurations: `loadHomebrewPackages` nil-guards
+each expander, so it does nothing visible when `brew_group` is disabled, and
+it takes a `brewPackagesRefresh` generation, so a slower bundle-triggered
+refresh cannot overwrite newer rows. A failed install restores the `Install`
+action. A successful dry-run uses
 `actionmsg.BundleInstall(...).Complete == false`, shows an explicit preview,
-and restores the action because nothing was installed. Each row owns a
+and restores the action because nothing was installed — and for the same
+reason it does not refresh the inventory. Each row owns a
 `bundleview.InstallGate`, so a second callback cannot overlap a running
 install even if invoked independently of GTK's insensitive-button guard.
 
@@ -146,7 +152,7 @@ Homebrew 6 introduced per-tap trust: formulae/casks from a tap that isn't marked
 **Detection (`ListUntrustedTaps`)** combines three sources:
 1. `brew tap-info --installed --json` — parsed for each tap's `name` and `trusted` flag (`parseUntrustedTapNames`); this is the only brew-provided signal, and it tells you *which taps* are untrusted but not *what's installed from them*.
 2. Cellar keg receipts (`installedFormulaeByTap`) — walks `<prefix>/Cellar/<formula>/<version>/INSTALL_RECEIPT.json` and reads `.source.tap`, since brew's own listing commands can't see these formulae. One receipt per keg is enough to attribute the formula to a tap.
-3. Caskroom metadata (`installedCasksByTap`) — walks `<prefix>/Caskroom/<token>/.metadata/*/*/Casks/*.json` and reads `.tap`. Glob results are lexically, not chronologically, ordered (`"9"` sorts after `"10"`), so the newest file is picked by `mtime`, not by glob order. Casks installed via the Homebrew API (no local `Casks/<token>.json`) are skipped — they belong to `homebrew/cask`, which is always trusted.
+3. Cask install receipts (`installedCasksByTap`) — reads `<prefix>/Caskroom/<token>/.metadata/INSTALL_RECEIPT.json` and takes `.source.tap`, mirroring the formula path. That receipt (written by Homebrew's `Cask::Tab.create` into the cask's `.metadata` container) is the authoritative origin recorded at install time. The earlier scan of versioned `Caskroom/<token>/.metadata/*/*/Casks/*.json` metadata could not see tap-sourced casks at all: a cask installed from a tap is saved as a `.rb` Caskfile, so no `Casks/<token>.json` exists for it and exactly the untrusted-tap casks the remediation UI exists for were silently dropped.
 
 Only untrusted taps with at least one installed formula or cask are returned (`UntrustedTap{Name, Formulae, Casks}`, package names fully qualified as `tap/name`, ready to pass straight to `brew trust`); taps with nothing installed aren't actionable and are dropped.
 
@@ -916,11 +922,21 @@ installed layout itself:
   map the repository `config.yml` to
   `/usr/share/chairlift/config.yml` and rejects any content entry targeting
   `/etc/chairlift/config.yml`.
-- **`TestGoreleaserPublishesSystemIntegrationPackage`** requires exactly one
+- **`TestGoreleaserPublishesTheSystemCompanionPackage`** requires exactly one
   full package and one integration package, verifies their build filters,
   mutual conflicts, unique IDs, and the integration package's exact four
   content mappings. This prevents the companion from accidentally acquiring
   the GUI binary or losing one of the root-owned integration files.
+  It was named `TestGoreleaserPublishesSystemIntegrationPackage` until
+  2026-09-18 — the name ADR-0006 records, and the one still correct as that
+  decision's historical context. `Integration` in the name matched the
+  `-skip "Integration"` half of the filter described below, so despite being
+  cited by AGENTS.md and the ADR as the enforcement for the
+  system-integration split, the filtered unit-test step never selected it. Renaming it
+  was the fix; `internal/installcheck`'s
+  `TestNoInternalTestNameIsExcludedByTheCIFilter` now rejects any test under
+  `internal/` that the filter would drop, so no other gate can be silently
+  inert the same way.
 
 Both tests fail — not skip — if `internal/updex.HelperPath`, the Makefile's
 `PREFIX` default, or `.goreleaser.yaml`'s `nfpms` block change independently
@@ -1000,3 +1016,16 @@ test shells out or renders anything. As with the license guard,
 somewhere to put those values, exactly as `MetadataConfig.License` does;
 without the struct fields yaml.v3 drops them and both tests would pass
 vacuously regardless of what the YAML says.
+
+Two further gates in `navigationschema_test.go` close the page/group contract's
+last unenforced edge. `internal/config` owns the page/group grammar — it derives
+it by reflection from `Config`'s yaml tags and `defaultConfig()` and publishes it
+as `config.SchemaPages()` / `config.SchemaGroups(page)` — while
+`internal/navigation` restates the same grammar as the `ConfigPage` and `Groups`
+fields of its sidebar inventory. **`TestNavigationPagesMatchConfigSchema`** holds
+`navigation.Items()[].ConfigPage` and `config.SchemaPages()` to a bijection,
+rejecting an empty or duplicated `ConfigPage` claim; **`TestNavigationGroupsMatchConfigSchema`**
+holds each item's `Groups` to `config.SchemaGroups(item.ConfigPage)` as per-page
+set equality. Both compare sets, not order: `config.SchemaGroups` sorts its
+result, while navigation's slices carry sidebar presentation order, which is
+navigation's own concern.

@@ -76,35 +76,56 @@ func (s Stack) Accelerated() bool {
 	return s.Vendor != gpu.VendorNone
 }
 
-// stacks maps each vendor to its RamaLama image. Every reference was
-// verified against quay.io by manifest request on 2026-08-17: the
-// ramalama namespace publishes `ramalama` (CPU), `cuda`, `rocm`, and
-// `intel-gpu`, each returning 200 for :latest.
+// stacks maps each vendor to its RamaLama image. Every reference is pinned
+// by content digest, not by the mutable `:latest` tag, so a compromised or
+// mistakenly re-pushed tag in the ramalama namespace cannot silently replace
+// the image this unit runs (see issue #8: a `:latest` pull with
+// `--security-opt=label=disable` and GPU devices drops the only sandbox
+// boundary between the model server and the host).
+//
+// Each digest is the multi-arch INDEX (manifest list) digest, never an
+// architecture's child manifest. That distinction is load-bearing: CI's
+// matrix in .github/workflows/test.yml ships arm64 alongside amd64, and an
+// amd64 child digest is simply unpullable on an arm64 host. The index
+// digests below were resolved from quay.io on 2026-09-18.
+//
+// They go stale by construction. To roll one, request the manifest with the
+// index media types so the registry returns the list rather than an
+// architecture-specific child:
+//
+//	curl -sS -D - -o /tmp/m.json \
+//	  -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json' \
+//	  https://quay.io/v2/ramalama/<name>/manifests/latest
+//
+// Confirm the response's `mediaType` is an index or manifest list before
+// taking its `Docker-Content-Digest`, replace the sha256 here, and re-run the
+// aistack tests. Do not swap a digest for a moving tag to "keep it current",
+// and do not substitute a `.manifests[]` child digest.
 var stacks = map[gpu.Vendor]Stack{
 	gpu.VendorNVIDIA: {
 		Vendor:      gpu.VendorNVIDIA,
-		Image:       "quay.io/ramalama/cuda:latest",
+		Image:       "quay.io/ramalama/cuda@sha256:e6a6ccfe9e60ed05708a88eb3303711c188c155cee69500d21b9166871afba9e",
 		Accelerator: "CUDA",
 		Devices:     []string{"nvidia.com/gpu=all"},
 		PodmanArgs:  []string{"--security-opt=label=disable"},
 	},
 	gpu.VendorAMD: {
 		Vendor:      gpu.VendorAMD,
-		Image:       "quay.io/ramalama/rocm:latest",
+		Image:       "quay.io/ramalama/rocm@sha256:e592700576a4a5bc7c3eebbbe8af4ae2c2351adb05f03e66aaaa822b4d31298f",
 		Accelerator: "ROCm",
 		Devices:     []string{"/dev/kfd", "/dev/dri"},
 		PodmanArgs:  []string{"--security-opt=label=disable", "--group-add=video"},
 	},
 	gpu.VendorIntel: {
 		Vendor:      gpu.VendorIntel,
-		Image:       "quay.io/ramalama/intel-gpu:latest",
+		Image:       "quay.io/ramalama/intel-gpu@sha256:02dc186b6eb9a4dba886cbdc05490e297ffee590b093c0293940273f663f025b",
 		Accelerator: "Intel oneAPI",
 		Devices:     []string{"/dev/dri"},
 		PodmanArgs:  []string{"--security-opt=label=disable"},
 	},
 	gpu.VendorNone: {
 		Vendor:      gpu.VendorNone,
-		Image:       "quay.io/ramalama/ramalama:latest",
+		Image:       "quay.io/ramalama/ramalama@sha256:a3c0ee8d06554add6808fffe7476a16db8c821de34949fa6213449ac9d95f9f3",
 		Accelerator: "CPU",
 	},
 }
@@ -118,18 +139,31 @@ var stacks = map[gpu.Vendor]Stack{
 //
 // An unknown vendor key is an error rather than a silent no-op, since a
 // typo'd key would otherwise leave the site believing its mirror was in use.
+//
+// The whole override is validated before anything is changed. Map iteration
+// order is nondeterministic, so applying one entry at a time could commit an
+// earlier valid entry before a later invalid one is rejected — leaving a
+// rejected image selected depending on which entry the loop happened to reach
+// first. Validate first, then commit, so an invalid entry changes no image and
+// no model at all.
 func ApplyOverrides(images map[string]string, model string) error {
+	// Validate every entry before mutating the shared stacks.
 	for name, image := range images {
 		vendor := gpu.Vendor(name)
-		stack, known := stacks[vendor]
-		if !known {
+		if _, known := stacks[vendor]; !known {
 			return fmt.Errorf("ai_images: unknown vendor %q", name)
 		}
 		if image == "" {
 			return fmt.Errorf("ai_images: vendor %q has an empty image", name)
 		}
-		stack.Image = image
-		stacks[vendor] = stack
+	}
+
+	// Everything checked out; apply the image overrides and the model.
+	for name, image := range images {
+		vendor := gpu.Vendor(name)
+		existing := stacks[vendor]
+		existing.Image = image
+		stacks[vendor] = existing
 	}
 	if model != "" {
 		servedModel = model
@@ -195,6 +229,45 @@ func defaultUnitDir() (string, error) {
 	return filepath.Join(config, "containers", "systemd"), nil
 }
 
+// writeQuadletFile is an injection seam for writing the quadlet file atomically.
+var writeQuadletFile = writeQuadletAtomically
+
+// writeQuadletAtomically writes content to a temporary file in the same directory
+// as dest and atomically renames it over dest, ensuring that dest is never left
+// in a partial or truncated state if an error occurs.
+func writeQuadletAtomically(dest string, content []byte) error {
+	dir := filepath.Dir(dest)
+	tmp, err := os.CreateTemp(dir, UnitName+".tmp.*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	cleanTemp := true
+	defer func() {
+		if cleanTemp {
+			_ = os.Remove(tmpName)
+		}
+	}()
+
+	if _, err := tmp.Write(content); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(0o644); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+
+	if err := os.Rename(tmpName, dest); err != nil {
+		return err
+	}
+	cleanTemp = false
+	return nil
+}
+
 // runSystemctl is an injection seam for the `systemctl --user` calls.
 var runSystemctl = execSystemctl
 
@@ -256,7 +329,7 @@ func Enable(ctx context.Context, stack Stack) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	if err := os.WriteFile(path, []byte(RenderUnit(stack)), 0o644); err != nil {
+	if err := writeQuadletFile(path, []byte(RenderUnit(stack))); err != nil {
 		return err
 	}
 

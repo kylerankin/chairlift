@@ -153,6 +153,18 @@ type UserHome struct {
 	brewRefresh         actionstate.RefreshGate
 	searchRefresh       actionstate.RefreshGate
 	brewPackagesRefresh actionstate.RefreshGate
+	// flatpakPackagesRefresh bounds overlapping Flatpak inventory reloads so
+	// only the newest reload may publish. Two uninstalls finishing close
+	// together each trigger a reload; without a generation guard an older,
+	// slower reload can complete last and re-add a removed row or overwrite
+	// a newer status. See chairlift#69.
+	flatpakPackagesRefresh actionstate.RefreshGate
+	// flatpakUpdatesRefresh bounds overlapping Flatpak *update* inventory
+	// reloads. Every completed update and uninstall kicks a reload, so two
+	// finishing close together race; without a generation guard the older,
+	// slower reload publishes last and re-adds a row that was already updated
+	// or overwrites a newer badge count. See chairlift#69.
+	flatpakUpdatesRefresh actionstate.RefreshGate
 }
 
 // New creates a new UserHome views manager

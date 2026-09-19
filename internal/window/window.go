@@ -47,7 +47,7 @@ type Window struct {
 	config      *config.Config
 	configError *config.LoadError
 	views       *views.UserHome
-	updateBadge *gtk.Button // Badge for updates count
+	updateBadge *gtk.Label // Noninteractive badge for the updates count
 	navItems    []navigation.Item
 }
 
@@ -195,7 +195,7 @@ func (w *Window) createNavRow(item navigation.Item) *adw.ActionRow {
 
 	// Add badge for updates row (hidden by default)
 	if item.Name == "updates" {
-		w.updateBadge = gtk.NewButton()
+		w.updateBadge = gtk.NewLabel("")
 		w.updateBadge.AddCssClass("circular")
 		w.updateBadge.AddCssClass("warning")
 		w.updateBadge.SetVisible(false)
@@ -440,6 +440,7 @@ func (w *Window) AddToast(toast *adw.Toast) {
 // ShowToast shows a simple toast message
 func (w *Window) ShowToast(message string) {
 	toast := adw.NewToast(message)
+	toast.SetUseMarkup(false)
 	toast.SetTimeout(3)
 	w.AddToast(toast)
 }
@@ -447,6 +448,7 @@ func (w *Window) ShowToast(message string) {
 // ShowErrorToast shows an error toast
 func (w *Window) ShowErrorToast(message string) {
 	toast := adw.NewToast(message)
+	toast.SetUseMarkup(false)
 	toast.SetTimeout(0) // Persist until dismissed
 	w.AddToast(toast)
 }
