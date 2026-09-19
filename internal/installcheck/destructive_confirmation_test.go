@@ -4,7 +4,9 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -33,42 +35,53 @@ func TestDestructiveActionsRequireConfirmation(t *testing.T) {
 
 	viewsDir := filepath.Join(RepoRoot(), "internal", "views")
 
-	fset := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fset, viewsDir, nil, parser.ParseComments)
+	entries, err := os.ReadDir(viewsDir)
 	if err != nil {
-		t.Fatalf("parse views sources: %v", err)
+		t.Fatalf("read views dir: %v", err)
 	}
-	if len(pkgs) == 0 {
-		t.Fatalf("no package found under %s — the scan would pass vacuously", viewsDir)
+
+	fset := token.NewFileSet()
+	var astFiles []*ast.File
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") || strings.HasSuffix(e.Name(), "_test.go") {
+			continue
+		}
+		path := filepath.Join(viewsDir, e.Name())
+		f, err := parser.ParseFile(fset, path, nil, parser.ParseComments)
+		if err != nil {
+			t.Fatalf("parse %s: %v", path, err)
+		}
+		astFiles = append(astFiles, f)
+	}
+	if len(astFiles) == 0 {
+		t.Fatalf("no Go files found under %s — the scan would pass vacuously", viewsDir)
 	}
 
 	seenRun := map[string]bool{}
-	for _, pkg := range pkgs {
-		for _, astFile := range pkg.Files {
-			for _, decl := range astFile.Decls {
-				fn, ok := decl.(*ast.FuncDecl)
-				if !ok || fn.Body == nil {
-					continue
-				}
+	for _, astFile := range astFiles {
+		for _, decl := range astFile.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
 
-				// Record the destructive action definitions so a rename or
-				// removal is caught here rather than letting the scan pass
-				// vacuously.
-				if fn.Recv != nil && receiverIsUserHome(fn.Recv.List[0].Type) && destructive[fn.Name.Name] {
-					seenRun[fn.Name.Name] = true
-				}
+			// Record the destructive action definitions so a rename or
+			// removal is caught here rather than letting the scan pass
+			// vacuously.
+			if fn.Recv != nil && receiverIsUserHome(fn.Recv.List[0].Type) && destructive[fn.Name.Name] {
+				seenRun[fn.Name.Name] = true
+			}
 
-				if !callsDestructive(fn.Body, destructive) {
-					continue
-				}
+			if !callsDestructive(fn.Body, destructive) {
+				continue
+			}
 
-				hasDialog, hasConfirmGate := confirmationPresent(fn.Body)
-				if !hasDialog {
-					t.Errorf("%s.%s runs a destructive action without showing an AdwAlertDialog confirmation", astFile.Name, fn.Name.Name)
-				}
-				if !hasConfirmGate {
-					t.Errorf("%s.%s runs a destructive action without gating on the \"confirm\" response", astFile.Name, fn.Name.Name)
-				}
+			hasDialog, hasConfirmGate := confirmationPresent(fn.Body)
+			if !hasDialog {
+				t.Errorf("%s.%s runs a destructive action without showing an AdwAlertDialog confirmation", astFile.Name, fn.Name.Name)
+			}
+			if !hasConfirmGate {
+				t.Errorf("%s.%s runs a destructive action without gating on the \"confirm\" response", astFile.Name, fn.Name.Name)
 			}
 		}
 	}

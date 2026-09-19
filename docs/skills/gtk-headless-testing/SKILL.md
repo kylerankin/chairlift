@@ -77,8 +77,8 @@ add a `_test.go` to a puregotk package, write a headless scan in
 parses the views sources with `go/parser` and asserts the invariant holds. The
 model is `TestDestructiveActionsRequireConfirmation`: it walks each `UserHome` method that calls a destructive run and fails unless
 that method both shows an `adw.NewAlertDialog` and gates on the `"confirm"`
-response. Parse with `parser.ParseDir` (this toolchain has no
-`parser.ParseFiles`). If a guard can be expressed as a source-level assertion,
+response. Parse each file with `parser.ParseFile` over the directory's `.go`
+files (`parser.ParseDir` is deprecated since Go 1.25). If a guard can be expressed as a source-level assertion,
 it belongs here, not in a GTK test binary.
 
 **Learned from:** issue #57's first mill run — a `_test.go` added to
