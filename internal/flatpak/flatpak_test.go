@@ -1,6 +1,7 @@
 package flatpak
 
 import (
+	"context"
 	"errors"
 	"github.com/projectbluefin/chairlift/internal/dryrun"
 	"os"
@@ -127,8 +128,8 @@ esac`
 		{name: "install system", run: func() error { return Install("org.example.App", false) }, want: []string{"install", "-y", "--system", "org.example.App"}},
 		{name: "uninstall user", run: func() error { return Uninstall("org.example.App", true) }, want: []string{"uninstall", "-y", "--user", "org.example.App"}},
 		{name: "uninstall system", run: func() error { return Uninstall("org.example.App", false) }, want: []string{"uninstall", "-y", "--system", "org.example.App"}},
-		{name: "update one user app", run: func() error { return Update("org.example.App", true) }, want: []string{"update", "-y", "--user", "org.example.App"}},
-		{name: "update all system apps", run: func() error { return Update("", false) }, want: []string{"update", "-y", "--system"}},
+		{name: "update one user app", run: func() error { return Update(context.Background(), "org.example.App", true) }, want: []string{"update", "-y", "--user", "org.example.App"}},
+		{name: "update all system apps", run: func() error { return Update(context.Background(), "", false) }, want: []string{"update", "-y", "--system"}},
 		{
 			name: "list user app updates",
 			run: func() error {
@@ -417,5 +418,17 @@ func TestTimeoutConstants(t *testing.T) {
 	}
 	if mutationTimeout != 30*time.Minute {
 		t.Errorf("mutationTimeout = %v, want 30m", mutationTimeout)
+	}
+}
+
+// TestUpdateDryRunReturnsNilWithoutRunning proves the dry-run branch of Update:
+// a state-changing command is skipped (not executed) under --dry-run, so the
+// in-flight-Update All cancellation path never runs the command in a preview.
+func TestUpdateDryRunReturnsNilWithoutRunning(t *testing.T) {
+	dryrun.Set(true)
+	t.Cleanup(func() { dryrun.Set(false) })
+
+	if err := Update(context.Background(), "", true); err != nil {
+		t.Fatalf("Update dry-run error = %v, want nil (command must not run)", err)
 	}
 }

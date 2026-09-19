@@ -425,9 +425,22 @@ func Upgrade(name string) error {
 	return err
 }
 
-// Update updates Homebrew itself
-func Update() error {
-	_, err := runBrewCommand("update")
+// Update updates Homebrew itself. It runs under ctx so an enclosing run's
+// cancellation — Update All, for example — propagates into the command and
+// stops it, instead of the command ignoring the parent deadline and running to
+// its own 30-minute budget. The mutation budget is still applied on top, so a
+// lone caller stays bounded by whichever deadline is nearer.
+func Update(ctx context.Context) error {
+	runCtx, cancel := context.WithTimeout(ctx, mutationTimeout)
+	defer cancel()
+
+	if dryrun.Enabled() {
+		msg := fmt.Sprintf("[DRY-RUN] Would execute: brew update")
+		log.Println(msg)
+		return nil
+	}
+
+	_, err := runBrewCommandAt(runCtx, "brew", "update")
 	return err
 }
 

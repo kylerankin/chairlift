@@ -281,8 +281,13 @@ func Uninstall(appID string, user bool) error {
 	return err
 }
 
-// Update updates a Flatpak application or all applications
-func Update(appID string, user bool) error {
+// Update updates all Flatpak applications. It runs under ctx so a caller that
+// started the command as one phase of a larger run — Update All, for example —
+// can cancel the whole run and have this command stop with it, instead of the
+// command ignoring the parent deadline and running to its own 30-minute
+// budget. The mutation budget is still applied on top, so a lone caller stays
+// bounded by whichever deadline is nearer.
+func Update(ctx context.Context, appID string, user bool) error {
 	args := []string{"update", "-y"}
 	if user {
 		args = append(args, "--user")
@@ -293,7 +298,20 @@ func Update(appID string, user bool) error {
 		args = append(args, appID)
 	}
 
-	_, err := runFlatpakCommand(args...)
+	// context.WithTimeout takes whichever deadline is nearer: the run's own
+	// deadline (if any) or the mutation budget. A parent that is already
+	// cancelled makes the command fail immediately rather than start a fresh
+	// 30-minute run.
+	runCtx, cancel := context.WithTimeout(ctx, mutationTimeout)
+	defer cancel()
+
+	if len(args) > 0 && stateChangingCommands[args[0]] && dryrun.Enabled() {
+		msg := fmt.Sprintf("[DRY-RUN] Would execute: flatpak %s", strings.Join(args, " "))
+		log.Println(msg)
+		return nil
+	}
+
+	_, err := runFlatpakCommandAt(runCtx, "flatpak", args...)
 	return err
 }
 
