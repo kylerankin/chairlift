@@ -114,7 +114,9 @@ To avoid blocking startup on slow tool-availability checks, groups that depend o
 3. Spawn a goroutine that calls `IsInstalledCached()` (see below)
 4. On the main thread, either hide the group (`SetVisible(false)`) or update its description
 
-This applies to: `maintenanceBrewGroup`, `maintenanceFlatpakGroup`, `featuresGroup`/`featuresUnavailableGroup`. The Features page uses a dual-group approach — one for available features, one for "not available" — toggling visibility between them.
+This applies to: `maintenanceBrewGroup`, `maintenanceFlatpakGroup`, `featuresGroup`/`featuresUnavailableGroup`, and `updateAllGroup` (the Update All hero row on the Updates page). The Features page uses a dual-group approach — one for available features, one for "not available" — toggling visibility between them.
+
+The Update All group is the one place the *startup* path must not probe providers at all. Its rows are determined by which of bootc, Flatpak, and Homebrew exist on this host, and whether the unattended-update timer is installed — four separate subprocess checks that can each approach a multi-second timeout on a slow or wedged host. `buildUpdateAllGroup` therefore builds only a hidden shell with a "Checking…" description; `loadUpdateAllGroup` runs the availability probes (`hostAvailability()` and `autoupdate.Detect`) in a worker, and `populateUpdateAllGroup` marshals the resulting rows back onto the GTK main thread once every probe has answered. When no provider can update anything, the group simply stays hidden, matching the previous behavior of omitting it entirely.
 
 ### bootc boot gate
 
