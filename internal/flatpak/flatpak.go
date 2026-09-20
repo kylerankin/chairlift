@@ -86,22 +86,32 @@ func commandTimeout(args []string) time.Duration {
 
 // runFlatpakCommand executes a flatpak command and returns the output
 func runFlatpakCommand(args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout(args))
+	defer cancel()
+
+	return runFlatpakCommandCtx(ctx, args...)
+}
+
+// runFlatpakCommandCtx is the single dry-run gate for flatpak: it applies the
+// skip (before any exec.Cmd exists) and otherwise runs the command under ctx.
+// runFlatpakCommand supplies its own timeout context; context-taking exported
+// entry points such as Update supply the caller's context already narrowed to
+// the mutation budget, so cancellation propagates without a second gate that
+// could drift out of sync.
+func runFlatpakCommandCtx(ctx context.Context, args ...string) (string, error) {
 	if len(args) > 0 && stateChangingCommands[args[0]] && dryrun.Enabled() {
 		msg := fmt.Sprintf("[DRY-RUN] Would execute: flatpak %s", strings.Join(args, " "))
 		log.Println(msg)
 		return msg, nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout(args))
-	defer cancel()
-
 	return runFlatpakCommandAt(ctx, "flatpak", args...)
 }
 
 // runFlatpakCommandAt runs exe with args under ctx and returns its stdout. The
 // executable and context are parameters so tests can drive a fake script and
-// control the deadline; runFlatpakCommand is the only production caller and
-// always passes "flatpak".
+// control the deadline; the sole production caller
+// (runFlatpakCommandCtx) always passes "flatpak".
 //
 // The command runs in its own process group and cancellation signals the
 // whole group, so flatpak's helper processes (download workers, ostree pulls)
@@ -281,8 +291,14 @@ func Uninstall(appID string, user bool) error {
 	return err
 }
 
-// Update updates a Flatpak application or all applications
-func Update(appID string, user bool) error {
+// Update updates a Flatpak application, or all applications when appID is
+// empty. It runs under ctx so a caller that started the command as one phase
+// of a larger run — Update All, for example — can cancel the whole run and
+// have this command stop with it, instead of the command ignoring the parent
+// deadline and running to its own 30-minute budget. The mutation budget is
+// still applied on top, so a lone caller stays bounded by whichever deadline
+// is nearer.
+func Update(ctx context.Context, appID string, user bool) error {
 	args := []string{"update", "-y"}
 	if user {
 		args = append(args, "--user")
@@ -293,7 +309,14 @@ func Update(appID string, user bool) error {
 		args = append(args, appID)
 	}
 
-	_, err := runFlatpakCommand(args...)
+	// context.WithTimeout takes whichever deadline is nearer: the run's own
+	// deadline (if any) or the mutation budget. A parent that is already
+	// cancelled makes the command fail immediately rather than start a fresh
+	// 30-minute run.
+	runCtx, cancel := context.WithTimeout(ctx, mutationTimeout)
+	defer cancel()
+
+	_, err := runFlatpakCommandCtx(runCtx, args...)
 	return err
 }
 

@@ -119,22 +119,32 @@ func commandTimeout(args []string) time.Duration {
 
 // runBrewCommand executes a brew command and returns the output
 func runBrewCommand(args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout(args))
+	defer cancel()
+
+	return runBrewCommandCtx(ctx, args...)
+}
+
+// runBrewCommandCtx is the single dry-run gate for brew: it applies the skip
+// (before any exec.Cmd exists) and otherwise runs the command under ctx.
+// runBrewCommand supplies its own timeout context; context-taking exported
+// entry points such as Update supply the caller's context already narrowed to
+// the mutation budget, so cancellation propagates without a second gate that
+// could drift out of sync.
+func runBrewCommandCtx(ctx context.Context, args ...string) (string, error) {
 	if len(args) > 0 && stateChangingCommands[args[0]] && dryrun.Enabled() {
 		msg := fmt.Sprintf("[DRY-RUN] Would execute: brew %s", strings.Join(args, " "))
 		log.Println(msg)
 		return msg, nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout(args))
-	defer cancel()
-
 	return runBrewCommandAt(ctx, "brew", args...)
 }
 
 // runBrewCommandAt runs exe with args under ctx and returns its stdout. The
 // executable and context are parameters so tests can drive a fake script and
-// control the deadline; runBrewCommand is the only production caller and
-// always passes "brew".
+// control the deadline; the sole production caller (runBrewCommandCtx) always
+// passes "brew".
 //
 // The command runs in its own process group and cancellation signals the
 // whole group, so brew's helper processes (git, curl, download workers) die
@@ -425,9 +435,16 @@ func Upgrade(name string) error {
 	return err
 }
 
-// Update updates Homebrew itself
-func Update() error {
-	_, err := runBrewCommand("update")
+// Update updates Homebrew itself. It runs under ctx so an enclosing run's
+// cancellation — Update All, for example — propagates into the command and
+// stops it, instead of the command ignoring the parent deadline and running to
+// its own 30-minute budget. The mutation budget is still applied on top, so a
+// lone caller stays bounded by whichever deadline is nearer.
+func Update(ctx context.Context) error {
+	runCtx, cancel := context.WithTimeout(ctx, mutationTimeout)
+	defer cancel()
+
+	_, err := runBrewCommandCtx(runCtx, "update")
 	return err
 }
 

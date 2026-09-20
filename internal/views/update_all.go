@@ -211,13 +211,16 @@ func hostRunner() updateall.Runner {
 			}
 			return true, status.Status.Staged.Version()
 		},
-		UpdateFlatpak: func(context.Context) error {
+		UpdateFlatpak: func(ctx context.Context) error {
 			// The empty application ID updates every installed application;
-			// the user scope is the one ChairLift installs into.
-			return flatpak.Update("", true)
+			// the user scope is the one ChairLift installs into. The run's
+			// context is passed through so cancelling Update All stops the
+			// in-flight update instead of leaving it running to its own 30-
+			// minute budget.
+			return flatpak.Update(ctx, "", true)
 		},
-		UpdateBrew: func(context.Context) error {
-			return homebrew.Update()
+		UpdateBrew: func(ctx context.Context) error {
+			return homebrew.Update(ctx)
 		},
 	}
 }

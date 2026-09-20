@@ -1,6 +1,7 @@
 package views
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -563,7 +564,7 @@ func (uh *UserHome) loadFlatpakUpdatesGeneration(generation uint64) {
 				btn.SetSensitive(false)
 				btn.SetLabel("Updating...")
 				go func() {
-					if err := flatpak.Update(appID, isUser); err != nil {
+					if err := flatpak.Update(context.Background(), appID, isUser); err != nil {
 						sgtk.RunOnMainThread(func() {
 							btn.SetSensitive(true)
 							btn.SetLabel("Update")
@@ -875,7 +876,7 @@ func (uh *UserHome) onSysupdateStageClicked() {
 // updateHomebrew updates Homebrew metadata, then refreshes the outdated list
 // before restoring the top-level action.
 func (uh *UserHome) updateHomebrew(button gtk.Button, gate *actionstate.Gate) {
-	err := homebrew.Update()
+	err := homebrew.Update(context.Background())
 	dryRun := dryrun.Enabled()
 	decision := actionstate.MetadataUpdate(err == nil, dryRun)
 	if err != nil {

@@ -74,7 +74,7 @@ func TestMutationWrappersBuildExpectedArgv(t *testing.T) {
 		{"UninstallCask", func() error { return Uninstall("firefox", true) }, "uninstall --cask firefox"},
 		{"UpgradeNamed", func() error { return Upgrade("gh") }, "upgrade gh"},
 		{"UpgradeAll", func() error { return Upgrade("") }, "upgrade"},
-		{"Update", Update, "update"},
+		{"Update", func() error { return Update(context.Background()) }, "update"},
 		{"Pin", func() error { return Pin("gh") }, "pin gh"},
 		{"Unpin", func() error { return Unpin("gh") }, "unpin gh"},
 		{"BundleDumpPlain", func() error { return BundleDump("", false) }, "bundle dump"},

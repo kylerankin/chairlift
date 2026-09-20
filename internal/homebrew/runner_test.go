@@ -295,3 +295,47 @@ func waitForPID(t *testing.T, pidFile string) int {
 	t.Fatalf("fake script never wrote a PID to %s", pidFile)
 	return 0
 }
+
+// TestUpdatePropagatesContextCancellation proves the Update All fix: the Homebrew
+// phase runs under the run's context, so cancelling the run stops the in-flight
+// update instead of the command ignoring the parent and running to its own
+// 30-minute budget.
+func TestUpdatePropagatesContextCancellation(t *testing.T) {
+	// A fake brew that sleeps far past the cancellation: a version of Update
+	// that ignored the context would run to its 30-minute mutation budget. The
+	// script is named "brew" so the command resolves it on PATH.
+	dir := t.TempDir()
+	script := filepath.Join(dir, "brew")
+	pidFile := filepath.Join(dir, "self.pid")
+	content := "#!/bin/sh\necho $$ > \"" + pidFile + "\"\nsleep 30\n"
+	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if pid, err := readPID(pidFile); err == nil {
+			killPID(pid)
+		}
+	})
+	// Resolve the fake "brew" on PATH while keeping the real tools the
+	// script's `sleep` still needs.
+	origPath := os.Getenv("PATH")
+	t.Setenv("PATH", filepath.Dir(script)+string(os.PathListSeparator)+origPath)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- Update(ctx) }()
+
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+
+	err := awaitErr(t, done)
+	if err == nil {
+		t.Fatal("Update = nil error, want cancellation failure")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("Update error = %v, want errors.Is(err, context.Canceled)", err)
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		t.Error("Update error must not classify as a deadline")
+	}
+}
