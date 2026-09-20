@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/projectbluefin/chairlift/internal/dryrun"
+	"github.com/projectbluefin/chairlift/internal/outputtail"
 )
 
 const (
@@ -28,7 +29,22 @@ const (
 	// the stdout/stderr pipes, so a straggler could otherwise hold Wait open
 	// forever even though the command itself is gone.
 	waitDelay = 5 * time.Second
+	// commandOutputTailLimit bounds retained mutation output used only for
+	// diagnostics after a command fails. Successful mutation output is discarded.
+	commandOutputTailLimit = 64 * 1024
 )
+
+type commandOutputWriter interface {
+	Write([]byte) (int, error)
+	String() string
+}
+
+func commandOutputWriters(args []string) (commandOutputWriter, commandOutputWriter, bool) {
+	if len(args) > 0 && stateChangingCommands[args[0]] {
+		return outputtail.New(commandOutputTailLimit), outputtail.New(commandOutputTailLimit), true
+	}
+	return &bytes.Buffer{}, &bytes.Buffer{}, false
+}
 
 // Error represents a Flatpak-related error. Err, when non-nil, carries the
 // underlying cause (for example context.DeadlineExceeded or
@@ -105,7 +121,9 @@ func runFlatpakCommandCtx(ctx context.Context, args ...string) (string, error) {
 	return runFlatpakCommandAt(ctx, "flatpak", args...)
 }
 
-// runFlatpakCommandAt runs exe with args under ctx and returns its stdout. The
+// runFlatpakCommandAt runs exe with args under ctx. Read-only commands return
+// full stdout for parsers; state-changing commands discard successful output
+// and retain only bounded stdout/stderr tails for failure diagnostics. The
 // executable and context are parameters so tests can drive a fake script and
 // control the deadline; the sole production caller
 // (runFlatpakCommandCtx) always passes "flatpak".
@@ -121,9 +139,9 @@ func runFlatpakCommandAt(ctx context.Context, exe string, args ...string) (strin
 	}
 	cmd.WaitDelay = waitDelay
 
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	stdout, stderr, boundedOutput := commandOutputWriters(args)
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
 
 	err := cmd.Run()
 	if err != nil {
@@ -146,9 +164,14 @@ func runFlatpakCommandAt(ctx context.Context, exe string, args ...string) (strin
 				Err:     context.Canceled,
 			}
 		}
+		stderrText := stderr.String()
+		diagnosticText := stderrText
+		if boundedOutput && diagnosticText == "" {
+			diagnosticText = stdout.String()
+		}
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
-			return "", &Error{Message: fmt.Sprintf("Flatpak command failed: %s", stderr.String()), Err: err}
+			return "", &Error{Message: fmt.Sprintf("Flatpak command failed: %s", diagnosticText), Err: err}
 		}
 		// exec.ErrNotFound covers a bare name missing from $PATH;
 		// fs.ErrNotExist covers an explicit path that does not exist.
@@ -158,6 +181,9 @@ func runFlatpakCommandAt(ctx context.Context, exe string, args ...string) (strin
 		return "", &Error{Message: err.Error(), Err: err}
 	}
 
+	if boundedOutput {
+		return "", nil
+	}
 	return stdout.String(), nil
 }
 
