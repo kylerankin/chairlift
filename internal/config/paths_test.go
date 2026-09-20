@@ -31,6 +31,28 @@ func withStatPath(t *testing.T, stat func(string) (os.FileInfo, error)) {
 	statPath = stat
 }
 
+func withTrustedConfigDirectories(t *testing.T, dirs []string) {
+	t.Helper()
+	original := trustedConfigDirectories
+	t.Cleanup(func() { trustedConfigDirectories = original })
+	trustedConfigDirectories = dirs
+}
+
+// trustConfigDirectory adds dir to the trusted provenance list for the
+// duration of the calling test, leaving the real entries in place.
+func trustConfigDirectory(t *testing.T, dir string) {
+	t.Helper()
+	original := trustedConfigDirectories
+	t.Cleanup(func() { trustedConfigDirectories = original })
+	trustedConfigDirectories = append(append([]string{}, original...), dir)
+}
+
+// configSourceForPath builds the configSource a test wants for path, deciding
+// provenance the same way loadFromPath does.
+func configSourceForPath(path string) configSource {
+	return configSource{path: path, trusted: isTrustedConfigPath(path)}
+}
+
 func TestResolveCandidatePathBranches(t *testing.T) {
 	root := t.TempDir()
 	exeDir := filepath.Join(root, "bin")
