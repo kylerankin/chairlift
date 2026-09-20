@@ -236,6 +236,81 @@ func TestGoreleaserLicenseIsGPL(t *testing.T) {
 	}
 }
 
+// TestGoreleaserDeclaresMandatoryRuntimeDependencies parses the real
+// .goreleaser.yaml and asserts the full package declares the runtime
+// dependencies the GUI genuinely needs, while the integration package keeps
+// declaring none. Without this, a minimal host could install the package
+// successfully and then fail to launch (issue #89): the GUI dlopens the
+// GTK4 and Libadwaita shared libraries at package-init time through
+// puregotk (libgtk-4.so.1, libadwaita-1.so.0 — see the package comment in
+// internal/views/flatpakstatus/flatpakstatus.go), and the desktop entry
+// (data/io.projectbluefin.chairlift.desktop) always launches
+// /usr/bin/chairlift-wrapper, a Bash script (data/chairlift-wrapper.sh).
+//
+// Dependency package names differ per format — the same libraries are
+// Debian's libgtk-4-1/libadwaita-1-0, Fedora's gtk4/libadwaita, and
+// Alpine's gtk4.0/libadwaita — so the names are declared in per-format
+// overrides rather than one base-level dependencies list, whose single
+// spelling would be wrong for two of the three formats. The test therefore
+// pins the exact per-format sets, and rejects a base-level dependencies
+// list on either package: a base list would apply one format's name to
+// every other format, and GoReleaser merges each format's overrides over
+// the base fields with a replace-not-append slice merge (dario.cat/mergo
+// v1.0.2's WithOverride — verified against the exact version the release
+// workflow pins), so a base list coexisting with a per-format one is
+// silently dropped instead of merged.
+//
+// The integration package ships only the pure-Go helper binaries and
+// root-owned data files — no GUI, no desktop entry, no wrapper script — so
+// it must stay installable on hosts with no GTK stack at all; the test
+// rejects any dependency (base or per-format) appearing there.
+func TestGoreleaserDeclaresMandatoryRuntimeDependencies(t *testing.T) {
+	cfg := loadGoreleaserConfig(t)
+	full := nfpmByPackageName(t, cfg, fullPackageName)
+	integration := nfpmByPackageName(t, cfg, integrationPackageName)
+
+	// wantFullPackageDependencies maps each published format to the exact
+	// per-format dependency set the full package must declare: Bash for the
+	// launcher script, plus the GTK4 and Libadwaita runtime library
+	// packages under that format's distro naming.
+	wantFullPackageDependencies := map[string][]string{
+		"deb": {"bash", "libadwaita-1-0", "libgtk-4-1"},
+		"rpm": {"bash", "gtk4", "libadwaita"},
+		"apk": {"bash", "gtk4.0", "libadwaita"},
+	}
+
+	if len(full.Dependencies) != 0 {
+		t.Errorf("%s declares base-level dependencies %v; dependency package names differ per format, so declare them in per-format overrides instead", fullPackageName, full.Dependencies)
+	}
+	if len(integration.Dependencies) != 0 {
+		t.Errorf("%s declares dependencies %v; it ships no GUI, desktop entry, or wrapper script, so it must declare none", integrationPackageName, integration.Dependencies)
+	}
+
+	for _, format := range full.Formats {
+		t.Run(fmt.Sprintf("%s/%s", fullPackageName, format), func(t *testing.T) {
+			want, ok := wantFullPackageDependencies[format]
+			if !ok {
+				t.Fatalf("no expected runtime dependency set for format %q; extend wantFullPackageDependencies", format)
+			}
+			overrides, ok := full.Overrides[format]
+			if !ok {
+				t.Fatalf("no overrides entry for format %q; %s must declare its mandatory runtime dependencies per format", format, fullPackageName)
+			}
+			if !reflect.DeepEqual(overrides.Dependencies, want) {
+				t.Errorf("%s %s dependencies = %v, want %v", fullPackageName, format, overrides.Dependencies, want)
+			}
+		})
+	}
+
+	for _, format := range integration.Formats {
+		t.Run(fmt.Sprintf("%s/%s", integrationPackageName, format), func(t *testing.T) {
+			if overrides, ok := integration.Overrides[format]; ok && len(overrides.Dependencies) != 0 {
+				t.Errorf("%s %s dependencies = %v, want none: the integration package ships no GUI, desktop entry, or wrapper script", integrationPackageName, format, overrides.Dependencies)
+			}
+		})
+	}
+}
+
 // TestGoreleaserReleaseFooterHasCanonicalRepoURL parses the real
 // .goreleaser.yaml and asserts release.footer's "Full Changelog" line
 // contains the canonical repository URL (wantHomepage). GoReleaser OSS has

@@ -142,6 +142,35 @@ nfpms:
     license: GPL-3.0-or-later
     conflicts:
       - projectbluefin-chairlift-system-integration
+    # Mandatory runtime dependencies (issue #89): the GUI dlopens the GTK4
+    # and Libadwaita shared libraries at package-init time through puregotk
+    # (libgtk-4.so.1, libadwaita-1.so.0), and the desktop entry always
+    # launches /usr/bin/chairlift-wrapper, a Bash script
+    # (data/chairlift-wrapper.sh). Dependency package names differ per
+    # format (Debian libgtk-4-1/libadwaita-1-0, Fedora gtk4/libadwaita,
+    # Alpine gtk4.0/libadwaita), so they are declared per format here. Do
+    # not move them into one base-level dependencies list: a base list
+    # would apply one format's names to the other formats, and GoReleaser
+    # merges each format's overrides over the base fields with a
+    # replace-not-append slice merge, so a base list coexisting with a
+    # per-format one is silently dropped. internal/installcheck's
+    # TestGoreleaserDeclaresMandatoryRuntimeDependencies holds this contract.
+    overrides:
+      deb:
+        dependencies:
+          - bash
+          - libadwaita-1-0
+          - libgtk-4-1
+      rpm:
+        dependencies:
+          - bash
+          - gtk4
+          - libadwaita
+      apk:
+        dependencies:
+          - bash
+          - gtk4.0
+          - libadwaita
     contents:
       # Wrapper script
       - src: ./data/chairlift-wrapper.sh
@@ -213,6 +242,10 @@ nfpms:
       System integration for a user-scoped ChairLift installation.
       Installs the privileged updex and ublue helpers, PolicyKit policies, and maintainer configuration defaults.
     license: GPL-3.0-or-later
+    # Deliberately no dependencies (see TestGoreleaserDeclaresMandatoryRuntimeDependencies):
+    # this package ships no GUI, no desktop entry, and no wrapper script —
+    # only the pure-Go helper binaries and root-owned data files — so it must
+    # stay installable on hosts that carry no GTK/Libadwaita stack at all.
     conflicts:
       - projectbluefin-chairlift
     contents:

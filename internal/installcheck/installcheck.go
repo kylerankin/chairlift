@@ -55,14 +55,24 @@ type ReleaseConfig struct {
 // NfpmConfig is the subset of an nfpms[] entry relevant to package identity,
 // build selection, conflicts, install locations, and license consistency.
 type NfpmConfig struct {
-	ID          string        `yaml:"id"`
-	PackageName string        `yaml:"package_name"`
-	IDs         []string      `yaml:"ids"`
-	Bindir      string        `yaml:"bindir"`
-	License     string        `yaml:"license"`
-	Conflicts   []string      `yaml:"conflicts"`
-	Contents    []NfpmContent `yaml:"contents"`
-	Formats     []string      `yaml:"formats"`
+	ID           string                   `yaml:"id"`
+	PackageName  string                   `yaml:"package_name"`
+	IDs          []string                 `yaml:"ids"`
+	Bindir       string                   `yaml:"bindir"`
+	License      string                   `yaml:"license"`
+	Conflicts    []string                 `yaml:"conflicts"`
+	Dependencies []string                 `yaml:"dependencies"`
+	Overrides    map[string]NfpmOverrides `yaml:"overrides"`
+	Contents     []NfpmContent            `yaml:"contents"`
+	Formats      []string                 `yaml:"formats"`
+}
+
+// NfpmOverrides is the subset of one per-format nfpms[] overrides entry this
+// package's tests care about. The map is keyed by package format (deb, rpm,
+// apk), and GoReleaser merges each entry over the base nfpm fields for that
+// format's package only.
+type NfpmOverrides struct {
+	Dependencies []string `yaml:"dependencies"`
 }
 
 // NfpmContent is one nfpm contents[] entry's source/destination pair.

@@ -49,7 +49,13 @@ The app builds pure-Go (`CGO_ENABLED=0`); the race detector needs CGO.
   the self-contained `projectbluefin-chairlift` package and the mutually exclusive
   `projectbluefin-chairlift-system-integration` companion for user-scoped GUI
   installs; every nFPM entry carrying policies must retain the same fixed
-  paths.
+  paths. Published packages declare their mandatory runtime dependencies
+  (issue #89): the full package carries its GTK4, Libadwaita, and Bash names
+  per format via `overrides` — the distro package names differ across
+  deb/rpm/apk, and GoReleaser's overrides merge replaces rather than appends
+  a base-level list — while the integration package declares none, because it
+  ships no GUI, desktop entry, or wrapper script. `internal/installcheck`'s
+  `TestGoreleaserDeclaresMandatoryRuntimeDependencies` holds both halves.
 
 CI (`.github/workflows/test.yml`) filters tests with `-run "^Test[^I]"
 -skip "Integration"`. That filter excludes *any* test whose name begins `TestI`

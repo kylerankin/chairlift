@@ -1035,6 +1035,36 @@ somewhere to put those values, exactly as `MetadataConfig.License` does;
 without the struct fields yaml.v3 drops them and both tests would pass
 vacuously regardless of what the YAML says.
 
+A sixth regression test guards the packages' **declared runtime
+dependencies**. Until issue #89 the deb/rpm/apk metadata named no runtime
+dependencies at all, so a minimal target-family image could install the
+full package successfully and then fail to launch it: the GUI dlopens the
+GTK4 and Libadwaita shared libraries at package-init time through puregotk
+(`libgtk-4.so.1`, `libadwaita-1.so.0`), and the desktop entry
+(`data/io.projectbluefin.chairlift.desktop`) always launches
+`/usr/bin/chairlift-wrapper`, a Bash script (`data/chairlift-wrapper.sh`).
+The full `projectbluefin-chairlift` package now declares those dependencies
+per format in GoReleaser's `nfpms[]` `overrides` block, because the distro
+package names differ per format: Debian names `libgtk-4-1` and
+`libadwaita-1-0`, Fedora names `gtk4` and `libadwaita`, and Alpine names
+`gtk4.0` and `libadwaita`, with `bash` in every format. A single
+base-level `dependencies` list would carry one format's name into the other
+two, and GoReleaser's merge of per-format overrides over the base fields
+replaces a non-empty slice rather than appending to it (dario.cat/mergo
+v1.0.2's `WithOverride`, verified against the exact version the release
+workflow pins), so a base list coexisting with a per-format one is silently
+dropped; the test rejects a base-level list outright and pins the exact
+per-format set. The integration package declares none — it
+ships only pure-Go helper binaries and root-owned data files, no GUI,
+desktop entry, or wrapper script, and must stay installable on hosts that
+carry no GTK stack at all. **`TestGoreleaserDeclaresMandatoryRuntimeDependencies`**
+(`internal/installcheck/goreleaser_test.go`) holds both halves via the
+shared `loadGoreleaserConfig` helper: `NfpmConfig.Dependencies` and the
+new `NfpmOverrides` struct in `internal/installcheck/installcheck.go`
+exist so `yaml.Unmarshal` has somewhere to put these values, and the
+negative controls (dropping a per-format entry, adding a base-level list,
+adding a dependency to the integration package) each turn the test red.
+
 Two further gates in `navigationschema_test.go` close the page/group contract's
 last unenforced edge. `internal/config` owns the page/group grammar — it derives
 it by reflection from `Config`'s yaml tags and `defaultConfig()` and publishes it

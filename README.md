@@ -187,6 +187,13 @@ installs the fixed helper binaries at `/usr/bin/chairlift-updex-helper` and
 The integration and full packages conflict intentionally because they own the
 same privileged files.
 
+The full `projectbluefin-chairlift` deb/rpm/apk declares its mandatory runtime
+dependencies, per format, because distro package names differ: `bash` (the
+`/usr/bin/chairlift-wrapper` launcher the desktop entry runs) plus the GTK4 and
+Libadwaita runtime libraries — `libgtk-4-1`/`libadwaita-1-0` on deb,
+`gtk4`/`libadwaita` on rpm, and `gtk4.0`/`libadwaita` on apk. The integration
+package declares none: it ships no GUI, desktop entry, or wrapper script.
+
 The bootc policy deliberately retains the fixed
 `/usr/libexec/bootc-update-stage` path. A distribution must provide a trusted
 stage helper at exactly that path before enabling `bootc_updates_group`; the
@@ -214,7 +221,8 @@ Other useful targets: `make dev` (CGO-enabled build with `-race` for development
 ### Dependencies
 
 - Go (see `go.mod` for the toolchain version)
-- GTK 4 and libadwaita 1 (shared libraries, loaded at runtime by puregotk — no GTK dev headers or CGO needed to build)
+- GTK 4 and libadwaita 1 (shared libraries, loaded at runtime by puregotk — no GTK dev headers or CGO needed to build; declared as a mandatory runtime dependency of the published deb/rpm/apk packages)
+- Bash (required by the `chairlift-wrapper` launcher script the packaged desktop entry invokes)
 - Homebrew (optional, for package management features and tap trust)
 - Flatpak (optional)
 - `bootc` and the snow `/usr/libexec/bootc-update-stage` script (optional; enables staged system updates on bootc installs)
