@@ -1045,6 +1045,30 @@ unprivileged Homebrew and Flatpak runners instead kill their whole process
 groups so download helpers are not orphaned. Making either privileged staging
 path group-killable is a privilege-model change.
 
+**`helperexec` bounds the wait; it does not stop the work.**
+`internal/helperexec.Run` has the same privilege constraint and sets a finite
+`WaitDelay` (5s, matching `internal/maintenanceexec`) so cancellation returns
+even when a privileged descendant of the helper inherited stdout/stderr and
+still holds those pipes open. Only the direct `pkexec` child is killed, so
+that descendant may keep mutating the system after `Run` returns; the
+cancellation message therefore reads "command canceled (privileged work
+already started may still be running)" rather than implying the action
+stopped, and surfaces rendering it must not imply otherwise. Coordinating
+deadlines with root descendants (issue #82's broader ask) would require a
+privilege-model change.
+
+Because `WaitDelay` applies to every run, `cmd.Run` can report
+`exec.ErrWaitDelay` for a helper that already finished. `Run` classifies from
+the helper's own exit status in that case — success stays success (with
+possibly truncated captured output) instead of inviting a retry of work that
+already happened, and a non-zero exit keeps its "command failed (exit N)"
+message. For the same reason a cancel or deadline racing a genuine helper
+failure does not mask it: the context classification applies only when the
+helper was killed rather than exiting on its own. `helperexec.Error` carries
+an `Err error` with `Unwrap`, so "command timed out" and the cancellation
+message match `context.DeadlineExceeded` / `context.Canceled` under
+`errors.Is`, the convention `stageexec` already follows.
+
 **Why a stage script instead of `bootc upgrade`:** upstream `bootc upgrade`'s registry-transport pull currently fails on snow's composefs images. The snow-shipped `/usr/libexec/bootc-update-stage` script works around this: `podman pull` fetches the image into containers-storage (podman's pull path works where bootc's does not), then `bootc switch --transport containers-storage` stages the already-pulled image as the next boot deployment. This keeps snow's actual upgrade logic in one place (the snosi script) rather than duplicating pull/switch orchestration in ChairLift; ChairLift only invokes the script via pkexec and streams its output. The script is idempotent — it exits 0 without staging anything when the deployment is already current.
 
 ### bootc progress UI (updates page)
