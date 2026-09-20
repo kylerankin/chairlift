@@ -989,51 +989,62 @@ future edit reintroducing MIT (or any other license) in either location —
 the exact regression that motivated it — fails the gate instead of shipping
 mislabeled deb/rpm/apk package metadata again.
 
-A fourth and fifth regression test guard the same class of drift for the
-**repository URL**. `.goreleaser.yaml`'s `metadata.homepage`
-(`https://github.com/frostyard/chairlift`) is the **single source of truth**
-for that URL: GoReleaser Pro v2.13+ exposes the global `metadata:` block as
-template context to every templated field, so `release.footer`'s "Full
-Changelog" line derives its URL from `{{ .Metadata.Homepage }}` plus the
-`/compare/{{ .PreviousTag }}...{{ .Tag }}` suffix. The footer therefore
-contains no repository-owner literal at all, and `{{ .ProjectName }}` is
-deliberately **not** concatenated onto it — the homepage already ends in the
-repository name, so appending the project name would produce a doubled path.
-The regression this guards: the footer used to hardcode the repository's
-previous owner in that URL while `metadata.homepage` already named the
-current one, so a single file identified one repository two disagreeing ways
-and every generated release note's Full Changelog link pointed at the wrong
-owner. Deriving the footer from the homepage removes the duplicate rather
-than policing it, and the two tests keep the now-load-bearing source of truth
-honest:
+A fourth regression test guards the same class of drift for the
+**repository URL**. GoReleaser OSS (unlike Pro) has no global `metadata:`
+block and therefore no `metadata.homepage` to template a field from, so
+`.goreleaser.yaml`'s `release.footer` carries the repository URL as a literal
+in its "Full Changelog" line — `https://github.com/projectbluefin/chairlift`
+plus the `/compare/{{ .PreviousTag }}...{{ .Tag }}` suffix. That literal text
+is the **single source of truth** for the repository URL: there is no second,
+disagreeing copy of it anywhere else in the config. The footer keeps the
+`/compare/{{ .PreviousTag }}...{{ .Tag }}` suffix for the release-note
+comparison link, and `{{ .ProjectName }}` is deliberately **not** concatenated
+onto it — the homepage already ends in the repository name, so appending the
+project name would produce a doubled path. The regression this guards: the
+footer used to hardcode the repository's previous owner in that URL while the
+package still lived under the current one, so a single file identified one
+repository two disagreeing ways and every generated release note's Full
+Changelog link pointed at the wrong owner. Keeping the URL as the single
+literal in the footer removes the duplicate rather than policing it:
 
-- **`TestGoreleaserMetadataHomepageIsCanonicalRepo`** asserts
-  `cfg.Metadata.Homepage` still equals `https://github.com/frostyard/chairlift`,
-  so the value the footer depends on cannot silently drift.
-- **`TestGoreleaserReleaseFooterUsesMetadataHomepage`** asserts the parsed
-  `release.footer` has exactly one "Full Changelog" line, that it references
-  `{{ .Metadata.Homepage }}`, that it keeps the
-  `/compare/{{ .PreviousTag }}...{{ .Tag }}` suffix, and that it contains no
-  `.ProjectName`; a separate check rejects any `github.com/` literal anywhere
-  in the footer, which catches a rewrite to a hardcoded *current*-owner URL
-  just as surely as a stale one. An absent or empty footer, or any line count
+- **`TestGoreleaserReleaseFooterHasCanonicalRepoURL`** asserts the parsed
+  `release.footer` has exactly one "Full Changelog" line, that it contains the
+  canonical repository URL `https://github.com/projectbluefin/chairlift`, that
+  it keeps the `/compare/{{ .PreviousTag }}...{{ .Tag }}` suffix, and that it
+  contains no `.ProjectName`. An absent or empty footer, or any line count
   other than exactly one "Full Changelog" line, is a `t.Fatal`, not a silent
-  pass, so the test cannot succeed vacuously against a config whose footer
-  was deleted.
+  pass, so the test cannot succeed vacuously against a config whose footer was
+  deleted.
 
-Both assert on the **template text** parsed out of the YAML — never a
+This asserts on the **template text** parsed out of the YAML — never a
 rendered value. The footer is a Go template expanded by GoReleaser only at
-release time, and GoReleaser Pro (this config sets `pro: true` and a
+release time, and GoReleaser OSS (this config sets no `pro:` block and no
 `nightly:` block) is not installed on the gate host or in `make ci`; it runs
-only in `.github/workflows/{release,snapshot}.yml` via `goreleaser-action`
-with a `GORELEASER_KEY` secret. `goreleaser check` is therefore deliberately
-not run anywhere — locally, in `gates_chunk`, or in `make ci` — and neither
-test shells out or renders anything. As with the license guard,
-`MetadataConfig.Homepage` and `ReleaseConfig.Footer` in
-`internal/installcheck/installcheck.go` exist solely so `yaml.Unmarshal` has
-somewhere to put those values, exactly as `MetadataConfig.License` does;
-without the struct fields yaml.v3 drops them and both tests would pass
+only in `.github/workflows/release.yml` via `goreleaser-action` with the
+default `GITHUB_TOKEN`, which is enough to publish binaries, archives, and the
+rpm/deb/apk nFPM packages straight to the GitHub Release for the tagged
+commit — no Pro license or `GORELEASER_KEY` secret. Snapshot output is
+governed separately by `.goreleaser.yaml`'s `snapshot:` block
+(`version_template: "{{ .ShortCommit }}-snapshot"`), which `goreleaser
+snapshot` expands locally for rolling `dev` builds; it needs no credentials and
+no workflow, so it is not gated here. `goreleaser check` is therefore
+deliberately not run anywhere — locally, in `gates_chunk`, or in `make ci` —
+and the test neither shells out nor renders anything. As with the license
+guard, `ReleaseConfig.Footer` in `internal/installcheck/installcheck.go` exists
+solely so `yaml.Unmarshal` has somewhere to put the footer value; there is no
+`MetadataConfig.Homepage`, because GoReleaser OSS exposes no `metadata.homepage`
+— without the struct field yaml.v3 drops the footer and the test would pass
 vacuously regardless of what the YAML says.
+
+> **Switch to plain GitHub Releases.** This repository previously shipped its
+> releases through GoReleaser Pro — a `pro: true` block, a `nightly:` block,
+> a `metadata.homepage` templated into `release.footer`, a separate
+> `.github/workflows/snapshot.yml`, and a `GORELEASER_KEY` secret. That
+> configuration no longer exists; the live config is GoReleaser OSS with a
+> hardcoded canonical URL in `release.footer`, `GITHUB_TOKEN` in
+> `.github/workflows/release.yml`, and a local `snapshot:` block for rolling
+> builds. The tests and structs above were rewritten to assert the OSS layout
+> rather than the retired Pro one.
 
 A sixth regression test guards the packages' **declared runtime
 dependencies**. Until issue #89 the deb/rpm/apk metadata named no runtime

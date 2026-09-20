@@ -1642,8 +1642,26 @@ page_name:
 - **Dev build**: `make dev` builds with `CGO_ENABLED=1` and `-race` flag for race detection
 - **Version**: Set via ldflags by goreleaser (`buildVersion`)
 - **Semantic versioning**: Uses [svu](https://github.com/caarlos0/svu) via `make bump`
-- **CI**: GitHub Actions workflows for test, snapshot, and release (`.github/workflows/`); per [ADR-0034](../org-adrs.md), snapshot publishers use the repository-scoped `goreleaser-nightly` concurrency group with in-progress cancellation so only the newest tested `main` commit publishes to the rolling `dev` release and concurrent GoReleaser uploads cannot collide. Every external `uses:` reference in every workflow is pinned to a full 40-character commit SHA (with its version or source ref retained as a comment); `internal/installcheck.TestWorkflowActionsUseImmutableCommitSHAs` inventories both `.yml` and `.yaml` workflow files and rejects mutable tags, branches, short SHAs, and expressions while allowing repository-local `./` actions.
-- **Release**: GoReleaser config at `.goreleaser.yaml`. Its `metadata.homepage` is the single source of truth for the repository URL and is consumed by `release.footer`, whose "Full Changelog" link is templated from `{{ .Metadata.Homepage }}` rather than a hardcoded owner; two static tests guard that pairing — see the "Install-path consistency (`internal/installcheck`)" section of [package-managers.md](./package-managers.md#install-path-consistency-internalinstallcheck)
+- **CI**: GitHub Actions workflows for test and release (`.github/workflows/`);
+  the release workflow (`.github/workflows/release.yml`, job `goreleaser`) runs
+  GoReleaser OSS with `GITHUB_TOKEN` to publish the tagged commit's artifacts
+  straight to GitHub Releases. There is no separate snapshot workflow: rolling
+  `dev` builds run `goreleaser snapshot` locally against the `snapshot:` block
+  in `.goreleaser.yaml`, which needs no workflow or credentials. Every external
+  `uses:` reference in every workflow is pinned to a full 40-character commit
+  SHA (with its version or source ref retained as a comment);
+  `internal/installcheck.TestWorkflowActionsUseImmutableCommitSHAs` inventories
+  both `.yml` and `.yaml` workflow files and rejects mutable tags, branches,
+  short SHAs, and expressions while allowing repository-local `./` actions.
+- **Release**: GoReleaser config at `.goreleaser.yaml` (GoReleaser OSS, run in
+  `.github/workflows/release.yml` with `GITHUB_TOKEN`). The repository URL is a
+  literal in `release.footer`'s "Full Changelog" line — there is no
+  `metadata.homepage` to template from, since OSS has no `metadata:` block —
+  and that literal is the single source of truth for it; a static test guards
+  it — see the "Install-path consistency (`internal/installcheck`)" section of
+  [package-managers.md](./package-managers.md#install-path-consistency-internalinstallcheck).
+  Snapshot builds expand `.goreleaser.yaml`'s `snapshot:` block locally via
+  `goreleaser snapshot` and need no workflow.
 - **Other targets**: `make fmt` (gofmt), `make lint` (golangci-lint), `make install`/`make uninstall` (system install including polkit policies, icons, and wrapper script; default `PREFIX=/usr`, the only prefix that matches where polkit reads policy files and the fixed pkexec exec-path annotations for both helper binaries — see "Privileged operations" above), `make build-linux-amd64`/`make build-linux-arm64` (cross-compilation)
 
 ### Runtime dependencies
