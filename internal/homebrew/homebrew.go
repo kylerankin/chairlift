@@ -133,8 +133,8 @@ func runBrewCommand(args ...string) (string, error) {
 
 // runBrewCommandAt runs exe with args under ctx and returns its stdout. The
 // executable and context are parameters so tests can drive a fake script and
-// control the deadline; runBrewCommand is the only production caller and
-// always passes "brew".
+// control the deadline; production callers (runBrewCommand and Update) always
+// pass "brew".
 //
 // The command runs in its own process group and cancellation signals the
 // whole group, so brew's helper processes (git, curl, download workers) die

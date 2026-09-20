@@ -100,8 +100,8 @@ func runFlatpakCommand(args ...string) (string, error) {
 
 // runFlatpakCommandAt runs exe with args under ctx and returns its stdout. The
 // executable and context are parameters so tests can drive a fake script and
-// control the deadline; runFlatpakCommand is the only production caller and
-// always passes "flatpak".
+// control the deadline; production callers (runFlatpakCommand and Update)
+// always pass "flatpak".
 //
 // The command runs in its own process group and cancellation signals the
 // whole group, so flatpak's helper processes (download workers, ostree pulls)
@@ -281,12 +281,13 @@ func Uninstall(appID string, user bool) error {
 	return err
 }
 
-// Update updates all Flatpak applications. It runs under ctx so a caller that
-// started the command as one phase of a larger run — Update All, for example —
-// can cancel the whole run and have this command stop with it, instead of the
-// command ignoring the parent deadline and running to its own 30-minute
-// budget. The mutation budget is still applied on top, so a lone caller stays
-// bounded by whichever deadline is nearer.
+// Update updates a Flatpak application, or all applications when appID is
+// empty. It runs under ctx so a caller that started the command as one phase
+// of a larger run — Update All, for example — can cancel the whole run and
+// have this command stop with it, instead of the command ignoring the parent
+// deadline and running to its own 30-minute budget. The mutation budget is
+// still applied on top, so a lone caller stays bounded by whichever deadline
+// is nearer.
 func Update(ctx context.Context, appID string, user bool) error {
 	args := []string{"update", "-y"}
 	if user {
