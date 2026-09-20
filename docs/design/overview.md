@@ -1141,7 +1141,12 @@ Each exported function's distinct outcomes:
   returns one `Result` per phase. A phase failure does **not** abort the run:
   applications and packages are independent of the OS image and of each
   other. Context cancellation is the one exception and marks every remaining
-  phase `OutcomeSkipped`. A nil provider seam yields `OutcomeFailed`, never
+  phase `OutcomeSkipped`. The phase that was still running when the user
+  cancelled is classified the same way: its error unwraps to
+  `context.Canceled`, so `Run` reports it `OutcomeSkipped` with detail
+  `Cancelled` rather than `OutcomeFailed`, and a user-requested stop never
+  reads as a broken update. Every other provider error is still
+  `OutcomeFailed`. A nil provider seam yields `OutcomeFailed`, never
   success. Events are dropped rather than blocking when nothing is receiving.
 - `Summarize` produces the counts, the `FailedPhases` list, `RestartRequired`,
   and one `Headline`. The distinct headlines are: nothing planned, every phase
