@@ -152,9 +152,15 @@ func (uh *UserHome) checkFeatureUpdates(totalFeatures int) {
 	ctx, cancel := updex.DefaultContext()
 	defer cancel()
 
-	checks, err := updex.CheckFeatures(ctx)
+	checks, warnings, err := updex.CheckFeatures(ctx)
 
 	sgtk.RunOnMainThread(func() {
+		// Warnings are retained even when the check fails, so they are logged
+		// before the error path returns rather than discarded with it.
+		for _, w := range warnings {
+			log.Printf("Feature update check warning: %s", w)
+		}
+
 		if err != nil {
 			log.Printf("Feature update check failed: %v", err)
 			if uh.featuresGroup != nil {
@@ -163,6 +169,7 @@ func (uh *UserHome) checkFeatureUpdates(totalFeatures int) {
 			return
 		}
 
+		incomplete := len(warnings) > 0
 		updateCount := 0
 		for _, check := range checks {
 			row, ok := uh.featureRows[check.Feature]
@@ -179,10 +186,17 @@ func (uh *UserHome) checkFeatureUpdates(totalFeatures int) {
 			if status.HasUpdate {
 				updateCount++
 			}
+			if status.Incomplete {
+				incomplete = true
+			}
 		}
 
 		if uh.featuresGroup != nil {
-			uh.featuresGroup.SetDescription(featurestatus.GroupDescription(totalFeatures, updateCount))
+			if incomplete {
+				uh.featuresGroup.SetDescription(featurestatus.GroupDescriptionIncomplete(totalFeatures, updateCount))
+			} else {
+				uh.featuresGroup.SetDescription(featurestatus.GroupDescription(totalFeatures, updateCount))
+			}
 		}
 	})
 }
