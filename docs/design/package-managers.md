@@ -1025,9 +1025,9 @@ default `GITHUB_TOKEN`, which is enough to publish binaries, archives, and the
 rpm/deb/apk nFPM packages straight to the GitHub Release for the tagged
 commit — no Pro license or `GORELEASER_KEY` secret. Snapshot output is
 governed separately by `.goreleaser.yaml`'s `snapshot:` block
-(`version_template: "{{ .ShortCommit }}-snapshot"`), which `goreleaser
-snapshot` expands locally for rolling `dev` builds; it needs no credentials and
-no workflow, so it is not gated here. `goreleaser check` is therefore
+(`version_template: "{{ .ShortCommit }}-snapshot"`), which sets the version
+template for local `goreleaser release --snapshot` builds; it needs no credentials
+and no workflow, so it is not gated here. `goreleaser check` is therefore
 deliberately not run anywhere — locally, in `gates_chunk`, or in `make ci` —
 and the test neither shells out nor renders anything. As with the license
 guard, `ReleaseConfig.Footer` in `internal/installcheck/installcheck.go` exists
@@ -1042,9 +1042,8 @@ vacuously regardless of what the YAML says.
 > `.github/workflows/snapshot.yml`, and a `GORELEASER_KEY` secret. That
 > configuration no longer exists; the live config is GoReleaser OSS with a
 > hardcoded canonical URL in `release.footer`, `GITHUB_TOKEN` in
-> `.github/workflows/release.yml`, and a local `snapshot:` block for rolling
-> builds. The tests and structs above were rewritten to assert the OSS layout
-> rather than the retired Pro one.
+> `.github/workflows/release.yml`, and a local `snapshot:` block. The tests and
+> structs above were rewritten to assert the OSS layout rather than the retired Pro one.
 
 A sixth regression test guards the packages' **declared runtime
 dependencies**. Until issue #89 the deb/rpm/apk metadata named no runtime

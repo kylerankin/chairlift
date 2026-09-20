@@ -1645,9 +1645,9 @@ page_name:
 - **CI**: GitHub Actions workflows for test and release (`.github/workflows/`);
   the release workflow (`.github/workflows/release.yml`, job `goreleaser`) runs
   GoReleaser OSS with `GITHUB_TOKEN` to publish the tagged commit's artifacts
-  straight to GitHub Releases. There is no separate snapshot workflow: rolling
-  `dev` builds run `goreleaser snapshot` locally against the `snapshot:` block
-  in `.goreleaser.yaml`, which needs no workflow or credentials. Every external
+  straight to GitHub Releases. There is no separate snapshot workflow; the
+  `snapshot:` block in `.goreleaser.yaml` only sets the version template for
+  local `goreleaser release --snapshot` builds and is not used by any workflow. Every external
   `uses:` reference in every workflow is pinned to a full 40-character commit
   SHA (with its version or source ref retained as a comment);
   `internal/installcheck.TestWorkflowActionsUseImmutableCommitSHAs` inventories
@@ -1660,8 +1660,8 @@ page_name:
   and that literal is the single source of truth for it; a static test guards
   it — see the "Install-path consistency (`internal/installcheck`)" section of
   [package-managers.md](./package-managers.md#install-path-consistency-internalinstallcheck).
-  Snapshot builds expand `.goreleaser.yaml`'s `snapshot:` block locally via
-  `goreleaser snapshot` and need no workflow.
+  The `snapshot:` block in `.goreleaser.yaml` configures local
+  `goreleaser release --snapshot` builds and needs no workflow.
 - **Other targets**: `make fmt` (gofmt), `make lint` (golangci-lint), `make install`/`make uninstall` (system install including polkit policies, icons, and wrapper script; default `PREFIX=/usr`, the only prefix that matches where polkit reads policy files and the fixed pkexec exec-path annotations for both helper binaries — see "Privileged operations" above), `make build-linux-amd64`/`make build-linux-arm64` (cross-compilation)
 
 ### Runtime dependencies
