@@ -86,22 +86,32 @@ func commandTimeout(args []string) time.Duration {
 
 // runFlatpakCommand executes a flatpak command and returns the output
 func runFlatpakCommand(args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout(args))
+	defer cancel()
+
+	return runFlatpakCommandCtx(ctx, args...)
+}
+
+// runFlatpakCommandCtx is the single dry-run gate for flatpak: it applies the
+// skip (before any exec.Cmd exists) and otherwise runs the command under ctx.
+// runFlatpakCommand supplies its own timeout context; context-taking exported
+// entry points such as Update supply the caller's context already narrowed to
+// the mutation budget, so cancellation propagates without a second gate that
+// could drift out of sync.
+func runFlatpakCommandCtx(ctx context.Context, args ...string) (string, error) {
 	if len(args) > 0 && stateChangingCommands[args[0]] && dryrun.Enabled() {
 		msg := fmt.Sprintf("[DRY-RUN] Would execute: flatpak %s", strings.Join(args, " "))
 		log.Println(msg)
 		return msg, nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout(args))
-	defer cancel()
-
 	return runFlatpakCommandAt(ctx, "flatpak", args...)
 }
 
 // runFlatpakCommandAt runs exe with args under ctx and returns its stdout. The
 // executable and context are parameters so tests can drive a fake script and
-// control the deadline; production callers (runFlatpakCommand and Update)
-// always pass "flatpak".
+// control the deadline; the sole production caller
+// (runFlatpakCommandCtx) always passes "flatpak".
 //
 // The command runs in its own process group and cancellation signals the
 // whole group, so flatpak's helper processes (download workers, ostree pulls)
@@ -306,13 +316,7 @@ func Update(ctx context.Context, appID string, user bool) error {
 	runCtx, cancel := context.WithTimeout(ctx, mutationTimeout)
 	defer cancel()
 
-	if len(args) > 0 && stateChangingCommands[args[0]] && dryrun.Enabled() {
-		msg := fmt.Sprintf("[DRY-RUN] Would execute: flatpak %s", strings.Join(args, " "))
-		log.Println(msg)
-		return nil
-	}
-
-	_, err := runFlatpakCommandAt(runCtx, "flatpak", args...)
+	_, err := runFlatpakCommandCtx(runCtx, args...)
 	return err
 }
 

@@ -119,22 +119,32 @@ func commandTimeout(args []string) time.Duration {
 
 // runBrewCommand executes a brew command and returns the output
 func runBrewCommand(args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout(args))
+	defer cancel()
+
+	return runBrewCommandCtx(ctx, args...)
+}
+
+// runBrewCommandCtx is the single dry-run gate for brew: it applies the skip
+// (before any exec.Cmd exists) and otherwise runs the command under ctx.
+// runBrewCommand supplies its own timeout context; context-taking exported
+// entry points such as Update supply the caller's context already narrowed to
+// the mutation budget, so cancellation propagates without a second gate that
+// could drift out of sync.
+func runBrewCommandCtx(ctx context.Context, args ...string) (string, error) {
 	if len(args) > 0 && stateChangingCommands[args[0]] && dryrun.Enabled() {
 		msg := fmt.Sprintf("[DRY-RUN] Would execute: brew %s", strings.Join(args, " "))
 		log.Println(msg)
 		return msg, nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout(args))
-	defer cancel()
-
 	return runBrewCommandAt(ctx, "brew", args...)
 }
 
 // runBrewCommandAt runs exe with args under ctx and returns its stdout. The
 // executable and context are parameters so tests can drive a fake script and
-// control the deadline; production callers (runBrewCommand and Update) always
-// pass "brew".
+// control the deadline; the sole production caller (runBrewCommandCtx) always
+// passes "brew".
 //
 // The command runs in its own process group and cancellation signals the
 // whole group, so brew's helper processes (git, curl, download workers) die
@@ -434,13 +444,7 @@ func Update(ctx context.Context) error {
 	runCtx, cancel := context.WithTimeout(ctx, mutationTimeout)
 	defer cancel()
 
-	if dryrun.Enabled() {
-		msg := "[DRY-RUN] Would execute: brew update"
-		log.Println(msg)
-		return nil
-	}
-
-	_, err := runBrewCommandAt(runCtx, "brew", "update")
+	_, err := runBrewCommandCtx(runCtx, "update")
 	return err
 }
 
