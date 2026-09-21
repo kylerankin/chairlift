@@ -407,9 +407,11 @@ func assertBluefinGroupsRendered(t *testing.T, outDir string) {
 
 	// The local-AI row selects its image from the stubbed GPU. The script
 	// stubs an Intel + NVIDIA hybrid, so the captured frame must show the
-	// CUDA stack — the case a vendor-directory catalog gets wrong.
+	// CUDA stack — the case a vendor-directory catalog gets wrong. The
+	// repository part alone is matched: the reference carries a pinned index
+	// digest that is rolled periodically, and this gate is about selection.
 	ai := findLogLine(t, outDir, "views: ai stack group built")
-	for _, want := range []string{"vendor=nvidia", "accelerator=CUDA", "image=quay.io/ramalama/cuda:latest"} {
+	for _, want := range []string{"vendor=nvidia", "accelerator=CUDA", "image=quay.io/ramalama/cuda"} {
 		if !strings.Contains(ai, want) {
 			t.Errorf("ai stack marker missing %q\n  %s", want, ai)
 		}

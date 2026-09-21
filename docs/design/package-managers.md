@@ -27,7 +27,7 @@ Wraps the `brew` CLI. Uses JSON output (`--json=v2`) for structured data where a
 | `Install(name, isCask)` | `brew install [--cask] <name>` | 30m | State-changing, dry-run aware |
 | `Uninstall(name, isCask)` | `brew uninstall [--cask] <name>` | 30m | State-changing, dry-run aware |
 | `Upgrade(name)` | `brew upgrade [<name>]` | 30m | State-changing; empty name upgrades all |
-| `Update()` | `brew update` | 30m | State-changing |
+| `Update(ctx)` | `brew update` | 30m (or the caller's, whichever is nearer) | State-changing; runs under the caller's context so Update All's cancellation stops it |
 | `Pin(name)` / `Unpin(name)` | `brew pin/unpin <name>` | 30m | State-changing, dry-run aware |
 | `Cleanup()` | `brew cleanup` | 30m | State-changing; returns output string |
 | `BundleDump(path, force)` | `brew bundle dump [--file=<path>] [--force]` | 30m | State-changing; writes to file path |
@@ -67,12 +67,18 @@ The outcomes are deliberately lossless and deterministic:
 `loadBrewBundles` on the Applications page calls discovery from a worker
 goroutine and applies every widget change through one
 `sgtk.RunOnMainThread` closure. `brew_bundles_group` is independent of
-`brew_group`, so this path neither reads nor refreshes the formulae/casks
-expanders. A successful live `BundleInstall` leaves the clicked row labelled
-`Installed` and permanently insensitive. A failed install restores the
-`Install` action. A successful dry-run uses
+`brew_group`, so this path never assumes the formulae/casks expanders exist.
+A successful live `BundleInstall` leaves the clicked row labelled `Installed`
+and permanently insensitive, then requests `loadHomebrewPackages()` because a
+bundle can install formulae and casks the current inventory snapshot predates.
+That refresh is safe in both configurations: `loadHomebrewPackages` nil-guards
+each expander, so it does nothing visible when `brew_group` is disabled, and
+it takes a `brewPackagesRefresh` generation, so a slower bundle-triggered
+refresh cannot overwrite newer rows. A failed install restores the `Install`
+action. A successful dry-run uses
 `actionmsg.BundleInstall(...).Complete == false`, shows an explicit preview,
-and restores the action because nothing was installed. Each row owns a
+and restores the action because nothing was installed — and for the same
+reason it does not refresh the inventory. Each row owns a
 `bundleview.InstallGate`, so a second callback cannot overlap a running
 install even if invoked independently of GTK's insensitive-button guard.
 
@@ -123,9 +129,9 @@ publish stale installed state.
 
 ### Error handling
 
-`runBrewCommand` is a thin wrapper: it applies the dry-run skip (before any `exec.Cmd` exists), builds a context from `commandTimeout(args)`, and delegates to the unexported `runBrewCommandAt(ctx context.Context, exe string, args ...string) (string, error)`, always passing `"brew"`. The executable path and context are parameters purely so `runner_test.go` can drive a `#!/bin/sh` script from `t.TempDir()` and control the deadline — the same seam `stageexec.Run` gives OS staging. No exported function takes a `context.Context`: callers get deadlines, not cancellation.
+`runBrewCommand` is a thin wrapper: it builds a context from `commandTimeout(args)` and delegates to `runBrewCommandCtx(ctx context.Context, args ...string) (string, error)`, which applies the dry-run skip (before any `exec.Cmd` exists) and otherwise calls the unexported `runBrewCommandAt(ctx context.Context, exe string, args ...string) (string, error)`, always passing `"brew"`. The executable path and context are parameters purely so `runner_test.go` can drive a `#!/bin/sh` script from `t.TempDir()` and control the deadline — the same seam `stageexec.Run` gives OS staging. `Update(ctx context.Context) error` is the one exported function that takes a `context.Context`: it narrows the caller's context with `context.WithTimeout(ctx, mutationTimeout)` — whichever deadline is nearer wins — and passes it to the same `runBrewCommandCtx`, so Update All's cancellation stops `brew update` instead of the command running on to its own 30-minute budget. Every other exported function gets a deadline, not cancellation. Routing both paths through `runBrewCommandCtx` keeps a single dry-run gate, so the two cannot drift apart.
 
-`runBrewCommandAt` starts the command in its own process group (`cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}`) and sets `cmd.Cancel` to `syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)`, so brew's helper processes (git, curl, download workers) are killed with the command instead of being orphaned when only the direct child is signalled. `cmd.WaitDelay` (5s) bounds the wait, because those helpers inherit the stdout/stderr pipes and a straggler would otherwise hold `Wait` open indefinitely. `cmd.Run` still reaps the child.
+`runBrewCommandAt` starts the command in its own process group (`cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}`) and sets `cmd.Cancel` to `syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)`, so brew's helper processes (git, curl, download workers) are killed with the command instead of being orphaned when only the direct child is signalled. `cmd.WaitDelay` (5s) bounds the wait, because those helpers inherit the stdout/stderr pipes and a straggler would otherwise hold `Wait` open indefinitely. `cmd.Run` still reaps the child. Read-only commands still capture full stdout for JSON/text parsers. State-changing commands wire stdout and stderr to 64 KiB tail writers instead: successful mutation output is discarded, and failures retain only bounded diagnostic context (stderr, or stdout when stderr is empty).
 
 Failures classify into exactly five distinct outcomes, checked in this order — `errors.Is` against `context.DeadlineExceeded`/`context.Canceled`, never `==` on `ctx.Err()`, so a wrapped cause still classifies:
 
@@ -134,10 +140,10 @@ Failures classify into exactly five distinct outcomes, checked in this order —
 | The context deadline expired (`commandTimeout(args)` elapsed) | `*Error`, message `Command '<exe> <args>' timed out`, unwrapping to `context.DeadlineExceeded` |
 | The context was cancelled by its owner | `*Error`, message `Command '<exe> <args>' was canceled`, unwrapping to `context.Canceled` |
 | The command exited non-zero and its stderr matches `isUntrustedTapMessage` | `*UntrustedTapError` carrying the stderr text (see "Tap trust" below) |
-| The command exited non-zero otherwise | `*Error` carrying the stderr text, unwrapping to the `*exec.ExitError` |
+| The command exited non-zero otherwise | `*Error` carrying stderr, or bounded stdout when stderr is empty for a state-changing command, unwrapping to the `*exec.ExitError` |
 | The executable is missing (`exec.ErrNotFound` for a bare name, `fs.ErrNotExist` for an explicit path) | `*NotFoundError` ("Homebrew not found…") |
 
-A deadline and a cancellation never produce the same message, and neither surfaces as `signal: killed` — the process is killed by ChairLift's own `Cancel` func, so the raw wait error is replaced by the classified one. `Error` carries an `Err error` field and an `Unwrap() error` method, so `errors.Is(err, context.DeadlineExceeded)` works for callers while `Error` keeps satisfying `error` and keeps its human-readable `Message`; nothing in the views switches on its concrete type. `internal/homebrew/runner_test.go` covers each outcome against a fake script, asserts the deadline and cancellation messages differ and contain no `signal: killed`, and `TestRunBrewCommandAtKillsProcessGroup` proves the process-group kill by having the fake script spawn a background `sleep`, recording its PID, and polling `syscall.Kill(pid, 0)` until it returns `ESRCH` — proving the helper is gone, not merely that the parent returned.
+A deadline and a cancellation never produce the same message, and neither surfaces as `signal: killed` — the process is killed by ChairLift's own `Cancel` func, so the raw wait error is replaced by the classified one. `Error` carries an `Err error` field and an `Unwrap() error` method, so `errors.Is(err, context.DeadlineExceeded)` works for callers while `Error` keeps satisfying `error` and keeps its human-readable `Message`; nothing in the views switches on its concrete type. `internal/homebrew/runner_test.go` covers each outcome against a fake script, asserts the deadline and cancellation messages differ and contain no `signal: killed`, proves state-changing output is bounded/discarded, and `TestRunBrewCommandAtKillsProcessGroup` proves the process-group kill by having the fake script spawn a background `sleep` and then checking that PID is gone after cancellation.
 
 ### Tap trust (Homebrew 6) (`internal/homebrew/trust.go`)
 
@@ -146,7 +152,7 @@ Homebrew 6 introduced per-tap trust: formulae/casks from a tap that isn't marked
 **Detection (`ListUntrustedTaps`)** combines three sources:
 1. `brew tap-info --installed --json` — parsed for each tap's `name` and `trusted` flag (`parseUntrustedTapNames`); this is the only brew-provided signal, and it tells you *which taps* are untrusted but not *what's installed from them*.
 2. Cellar keg receipts (`installedFormulaeByTap`) — walks `<prefix>/Cellar/<formula>/<version>/INSTALL_RECEIPT.json` and reads `.source.tap`, since brew's own listing commands can't see these formulae. One receipt per keg is enough to attribute the formula to a tap.
-3. Caskroom metadata (`installedCasksByTap`) — walks `<prefix>/Caskroom/<token>/.metadata/*/*/Casks/*.json` and reads `.tap`. Glob results are lexically, not chronologically, ordered (`"9"` sorts after `"10"`), so the newest file is picked by `mtime`, not by glob order. Casks installed via the Homebrew API (no local `Casks/<token>.json`) are skipped — they belong to `homebrew/cask`, which is always trusted.
+3. Cask install receipts (`installedCasksByTap`) — reads `<prefix>/Caskroom/<token>/.metadata/INSTALL_RECEIPT.json` and takes `.source.tap`, mirroring the formula path. That receipt (written by Homebrew's `Cask::Tab.create` into the cask's `.metadata` container) is the authoritative origin recorded at install time. The earlier scan of versioned `Caskroom/<token>/.metadata/*/*/Casks/*.json` metadata could not see tap-sourced casks at all: a cask installed from a tap is saved as a `.rb` Caskfile, so no `Casks/<token>.json` exists for it and exactly the untrusted-tap casks the remediation UI exists for were silently dropped.
 
 Only untrusted taps with at least one installed formula or cask are returned (`UntrustedTap{Name, Formulae, Casks}`, package names fully qualified as `tap/name`, ready to pass straight to `brew trust`); taps with nothing installed aren't actionable and are dropped.
 
@@ -352,30 +358,32 @@ The practical consequence is that a total failure — both installations unquery
 
 Exported surface:
 
-- `Status{Subtitle string; HasUpdate bool}` — the row state for one feature.
-- `Feature(name string, results []updex.CheckResult) (Status, bool)` — derives that state from *all* of the feature's components. Both halves come from a single call so the wording and the update decision cannot drift apart, the same reason `flatpakstatus.Subtitle` returns a `Result`. The second return value is `false` when `len(results) == 0`, telling the caller to leave the row's existing subtitle untouched and not to count the feature; putting that skip decision in the package is what makes the zero-components case table-testable at all.
-- `GroupDescription(totalFeatures, featuresWithUpdates int) string` — the group description after a check that completed.
+- `Status{Subtitle string; HasUpdate bool; Incomplete bool}` — the row state for one feature.
+- `Feature(name string, results []updex.CheckResult) (Status, bool)` — derives that state from *all* of the feature's components. Both halves come from a single call so the wording and the update decision cannot drift apart, the same reason `flatpakstatus.Subtitle` returns a `Result`. When `len(results) == 0` (e.g. per-component manifest/version lookup failed in updex), it returns a `Status` with subtitle `<name> — update check failed` and `Incomplete: true`.
+- `GroupDescription(totalFeatures, featuresWithUpdates int) string` — the group description after a check that completed with all components checked.
+- `GroupDescriptionIncomplete(totalFeatures, featuresWithUpdates int) string` — the group description when the check was incomplete (one or more enabled components could not be checked or partial warnings were emitted); it presents an incomplete state instead of claiming current.
 - `GroupDescriptionCheckFailed(totalFeatures int) string` — the group description when the check itself failed; it makes no claim about update state.
 
 **The ANY-component rule:** a feature has an update when **any** of its components reports one — not the first, not all. `Status.HasUpdate` is an OR across every element of `results`, and `featurestatus_test.go` asserts it by iterating every element of each case's slice rather than special-casing index 0, with cases placing the update first, last, in the middle, and in several components at once.
 
 **The feature-counting rule:** `featuresWithUpdates` is a count of **features**, not of components — a feature with three outdated components counts once. The package doc comment states this explicitly, since the description's first number is a feature count and its second must be one too or the sentence is incoherent.
 
-The five subtitle branches, for a feature named `<name>`:
+The six subtitle branches, for a feature named `<name>`:
 
 | Situation | Subtitle |
 |-----------|----------|
+| zero components / check failed | `<name> — update check failed` |
 | exactly one component has an update, non-empty `CurrentVersion` | `<name> — update available for <component> (v<cur> → v<new>)` |
 | exactly one component has an update, empty `CurrentVersion` | `<name> — update available for <component> (→ v<new>)` |
 | two or more components have updates | `<name> — updates available for <n> components` |
 | no updates, every component agrees on a non-empty `CurrentVersion` | `<name> — v<version>` |
 | no updates, components disagree or any `CurrentVersion` is empty | `<name> — up to date` |
 
-No branch emits a bare `v` with nothing after it, and no branch presents one component's version as the feature's version unless every component agrees on it. The group descriptions are `%d features available — update check failed`, `%d features available — all up to date`, `%d features available (1 update)` and `%d features available (%d updates)`; the leading `%d features available` fragment is reproduced verbatim from `loadFeatures`' own pre-check string, including its non-pluralized `features`, so only the update tail differs — which is also what makes a completed check that found nothing (`— all up to date`) visibly distinguishable from the pre-check state. `featurestatus_test.go` covers each branch as a table subtest and additionally asserts that the five subtitle branches are pairwise distinct for a fixed feature name, that no subtitle renders a bare `v`, and that the four group descriptions are distinct from each other and from the pre-check string.
+No branch emits a bare `v` with nothing after it, and no branch presents one component's version as the feature's version unless every component agrees on it. The group descriptions are `%d features available — update check failed`, `%d features available — update check incomplete`, `%d features available — all up to date`, `%d features available (1 update)`, `%d features available (%d updates)`, `%d features available (1 update) — update check incomplete`, and `%d features available (%d updates) — update check incomplete`; the leading `%d features available` fragment is reproduced verbatim from `loadFeatures`' own pre-check string, including its non-pluralized `features`, so only the update tail differs — which is also what makes a completed check that found nothing (`— all up to date`) visibly distinguishable from the pre-check state. `featurestatus_test.go` covers each branch as a table subtest and additionally asserts that the six subtitle branches are pairwise distinct for a fixed feature name, that no subtitle renders a bare `v`, and that the group descriptions are distinct from each other and from the pre-check string.
 
 The package is pure and holds no state, so it is safe to call from a worker goroutine or from inside an `sgtk.RunOnMainThread` closure.
 
-`checkFeatureUpdates` (`internal/views/features_page.go`) is its only call site, and — as with `loadFlatpakUpdates` and `flatpakstatus` — the view holds no text of its own: every string in the update-check path now comes from `featurestatus`. `updex.CheckFeatures` still runs on the worker goroutine and all widget access still happens inside the single existing `sgtk.RunOnMainThread` closure. Inside it, the features group's description is set on **every** outcome. When the check failed, the existing `log.Printf("Feature update check failed: %v", err)` is kept and the description becomes `featurestatus.GroupDescriptionCheckFailed(totalFeatures)` before returning, so the group no longer keeps reading `%d features available` — which looked like a completed check that found nothing. When the check succeeded, the description is set unconditionally from `featurestatus.GroupDescription(totalFeatures, updateCount)`, including when `updateCount` is `0`, so "all up to date" is actually reported rather than the pre-check string being left in place. Per feature the view calls `featurestatus.Feature(check.Feature, check.Results)` over the whole `Results` slice — `check.Results[0]` is gone from the file, and with it the bug that a feature whose second component was outdated read as up to date — and counts one per feature with `status.HasUpdate`, so the description's two numbers are both feature counts. The zero-component skip is preserved as the `ok == false` return: the row keeps its existing subtitle and is not counted. Both guards that config-driven visibility requires stay: `features_group` can be disabled, so every `SetDescription` (the failure one included) sits behind `uh.featuresGroup != nil` and the `uh.featureRows` lookup keeps its `!ok { continue }`.
+`checkFeatureUpdates` (`internal/views/features_page.go`) is its only call site, and — as with `loadFlatpakUpdates` and `flatpakstatus` — the view holds no text of its own: every string in the update-check path now comes from `featurestatus`. `updex.CheckFeatures` still runs on the worker goroutine and returns any retained warnings alongside results, and all widget access still happens inside the single existing `sgtk.RunOnMainThread` closure. Inside it, warnings are logged first — `CheckFeatures` retains them even when it returns an error, so the failure path must not return before them — and then the features group's description is set on **every** outcome. When the check failed, the existing `log.Printf("Feature update check failed: %v", err)` is kept and the description becomes `featurestatus.GroupDescriptionCheckFailed(totalFeatures)` before returning, so the group no longer keeps reading `%d features available` — which looked like a completed check that found nothing. When partial-check warnings or empty results occur, the group description becomes `featurestatus.GroupDescriptionIncomplete(totalFeatures, updateCount)` instead of claiming all features are up to date. When the check succeeded without issues, the description is set unconditionally from `featurestatus.GroupDescription(totalFeatures, updateCount)`, including when `updateCount` is `0`, so "all up to date" is actually reported rather than the pre-check string being left in place. Per feature the view calls `featurestatus.Feature(check.Feature, check.Results)` over the whole `Results` slice — `check.Results[0]` is gone from the file, and with it the bug that a feature whose second component was outdated read as up to date — and counts one per feature with `status.HasUpdate`, so the description's two numbers are both feature counts. Both guards that config-driven visibility requires stay: `features_group` can be disabled, so every `SetDescription` (the failure one included) sits behind `uh.featuresGroup != nil` and the `uh.featureRows` lookup keeps its `!ok { continue }`.
 
 ## Flatpak (`internal/flatpak/flatpak.go`)
 
@@ -383,23 +391,34 @@ Wraps the `flatpak` CLI. Parses tabular (tab-delimited, falling back to whitespa
 
 ### Key types
 
-- **`Application`** — name, applicationID, version, branch, origin, installation (user/system), ref
-- **`UpdateInfo`** — name, applicationID, newVersion, branch, origin, installation
-- **`ApplicationInfo`** — embeds `Application`, adds description, runtime, permissions map
+- **`Kind`** — `KindApplication` (`"app"`) or `KindRuntime` (`"runtime"`); the ref shape an entry is, and therefore which `flatpak list` filter reports it
+- **`Application`** — name, applicationID, version, installation (user/system), kind
+- **`UpdateInfo`** — name, applicationID, newVersion, installation
+
+`--app` and `--runtime` are mutually exclusive `flatpak list` filters: an
+application listing never reports a runtime or a runtime extension, and the
+reverse holds too. Anything shipped as a runtime extension — the MangoHud
+Vulkan layer that `internal/gaming` installs, for one — is therefore
+invisible to an application-only inventory no matter how it was installed.
+That is why the listing functions come in both shapes and why `Kind` is
+stamped from the filter the query was made with rather than read back out of
+the `ref` column: a row that falls through to the whitespace-splitting
+fallback may not have captured the ref at all, and it still has to be
+classified.
 
 ### Operations
 
 | Function | CLI command | Timeout | Notes |
 |----------|------------|---------|-------|
-| `ListUserApplications()` | `flatpak list --user --app --columns=name,application,version,branch,origin,ref` | 30s | Tabular parsed |
-| `ListSystemApplications()` | `flatpak list --system --app --columns=name,application,version,branch,origin,ref` | 30s | Tabular parsed |
-| `ListUpdates(user)` | `flatpak remote-ls --updates --app --columns=name,application,version,branch,origin [--user\|--system]` | 30s | Separate calls for user/system; `--app` excludes runtimes |
+| `ListUserApplications()` | `flatpak list --user --app --columns=name,application,version` | 30s | Tabular parsed; `--app` excludes runtimes and runtime extensions |
+| `ListSystemApplications()` | `flatpak list --system --app --columns=name,application,version` | 30s | Tabular parsed; `--app` excludes runtimes and runtime extensions |
+| `ListUserRuntimes()` | `flatpak list --user --runtime --columns=name,application,version` | 30s | Runtimes, SDKs, and runtime extensions only |
+| `ListSystemRuntimes()` | `flatpak list --system --runtime --columns=name,application,version` | 30s | Runtimes, SDKs, and runtime extensions only |
+| `ListUpdates(user)` | `flatpak remote-ls --updates --app --columns=name,application,version [--user\|--system]` | 30s | Separate calls for user/system; `--app` excludes runtimes |
 | `Install(appID, user)` | `flatpak install -y [--user\|--system] <appID>` | 30m | State-changing |
 | `Uninstall(appID, user)` | `flatpak uninstall -y [--user\|--system] <appID>` | 30m | State-changing |
-| `Update(appID, user)` | `flatpak update -y [--user\|--system] [<appID>]` | 30m | State-changing; empty appID updates all |
+| `Update(ctx, appID, user)` | `flatpak update -y [--user\|--system] [<appID>]` | 30m (or the caller's, whichever is nearer) | State-changing; empty appID updates all; runs under the caller's context so Update All's cancellation stops it |
 | `UninstallUnused()` | `flatpak uninstall --unused -y` | 30m | Maintenance cleanup |
-| `Info(appID, user)` | `flatpak info --show-metadata [--user\|--system] <appID>` | 30s | Key-value parsed |
-| `GetRemotes(user)` | `flatpak remotes --columns=name [--user\|--system]` | 30s | Lists configured remotes |
 
 ### State-changing commands
 
@@ -407,9 +426,9 @@ Wraps the `flatpak` CLI. Parses tabular (tab-delimited, falling back to whitespa
 
 ### Error handling
 
-`runFlatpakCommand` is a thin wrapper: it applies the dry-run skip (before any `exec.Cmd` exists), builds a context from `commandTimeout(args)`, and delegates to the unexported `runFlatpakCommandAt(ctx context.Context, exe string, args ...string) (string, error)`, always passing `"flatpak"`. The executable path and context are parameters purely so `runner_test.go` can drive a `#!/bin/sh` script from `t.TempDir()` and control the deadline — the same seam `stageexec.Run` gives OS staging and `runBrewCommandAt` gives `internal/homebrew`. No exported function takes a `context.Context`: callers get deadlines, not cancellation. flatpak runs unprivileged; no `pkexec` is involved on this path.
+`runFlatpakCommand` is a thin wrapper: it builds a context from `commandTimeout(args)` and delegates to `runFlatpakCommandCtx(ctx context.Context, args ...string) (string, error)`, which applies the dry-run skip (before any `exec.Cmd` exists) and otherwise calls the unexported `runFlatpakCommandAt(ctx context.Context, exe string, args ...string) (string, error)`, always passing `"flatpak"`. The executable path and context are parameters purely so `runner_test.go` can drive a `#!/bin/sh` script from `t.TempDir()` and control the deadline — the same seam `stageexec.Run` gives OS staging and `runBrewCommandAt` gives `internal/homebrew`. `Update(ctx context.Context, appID string, user bool) error` is the one exported function that takes a `context.Context`: it narrows the caller's context with `context.WithTimeout(ctx, mutationTimeout)` — whichever deadline is nearer wins — and passes it to the same `runFlatpakCommandCtx`, mirroring `homebrew.Update`, so Update All's cancellation stops `flatpak update`. Every other exported function gets a deadline, not cancellation, and the single dry-run gate in `runFlatpakCommandCtx` covers both paths. flatpak runs unprivileged; no `pkexec` is involved on this path.
 
-`runFlatpakCommandAt` starts the command in its own process group (`cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}`) and sets `cmd.Cancel` to `syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)`, so flatpak's download helpers (download workers, ostree pulls) are killed with the command instead of being orphaned when only the direct child is signalled. `cmd.WaitDelay` (5s) bounds the wait, because those helpers inherit the stdout/stderr pipes and a straggler would otherwise hold `Wait` open indefinitely. `cmd.Run` still reaps the child.
+`runFlatpakCommandAt` starts the command in its own process group (`cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}`) and sets `cmd.Cancel` to `syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)`, so flatpak's download helpers (download workers, ostree pulls) are killed with the command instead of being orphaned when only the direct child is signalled. `cmd.WaitDelay` (5s) bounds the wait, because those helpers inherit the stdout/stderr pipes and a straggler would otherwise hold `Wait` open indefinitely. `cmd.Run` still reaps the child. Read-only commands still capture full stdout for parsers. State-changing commands wire stdout and stderr to 64 KiB tail writers instead: successful mutation output is discarded, and failures retain only bounded diagnostic context (stderr, or stdout when stderr is empty).
 
 Failures classify into exactly four distinct outcomes, checked in this order — `errors.Is` against `context.DeadlineExceeded`/`context.Canceled`, never `==` on `ctx.Err()`, so a wrapped cause still classifies:
 
@@ -417,10 +436,10 @@ Failures classify into exactly four distinct outcomes, checked in this order —
 |-----------|--------|
 | The context deadline expired (`commandTimeout(args)` elapsed) | `*Error`, message `Command '<exe> <args>' timed out`, unwrapping to `context.DeadlineExceeded` |
 | The context was cancelled by its owner | `*Error`, message `Command '<exe> <args>' was canceled`, unwrapping to `context.Canceled` |
-| The command exited non-zero | `*Error` carrying the stderr text ("Flatpak command failed: …"), unwrapping to the `*exec.ExitError` |
+| The command exited non-zero | `*Error` carrying stderr, or bounded stdout when stderr is empty for a state-changing command ("Flatpak command failed: …"), unwrapping to the `*exec.ExitError` |
 | The executable is missing (`exec.ErrNotFound` for a bare name, `fs.ErrNotExist` for an explicit path) | `*NotFoundError` ("Flatpak not found…") |
 
-A deadline and a cancellation never produce the same message, and neither surfaces as `signal: killed` — the process is killed by ChairLift's own `Cancel` func, so the raw wait error is replaced by the classified one. `Error` carries an `Err error` field and an `Unwrap() error` method, so `errors.Is(err, context.DeadlineExceeded)` works for callers while `Error` keeps satisfying `error` and keeps its human-readable `Message`; nothing in the views switches on its concrete type. `internal/flatpak/runner_test.go` covers each outcome against a fake script, asserts the deadline and cancellation messages differ and contain no `signal: killed`, and `TestRunFlatpakCommandAtKillsProcessGroup` proves the process-group kill by having the fake script spawn a background `sleep`, recording its PID, and polling `syscall.Kill(pid, 0)` until it returns `ESRCH` — proving the helper is gone, not merely that the parent returned.
+A deadline and a cancellation never produce the same message, and neither surfaces as `signal: killed` — the process is killed by ChairLift's own `Cancel` func, so the raw wait error is replaced by the classified one. `Error` carries an `Err error` field and an `Unwrap() error` method, so `errors.Is(err, context.DeadlineExceeded)` works for callers while `Error` keeps satisfying `error` and keeps its human-readable `Message`; nothing in the views switches on its concrete type. `internal/flatpak/runner_test.go` covers each outcome against a fake script, asserts the deadline and cancellation messages differ and contain no `signal: killed`, proves state-changing output is bounded/discarded, and `TestRunFlatpakCommandAtKillsProcessGroup` proves the process-group kill by having the fake script spawn a background `sleep` and then checking that PID is gone after cancellation.
 
 `flatpak_test.go` separately drives every public CLI wrapper against a fake
 `flatpak` on `PATH`, asserting exact user/system arguments, parsing, and query
@@ -719,10 +738,10 @@ Type aliases to `github.com/frostyard/updex/updex`:
 
 | Function | Implementation | Mode | Timeout | Notes |
 |----------|---------------|------|---------|-------|
-| `IsInstalled()` | Go library: `client.Features()` | Direct | 3s | Checks if updex features are configured |
+| `IsInstalled()` | Go library: `client.Features()` | Direct | 3s | Checks if updex features are configured (requires `err == nil` and `len(features) > 0`) |
 | `IsInstalledCached()` | Cached `IsInstalled()` | Direct | — | `sync.Once`, runs check at most once |
 | `ListFeatures()` | Go library: `client.Features()` | Direct | 5min | Returns `[]Feature` |
-| `CheckFeatures()` | Go library: `client.CheckFeatures()` | Direct | 5min | Returns `[]FeatureCheck` |
+| `CheckFeatures()` | Go library: `client.CheckFeatures()` | Direct | 5min | Returns `([]FeatureCheck, []string, error)` (retains warnings) |
 | `EnableFeature(name)` | `pkexec /usr/bin/chairlift-updex-helper enable-feature <name>` | pkexec | 5min | State-changing |
 | `DisableFeature(name)` | `pkexec /usr/bin/chairlift-updex-helper disable-feature <name>` | pkexec | 5min | State-changing |
 | `UpdateFeatures()` | `pkexec /usr/bin/chairlift-updex-helper update` | pkexec | 5min | Downloads enabled features |
@@ -853,26 +872,33 @@ blocks — with no shared code path, so nothing stops them (or
 `internal/updex.HelperPath`, the fixed absolute path `pkexec` matches against
 the policy's `exec.path` annotation) from silently drifting apart.
 
-ChairLift packages the bootc, sysupdate, and updex `.policy` files. It no longer
-ships its old `.rules` files, which returned `YES` for every active local
-member of the `sudo` group and bypassed authentication. Source installation
-explicitly removes those legacy rule paths; package upgrades remove them as
-obsolete tracked files. All three policies use normal administrator
-authentication, while the updex policy selects one action for each supported
-first argument and the helper validates the complete argv shape.
+ChairLift packages the bootc, sysupdate, updex, and ublue `.policy` files. It
+no longer ships its old `.rules` files, which returned `YES` for every active
+local member of the `sudo` group and bypassed authentication. Source
+installation explicitly removes those legacy rule paths; package upgrades
+remove them as obsolete tracked files. All four policies use normal
+administrator authentication. The updex and ublue policies select one action for
+each supported first argument, and the helpers validate the complete argv shape.
 
-All three layouts install the repository's `config.yml` as package-owned
+Every install layout installs the repository's `config.yml` as package-owned
 maintainer defaults at `/usr/share/chairlift/config.yml`. None installs
 `/etc/chairlift/config.yml`: that higher-precedence path belongs to the
 administrator and must survive package installation and upgrades unchanged.
 
 GoReleaser has two nFPM entries. `projectbluefin-chairlift` is self-contained and
-selects both `chairlift` and `chairlift-updex-helper` builds.
-`projectbluefin-chairlift-system-integration` selects only the helper and packages
-only maintainer config plus the bootc/sysupdate/updex policies, for pairing with a
-user-scoped app installation. The two package names conflict to prevent
-simultaneous ownership of the same fixed system files. The companion does not
-provide either OS stager; a distro must provide trusted implementations at
+selects the `chairlift`, `chairlift-updex-helper`, and
+`chairlift-ublue-helper` builds. `projectbluefin-chairlift-system-integration`
+selects both helper builds and packages only `/usr/bin/chairlift-updex-helper`,
+`/usr/bin/chairlift-ublue-helper`,
+`/usr/share/polkit-1/actions/io.projectbluefin.chairlift.bootc.policy`,
+`/usr/share/polkit-1/actions/io.projectbluefin.chairlift.sysupdate.policy`,
+`/usr/share/polkit-1/actions/io.projectbluefin.chairlift.updex.policy`,
+`/usr/share/polkit-1/actions/io.projectbluefin.chairlift.ublue.policy`,
+`/usr/share/chairlift/config.yml`, and the channel-table example at
+`/usr/share/doc/chairlift/channels.example.yml`, for pairing with a user-scoped
+app installation. The two package names conflict to
+prevent simultaneous ownership of the same fixed system files. The companion
+does not provide either OS stager; a distro must provide trusted implementations at
 `/usr/libexec/bootc-update-stage` and, on native A/B hosts,
 `/usr/libexec/snosi-sysupdate-stage`. This split is decision
 record [ADR-0006](../adr/0006-split-system-integration-package-with-mutual-conflicts.md).
@@ -884,10 +910,9 @@ installed layout itself:
 - **`TestMakefileInstallUsesUsrPrefix`** runs `make -n install
   DESTDIR=<t.TempDir()>` — a dry run, so no compilation, no writes outside
   the temp dir, and no root — once with no `PREFIX` override and once with
-  `PREFIX=/usr`, and asserts the printed `install -Dm...` lines place the
-  updex helper at `DESTDIR` + `internal/updex.HelperPath` and all three
-  policies under the fixed `/usr/share/polkit-1/actions` directory PolicyKit
-  reads,
+  `PREFIX=/usr`, and asserts the printed `install -Dm...` lines place both
+  helper binaries under `DESTDIR/usr/bin` and all four policies under the
+  fixed `/usr/share/polkit-1/actions` directory PolicyKit reads,
   removes both legacy rules from `DESTDIR/usr/share/polkit-1/rules.d`,
   installs maintainer defaults at
   `DESTDIR/usr/share/chairlift/config.yml`, and never targets the
@@ -908,19 +933,28 @@ installed layout itself:
   `nfpms[0]`, so adding or reordering a second package with the wrong layout
   still fails — per
   `docs/skills/collection-regressions/SKILL.md`),
-  asserts each entry's `bindir` matches the directory of
-  `internal/updex.HelperPath`, its updex/bootc/sysupdate policy
-  `contents[].dst` entries
-  equal the fixed polkit-1 actions paths, their policy/config modes remain
-  `0644`, and no `.rules` content remains. It also requires every package to
+  asserts each entry's `bindir` matches the fixed helper directory, its
+  updex/ublue/bootc/sysupdate policy `contents[].dst` entries equal the fixed
+  polkit-1 actions paths, their policy/config modes remain `0644`, and no
+  `.rules` content remains. It also requires every package to
   map the repository `config.yml` to
   `/usr/share/chairlift/config.yml` and rejects any content entry targeting
   `/etc/chairlift/config.yml`.
-- **`TestGoreleaserPublishesSystemIntegrationPackage`** requires exactly one
+- **`TestGoreleaserPublishesTheSystemCompanionPackage`** requires exactly one
   full package and one integration package, verifies their build filters,
-  mutual conflicts, unique IDs, and the integration package's exact four
+  mutual conflicts, unique IDs, and the integration package's exact six
   content mappings. This prevents the companion from accidentally acquiring
   the GUI binary or losing one of the root-owned integration files.
+  It was named `TestGoreleaserPublishesSystemIntegrationPackage` until
+  2026-09-18 — the name ADR-0006 records, and the one still correct as that
+  decision's historical context. `Integration` in the name matched the
+  `-skip "Integration"` half of the filter described below, so despite being
+  cited by AGENTS.md and the ADR as the enforcement for the
+  system-integration split, the filtered unit-test step never selected it. Renaming it
+  was the fix; `internal/installcheck`'s
+  `TestNoInternalTestNameIsExcludedByTheCIFilter` now rejects any test under
+  `internal/` that the filter would drop, so no other gate can be silently
+  inert the same way.
 
 Both tests fail — not skip — if `internal/updex.HelperPath`, the Makefile's
 `PREFIX` default, or `.goreleaser.yaml`'s `nfpms` block change independently
@@ -955,48 +989,101 @@ future edit reintroducing MIT (or any other license) in either location —
 the exact regression that motivated it — fails the gate instead of shipping
 mislabeled deb/rpm/apk package metadata again.
 
-A fourth and fifth regression test guard the same class of drift for the
-**repository URL**. `.goreleaser.yaml`'s `metadata.homepage`
-(`https://github.com/frostyard/chairlift`) is the **single source of truth**
-for that URL: GoReleaser Pro v2.13+ exposes the global `metadata:` block as
-template context to every templated field, so `release.footer`'s "Full
-Changelog" line derives its URL from `{{ .Metadata.Homepage }}` plus the
-`/compare/{{ .PreviousTag }}...{{ .Tag }}` suffix. The footer therefore
-contains no repository-owner literal at all, and `{{ .ProjectName }}` is
-deliberately **not** concatenated onto it — the homepage already ends in the
-repository name, so appending the project name would produce a doubled path.
-The regression this guards: the footer used to hardcode the repository's
-previous owner in that URL while `metadata.homepage` already named the
-current one, so a single file identified one repository two disagreeing ways
-and every generated release note's Full Changelog link pointed at the wrong
-owner. Deriving the footer from the homepage removes the duplicate rather
-than policing it, and the two tests keep the now-load-bearing source of truth
-honest:
+A fourth regression test guards the same class of drift for the
+**repository URL**. GoReleaser OSS (unlike Pro) has no global `metadata:`
+block and therefore no `metadata.homepage` to template a field from, so
+`.goreleaser.yaml`'s `release.footer` carries the repository URL as a literal
+in its "Full Changelog" line — `https://github.com/projectbluefin/chairlift`
+plus the `/compare/{{ .PreviousTag }}...{{ .Tag }}` suffix. That literal text
+is the **single source of truth** for the repository URL: there is no second,
+disagreeing copy of it anywhere else in the config. The footer keeps the
+`/compare/{{ .PreviousTag }}...{{ .Tag }}` suffix for the release-note
+comparison link, and `{{ .ProjectName }}` is deliberately **not** concatenated
+onto it — the homepage already ends in the repository name, so appending the
+project name would produce a doubled path. The regression this guards: the
+footer used to hardcode the repository's previous owner in that URL while the
+package still lived under the current one, so a single file identified one
+repository two disagreeing ways and every generated release note's Full
+Changelog link pointed at the wrong owner. Keeping the URL as the single
+literal in the footer removes the duplicate rather than policing it:
 
-- **`TestGoreleaserMetadataHomepageIsCanonicalRepo`** asserts
-  `cfg.Metadata.Homepage` still equals `https://github.com/frostyard/chairlift`,
-  so the value the footer depends on cannot silently drift.
-- **`TestGoreleaserReleaseFooterUsesMetadataHomepage`** asserts the parsed
-  `release.footer` has exactly one "Full Changelog" line, that it references
-  `{{ .Metadata.Homepage }}`, that it keeps the
-  `/compare/{{ .PreviousTag }}...{{ .Tag }}` suffix, and that it contains no
-  `.ProjectName`; a separate check rejects any `github.com/` literal anywhere
-  in the footer, which catches a rewrite to a hardcoded *current*-owner URL
-  just as surely as a stale one. An absent or empty footer, or any line count
+- **`TestGoreleaserReleaseFooterHasCanonicalRepoURL`** asserts the parsed
+  `release.footer` has exactly one "Full Changelog" line, that it contains the
+  canonical repository URL `https://github.com/projectbluefin/chairlift`, that
+  it keeps the `/compare/{{ .PreviousTag }}...{{ .Tag }}` suffix, and that it
+  contains no `.ProjectName`. An absent or empty footer, or any line count
   other than exactly one "Full Changelog" line, is a `t.Fatal`, not a silent
-  pass, so the test cannot succeed vacuously against a config whose footer
-  was deleted.
+  pass, so the test cannot succeed vacuously against a config whose footer was
+  deleted.
 
-Both assert on the **template text** parsed out of the YAML — never a
+This asserts on the **template text** parsed out of the YAML — never a
 rendered value. The footer is a Go template expanded by GoReleaser only at
-release time, and GoReleaser Pro (this config sets `pro: true` and a
+release time, and GoReleaser OSS (this config sets no `pro:` block and no
 `nightly:` block) is not installed on the gate host or in `make ci`; it runs
-only in `.github/workflows/{release,snapshot}.yml` via `goreleaser-action`
-with a `GORELEASER_KEY` secret. `goreleaser check` is therefore deliberately
-not run anywhere — locally, in `gates_chunk`, or in `make ci` — and neither
-test shells out or renders anything. As with the license guard,
-`MetadataConfig.Homepage` and `ReleaseConfig.Footer` in
-`internal/installcheck/installcheck.go` exist solely so `yaml.Unmarshal` has
-somewhere to put those values, exactly as `MetadataConfig.License` does;
-without the struct fields yaml.v3 drops them and both tests would pass
+only in `.github/workflows/release.yml` via `goreleaser-action` with the
+default `GITHUB_TOKEN`, which is enough to publish binaries, archives, and the
+rpm/deb/apk nFPM packages straight to the GitHub Release for the tagged
+commit — no Pro license or `GORELEASER_KEY` secret. Snapshot output is
+governed separately by `.goreleaser.yaml`'s `snapshot:` block
+(`version_template: "{{ .ShortCommit }}-snapshot"`), which sets the version
+template for local `goreleaser release --snapshot` builds; it needs no credentials
+and no workflow, so it is not gated here. `goreleaser check` is therefore
+deliberately not run anywhere — locally, in `gates_chunk`, or in `make ci` —
+and the test neither shells out nor renders anything. As with the license
+guard, `ReleaseConfig.Footer` in `internal/installcheck/installcheck.go` exists
+solely so `yaml.Unmarshal` has somewhere to put the footer value; there is no
+`MetadataConfig.Homepage`, because GoReleaser OSS exposes no `metadata.homepage`
+— without the struct field yaml.v3 drops the footer and the test would pass
 vacuously regardless of what the YAML says.
+
+> **Switch to plain GitHub Releases.** This repository previously shipped its
+> releases through GoReleaser Pro — a `pro: true` block, a `nightly:` block,
+> a `metadata.homepage` templated into `release.footer`, a separate
+> `.github/workflows/snapshot.yml`, and a `GORELEASER_KEY` secret. That
+> configuration no longer exists; the live config is GoReleaser OSS with a
+> hardcoded canonical URL in `release.footer`, `GITHUB_TOKEN` in
+> `.github/workflows/release.yml`, and a local `snapshot:` block. The tests and
+> structs above were rewritten to assert the OSS layout rather than the retired Pro one.
+
+A sixth regression test guards the packages' **declared runtime
+dependencies**. Until issue #89 the deb/rpm/apk metadata named no runtime
+dependencies at all, so a minimal target-family image could install the
+full package successfully and then fail to launch it: the GUI dlopens the
+GTK4 and Libadwaita shared libraries at package-init time through puregotk
+(`libgtk-4.so.1`, `libadwaita-1.so.0`), and the desktop entry
+(`data/io.projectbluefin.chairlift.desktop`) always launches
+`/usr/bin/chairlift-wrapper`, a Bash script (`data/chairlift-wrapper.sh`).
+The full `projectbluefin-chairlift` package now declares those dependencies
+per format in GoReleaser's `nfpms[]` `overrides` block, because the distro
+package names differ per format: Debian names `libgtk-4-1` and
+`libadwaita-1-0`, Fedora names `gtk4` and `libadwaita`, and Alpine names
+`gtk4.0` and `libadwaita`, with `bash` in every format. A single
+base-level `dependencies` list would carry one format's name into the other
+two, and GoReleaser's merge of per-format overrides over the base fields
+replaces a non-empty slice rather than appending to it (dario.cat/mergo
+v1.0.2's `WithOverride`, verified against the exact version the release
+workflow pins), so a base list coexisting with a per-format one is silently
+dropped; the test rejects a base-level list outright and pins the exact
+per-format set. The integration package declares none — it
+ships only pure-Go helper binaries and root-owned data files, no GUI,
+desktop entry, or wrapper script, and must stay installable on hosts that
+carry no GTK stack at all. **`TestGoreleaserDeclaresMandatoryRuntimeDependencies`**
+(`internal/installcheck/goreleaser_test.go`) holds both halves via the
+shared `loadGoreleaserConfig` helper: `NfpmConfig.Dependencies` and the
+new `NfpmOverrides` struct in `internal/installcheck/installcheck.go`
+exist so `yaml.Unmarshal` has somewhere to put these values, and the
+negative controls (dropping a per-format entry, adding a base-level list,
+adding a dependency to the integration package) each turn the test red.
+
+Two further gates in `navigationschema_test.go` close the page/group contract's
+last unenforced edge. `internal/config` owns the page/group grammar — it derives
+it by reflection from `Config`'s yaml tags and `defaultConfig()` and publishes it
+as `config.SchemaPages()` / `config.SchemaGroups(page)` — while
+`internal/navigation` restates the same grammar as the `ConfigPage` and `Groups`
+fields of its sidebar inventory. **`TestNavigationPagesMatchConfigSchema`** holds
+`navigation.Items()[].ConfigPage` and `config.SchemaPages()` to a bijection,
+rejecting an empty or duplicated `ConfigPage` claim; **`TestNavigationGroupsMatchConfigSchema`**
+holds each item's `Groups` to `config.SchemaGroups(item.ConfigPage)` as per-page
+set equality. Both compare sets, not order: `config.SchemaGroups` sorts its
+result, while navigation's slices carry sidebar presentation order, which is
+navigation's own concern.

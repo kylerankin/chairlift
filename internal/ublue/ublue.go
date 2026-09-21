@@ -24,6 +24,7 @@ import (
 	"github.com/projectbluefin/chairlift/internal/gpu"
 	"github.com/projectbluefin/chairlift/internal/helperexec"
 	"github.com/projectbluefin/chairlift/internal/imageinfo"
+	"github.com/projectbluefin/chairlift/internal/pkexec"
 	"github.com/projectbluefin/chairlift/internal/ubluehelper"
 )
 
@@ -39,8 +40,6 @@ const (
 	// instead. The Makefile installs the binary here whenever PREFIX is /usr
 	// (the default).
 	HelperPath = "/usr/bin/chairlift-ublue-helper"
-
-	pkexecCommand = "pkexec"
 
 	// DefaultTimeout bounds a helper invocation. Channel switching only
 	// stages a bootc transaction, but that transaction contacts a registry,
@@ -81,6 +80,16 @@ type Status struct {
 	RecommendedDriver imageinfo.Driver
 	// GPU describes the detected graphics hardware.
 	GPU string
+	// ChannelTableError is non-empty when the authoritative channel table
+	// (channels.yml) exists but could not be applied. The views must fail
+	// closed and disable the rebase controls when it is set; see
+	// imageinfo.SystemTableError.
+	ChannelTableError string
+	// Gaming reports that the running image already ships the gaming stack
+	// as system packages. The views must not offer gaming mode when it is
+	// set: that toggle installs the same applications as user Flatpaks, so
+	// on these images it would only shadow what the image already provides.
+	Gaming bool
 }
 
 // Detect returns the current Bluefin-family status. A host with no image
@@ -143,6 +152,7 @@ func Detect() (Status, error) {
 		Channel:   info.Channel(),
 		Tag:       info.EffectiveTag(),
 		Ref:       info.CleanRef(),
+		Gaming:    info.IsGaming(),
 	}
 
 	groups, err := currentUserGroups()
@@ -154,6 +164,7 @@ func Detect() (Status, error) {
 	status.Driver = info.Driver()
 	hardware := detectGPU()
 	status.GPU = hardware.Describe()
+
 	if recommended, offer := info.RecommendedDriver(hardware.NVIDIA); offer {
 		status.RecommendedDriver = recommended
 	}
@@ -165,6 +176,15 @@ func Detect() (Status, error) {
 	} else if _, ok := info.SwitchTarget(imageinfo.ChannelStable); ok {
 		status.CanSwitchTo = imageinfo.ChannelStable
 	} else {
+		status.CanSwitchTo = imageinfo.ChannelUnknown
+	}
+
+	// Fail closed on a broken authoritative channel table: mark it for the
+	// views and never offer a switch from a table the system could not
+	// apply, because the privileged helper re-reads channels.yml and
+	// refuses after authentication.
+	status.ChannelTableError = imageinfo.SystemTableError()
+	if status.ChannelTableError != "" {
 		status.CanSwitchTo = imageinfo.ChannelUnknown
 	}
 
@@ -238,7 +258,7 @@ func SwitchChannel(ctx context.Context, channel imageinfo.Channel) error {
 	if channel != imageinfo.ChannelStable && channel != imageinfo.ChannelTesting {
 		return &Error{Message: fmt.Sprintf("unsupported channel %q", channel)}
 	}
-	_, _, err := runHelper(ctx, pkexecCommand, ubluehelper.CommandChannelSwitch, string(channel))
+	_, _, err := runHelper(ctx, pkexec.Command, ubluehelper.CommandChannelSwitch, string(channel))
 	return err
 }
 
@@ -250,14 +270,14 @@ func SetDeveloperMode(ctx context.Context, enabled bool) error {
 	if enabled {
 		command = ubluehelper.CommandDXEnable
 	}
-	_, _, err := runHelper(ctx, pkexecCommand, command)
+	_, _, err := runHelper(ctx, pkexec.Command, command)
 	return err
 }
 
 // Restart restarts the machine. It is the only ChairLift action that ends the
 // user's session, so callers must confirm before reaching it.
 func Restart(ctx context.Context) error {
-	_, _, err := runHelper(ctx, pkexecCommand, ubluehelper.CommandRestart)
+	_, _, err := runHelper(ctx, pkexec.Command, ubluehelper.CommandRestart)
 	return err
 }
 
@@ -265,7 +285,7 @@ func Restart(ctx context.Context) error {
 // does not restart the machine; Restart is a separate, separately confirmed
 // action.
 func Rollback(ctx context.Context) error {
-	_, _, err := runHelper(ctx, pkexecCommand, ubluehelper.CommandRollback)
+	_, _, err := runHelper(ctx, pkexec.Command, ubluehelper.CommandRollback)
 	return err
 }
 
@@ -275,7 +295,7 @@ func Rollback(ctx context.Context) error {
 // pageview.FactoryResetConfirmation — because there is nothing this function
 // or the privileged helper behind it can undo once bootc applies the reset.
 func FactoryReset(ctx context.Context) error {
-	_, _, err := runHelper(ctx, pkexecCommand, ubluehelper.CommandFactoryReset)
+	_, _, err := runHelper(ctx, pkexec.Command, ubluehelper.CommandFactoryReset)
 	return err
 }
 
@@ -285,7 +305,7 @@ func SetAutomaticUpdates(ctx context.Context, enabled bool) error {
 	if enabled {
 		command = ubluehelper.CommandAutoEnable
 	}
-	_, _, err := runHelper(ctx, pkexecCommand, command)
+	_, _, err := runHelper(ctx, pkexec.Command, command)
 	return err
 }
 
@@ -298,7 +318,7 @@ func SwitchDriver(ctx context.Context, driver imageinfo.Driver) error {
 	default:
 		return &Error{Message: fmt.Sprintf("unsupported graphics driver %q", driver)}
 	}
-	_, _, err := runHelper(ctx, pkexecCommand, ubluehelper.CommandDriverSwitch, string(driver))
+	_, _, err := runHelper(ctx, pkexec.Command, ubluehelper.CommandDriverSwitch, string(driver))
 	return err
 }
 

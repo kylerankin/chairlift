@@ -1,8 +1,8 @@
 package flatpak
 
 import (
+	"context"
 	"errors"
-	"github.com/projectbluefin/chairlift/internal/dryrun"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/projectbluefin/chairlift/internal/dryrun"
 )
 
 func installCapturingFlatpak(t *testing.T, body string) string {
@@ -35,50 +37,66 @@ func capturedFlatpakArgs(t *testing.T, path string) []string {
 	return strings.Split(strings.TrimSpace(string(data)), "\n")
 }
 
-func TestParseApplicationList(t *testing.T) {
+func TestParseRefList(t *testing.T) {
 	tests := []struct {
 		name        string
 		output      string
 		installFlag string
+		kind        Kind
 		want        []Application
 	}{
 		{
 			name:        "tab-separated system applications",
-			output:      "Firefox\torg.mozilla.firefox\t120.0\tstable\tflathub\tapp/org.mozilla.firefox/x86_64/stable\n",
+			output:      "Firefox\torg.mozilla.firefox\t120.0\n",
 			installFlag: "--system",
+			kind:        KindApplication,
 			want: []Application{{
 				Name: "Firefox", ApplicationID: "org.mozilla.firefox", Version: "120.0",
-				Branch: "stable", Origin: "flathub", Installation: "system",
-				Ref: "app/org.mozilla.firefox/x86_64/stable",
+				Installation: "system", Kind: KindApplication,
 			}},
 		},
 		{
 			name:        "space-separated user application",
-			output:      "GIMP org.gimp.GIMP 2.10 stable flathub app/org.gimp.GIMP/x86_64/stable",
+			output:      "GIMP org.gimp.GIMP 2.10",
 			installFlag: "--user",
+			kind:        KindApplication,
 			want: []Application{{
 				Name: "GIMP", ApplicationID: "org.gimp.GIMP", Version: "2.10",
-				Branch: "stable", Origin: "flathub", Installation: "user",
-				Ref: "app/org.gimp.GIMP/x86_64/stable",
+				Installation: "user", Kind: KindApplication,
+			}},
+		},
+		{
+			// A runtime extension is the shape `--app` never reports. The
+			// kind comes from the requested filter, not from the ref
+			// column, so the classification survives a row that has to
+			// fall back to whitespace splitting.
+			name:        "user runtime extension",
+			output:      "MangoHud\torg.freedesktop.Platform.VulkanLayer.MangoHud\t0.8.1\n",
+			installFlag: "--user",
+			kind:        KindRuntime,
+			want: []Application{{
+				Name: "MangoHud", ApplicationID: "org.freedesktop.Platform.VulkanLayer.MangoHud",
+				Version: "0.8.1", Installation: "user", Kind: KindRuntime,
 			}},
 		},
 		{
 			name:        "malformed and blank rows are skipped",
 			output:      "\nnot-enough-fields\n",
 			installFlag: "--user",
+			kind:        KindApplication,
 			want:        nil,
 		},
-		{name: "empty output", output: "", installFlag: "--system", want: nil},
+		{name: "empty output", output: "", installFlag: "--system", kind: KindApplication, want: nil},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := parseApplicationList(tt.output, tt.installFlag)
+			got, err := parseRefList(tt.output, tt.installFlag, tt.kind)
 			if err != nil {
-				t.Fatalf("parseApplicationList() error = %v", err)
+				t.Fatalf("parseRefList() error = %v", err)
 			}
 			if !reflect.DeepEqual(got, tt.want) {
-				t.Fatalf("parseApplicationList() = %#v, want %#v", got, tt.want)
+				t.Fatalf("parseRefList() = %#v, want %#v", got, tt.want)
 			}
 		})
 	}
@@ -89,10 +107,8 @@ func TestCommandWrappersUseExpectedArguments(t *testing.T) {
 	t.Cleanup(func() { dryrun.Set(false) })
 
 	body := `case "$1" in
-list) printf 'Firefox\torg.mozilla.firefox\t120.0\tstable\tflathub\tapp/org.mozilla.firefox/x86_64/stable\n' ;;
-remote-ls) printf 'Firefox\torg.mozilla.firefox\t121.0\tstable\tflathub\n' ;;
-remotes) printf 'flathub\nvendor\n' ;;
-info) printf 'name=Firefox\nversion=120.0\nbranch=stable\norigin=flathub\nruntime=org.freedesktop.Platform\n' ;;
+list) printf 'Firefox\torg.mozilla.firefox\t120.0\n' ;;
+remote-ls) printf 'Firefox\torg.mozilla.firefox\t121.0\n' ;;
 esac`
 	capture := installCapturingFlatpak(t, body)
 
@@ -110,7 +126,7 @@ esac`
 				}
 				return err
 			},
-			want: []string{"list", "--user", "--app", "--columns=name,application,version,branch,origin,ref"},
+			want: []string{"list", "--user", "--app", "--columns=name,application,version"},
 		},
 		{
 			name: "list system applications",
@@ -121,14 +137,39 @@ esac`
 				}
 				return err
 			},
-			want: []string{"list", "--system", "--app", "--columns=name,application,version,branch,origin,ref"},
+			want: []string{"list", "--system", "--app", "--columns=name,application,version"},
+		},
+		{
+			// The regression this guards: a runtime extension is invisible
+			// to `list --app`, so the runtime listings must ask for
+			// `--runtime` rather than reusing the application filter.
+			name: "list user runtimes",
+			run: func() error {
+				runtimes, err := ListUserRuntimes()
+				if err == nil && (len(runtimes) != 1 || runtimes[0].Kind != KindRuntime || runtimes[0].Installation != "user") {
+					return errors.New("user runtime result was not parsed")
+				}
+				return err
+			},
+			want: []string{"list", "--user", "--runtime", "--columns=name,application,version"},
+		},
+		{
+			name: "list system runtimes",
+			run: func() error {
+				runtimes, err := ListSystemRuntimes()
+				if err == nil && (len(runtimes) != 1 || runtimes[0].Kind != KindRuntime || runtimes[0].Installation != "system") {
+					return errors.New("system runtime result was not parsed")
+				}
+				return err
+			},
+			want: []string{"list", "--system", "--runtime", "--columns=name,application,version"},
 		},
 		{name: "install user", run: func() error { return Install("org.example.App", true) }, want: []string{"install", "-y", "--user", "org.example.App"}},
 		{name: "install system", run: func() error { return Install("org.example.App", false) }, want: []string{"install", "-y", "--system", "org.example.App"}},
 		{name: "uninstall user", run: func() error { return Uninstall("org.example.App", true) }, want: []string{"uninstall", "-y", "--user", "org.example.App"}},
 		{name: "uninstall system", run: func() error { return Uninstall("org.example.App", false) }, want: []string{"uninstall", "-y", "--system", "org.example.App"}},
-		{name: "update one user app", run: func() error { return Update("org.example.App", true) }, want: []string{"update", "-y", "--user", "org.example.App"}},
-		{name: "update all system apps", run: func() error { return Update("", false) }, want: []string{"update", "-y", "--system"}},
+		{name: "update one user app", run: func() error { return Update(context.Background(), "org.example.App", true) }, want: []string{"update", "-y", "--user", "org.example.App"}},
+		{name: "update all system apps", run: func() error { return Update(context.Background(), "", false) }, want: []string{"update", "-y", "--system"}},
 		{
 			name: "list user app updates",
 			run: func() error {
@@ -138,32 +179,8 @@ esac`
 				}
 				return err
 			},
-			want: []string{"remote-ls", "--updates", "--app", "--columns=name,application,version,branch,origin", "--user"},
+			want: []string{"remote-ls", "--updates", "--app", "--columns=name,application,version", "--user"},
 		},
-		{
-			name: "list remotes",
-			run: func() error {
-				remotes, err := GetRemotes(false)
-				if err == nil && !reflect.DeepEqual(remotes, []string{"flathub", "vendor"}) {
-					return errors.New("remote result was not parsed")
-				}
-				return err
-			},
-			want: []string{"remotes", "--columns=name", "--system"},
-		},
-		{
-			name: "application info",
-			run: func() error {
-				info, err := Info("org.mozilla.firefox", true)
-				if err == nil && (info.Name != "Firefox" || info.Installation != "user" ||
-					info.Runtime != "org.freedesktop.Platform") {
-					return errors.New("application info was not parsed")
-				}
-				return err
-			},
-			want: []string{"info", "--show-metadata", "--user", "org.mozilla.firefox"},
-		},
-		{name: "remove unused", run: func() error { _, err := UninstallUnused(); return err }, want: []string{"uninstall", "--unused", "-y"}},
 		{name: "remove all user apps", run: RemoveAllUser, want: []string{"uninstall", "--user", "--all", "-y"}},
 	}
 
@@ -179,6 +196,52 @@ esac`
 	}
 }
 
+func TestUninstallUnusedRunsBothScopes(t *testing.T) {
+	dryrun.Set(false)
+	t.Cleanup(func() { dryrun.Set(false) })
+
+	dir := t.TempDir()
+	capture := filepath.Join(dir, "args")
+	script := filepath.Join(dir, "flatpak")
+	// Append (not overwrite) so both scope invocations are recorded.
+	source := "#!/bin/sh\necho \"$@\" >> \"$CHAIRLIFT_FLATPAK_ARGS\"\n"
+	if err := os.WriteFile(script, []byte(source), 0o755); err != nil {
+		t.Fatalf("write fake flatpak: %v", err)
+	}
+	t.Setenv("PATH", dir)
+	t.Setenv("CHAIRLIFT_FLATPAK_ARGS", capture)
+
+	_, err := UninstallUnused()
+	if err != nil {
+		t.Fatalf("UninstallUnused() error = %v", err)
+	}
+
+	got := capturedFlatpakArgs(t, capture)
+	want := []string{
+		"uninstall --unused -y --user",
+		"uninstall --unused -y --system",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("flatpak arguments = %v, want %v", got, want)
+	}
+}
+
+// TestUninstallUnusedReportsScopeError ensures an error from either scope is
+// surfaced (wrapped with its scope) instead of being swallowed, so the UI can
+// report that cleanup did not fully succeed.
+func TestUninstallUnusedReportsScopeError(t *testing.T) {
+	dryrun.Set(false)
+	t.Cleanup(func() { dryrun.Set(false) })
+
+	// Fail only the system-scope invocation.
+	installCapturingFlatpak(t, `case "$@" in *--system*) echo 'system failed' >&2; exit 1;; esac`)
+
+	_, err := UninstallUnused()
+	if err == nil || !strings.Contains(err.Error(), "system scope") || !strings.Contains(err.Error(), "system failed") {
+		t.Fatalf("error = %v, want it to mention the system scope and its failure", err)
+	}
+}
+
 func TestQueryFailuresPropagate(t *testing.T) {
 	dryrun.Set(false)
 	t.Cleanup(func() { dryrun.Set(false) })
@@ -190,8 +253,6 @@ func TestQueryFailuresPropagate(t *testing.T) {
 	}{
 		{name: "applications", run: func() error { _, err := ListUserApplications(); return err }},
 		{name: "updates", run: func() error { _, err := ListUpdates(false); return err }},
-		{name: "remotes", run: func() error { _, err := GetRemotes(true); return err }},
-		{name: "info", run: func() error { _, err := Info("org.example.App", false); return err }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -261,43 +322,43 @@ func TestParseUpdateList(t *testing.T) {
 	}{
 		{
 			name:   "tab separated rows",
-			output: "Firefox\torg.mozilla.firefox\t120.0\tstable\tflathub\nGIMP\torg.gimp.GIMP\t2.10.36\tstable\tflathub\n",
+			output: "Firefox\torg.mozilla.firefox\t120.0\nGIMP\torg.gimp.GIMP\t2.10.36\n",
 			user:   false,
 			want: []UpdateInfo{
-				{Name: "Firefox", ApplicationID: "org.mozilla.firefox", NewVersion: "120.0", Branch: "stable", Origin: "flathub", Installation: "system"},
-				{Name: "GIMP", ApplicationID: "org.gimp.GIMP", NewVersion: "2.10.36", Branch: "stable", Origin: "flathub", Installation: "system"},
+				{Name: "Firefox", ApplicationID: "org.mozilla.firefox", NewVersion: "120.0", Installation: "system"},
+				{Name: "GIMP", ApplicationID: "org.gimp.GIMP", NewVersion: "2.10.36", Installation: "system"},
 			},
 		},
 		{
 			name:   "whitespace separated fallback",
-			output: "Firefox   org.mozilla.firefox   120.0   stable   flathub",
-			user:   false,
-			want: []UpdateInfo{
-				{Name: "Firefox", ApplicationID: "org.mozilla.firefox", NewVersion: "120.0", Branch: "stable", Origin: "flathub", Installation: "system"},
-			},
-		},
-		{
-			name:   "short row is partially parsed",
-			output: "Firefox org.mozilla.firefox 120.0",
+			output: "Firefox   org.mozilla.firefox   120.0",
 			user:   false,
 			want: []UpdateInfo{
 				{Name: "Firefox", ApplicationID: "org.mozilla.firefox", NewVersion: "120.0", Installation: "system"},
 			},
 		},
 		{
-			name:   "row with fewer than two fields is skipped",
-			output: "Firefox\nGIMP\torg.gimp.GIMP\t2.10.36\tstable\tflathub",
+			name:   "short row is partially parsed",
+			output: "Firefox org.mozilla.firefox",
 			user:   false,
 			want: []UpdateInfo{
-				{Name: "GIMP", ApplicationID: "org.gimp.GIMP", NewVersion: "2.10.36", Branch: "stable", Origin: "flathub", Installation: "system"},
+				{Name: "Firefox", ApplicationID: "org.mozilla.firefox", Installation: "system"},
+			},
+		},
+		{
+			name:   "row with fewer than two fields is skipped",
+			output: "Firefox\nGIMP\torg.gimp.GIMP\t2.10.36",
+			user:   false,
+			want: []UpdateInfo{
+				{Name: "GIMP", ApplicationID: "org.gimp.GIMP", NewVersion: "2.10.36", Installation: "system"},
 			},
 		},
 		{
 			name:   "blank and whitespace-only lines are skipped",
-			output: "\n   \nFirefox\torg.mozilla.firefox\t120.0\tstable\tflathub\n\t\n",
+			output: "\n   \nFirefox\torg.mozilla.firefox\t120.0\n\t\n",
 			user:   false,
 			want: []UpdateInfo{
-				{Name: "Firefox", ApplicationID: "org.mozilla.firefox", NewVersion: "120.0", Branch: "stable", Origin: "flathub", Installation: "system"},
+				{Name: "Firefox", ApplicationID: "org.mozilla.firefox", NewVersion: "120.0", Installation: "system"},
 			},
 		},
 		{
@@ -308,10 +369,10 @@ func TestParseUpdateList(t *testing.T) {
 		},
 		{
 			name:   "user installation label",
-			output: "Firefox\torg.mozilla.firefox\t120.0\tstable\tflathub",
+			output: "Firefox\torg.mozilla.firefox\t120.0",
 			user:   true,
 			want: []UpdateInfo{
-				{Name: "Firefox", ApplicationID: "org.mozilla.firefox", NewVersion: "120.0", Branch: "stable", Origin: "flathub", Installation: "user"},
+				{Name: "Firefox", ApplicationID: "org.mozilla.firefox", NewVersion: "120.0", Installation: "user"},
 			},
 		},
 	}
@@ -353,7 +414,6 @@ func TestCommandTimeout(t *testing.T) {
 	}{
 		{name: "read/list", args: []string{"list", "--user", "--app"}},
 		{name: "read/remote-ls", args: []string{"remote-ls", "--updates", "--app"}},
-		{name: "read/info", args: []string{"info", "--show-metadata", "org.example.App"}},
 		{name: "empty args", args: nil},
 	}
 
@@ -372,5 +432,17 @@ func TestTimeoutConstants(t *testing.T) {
 	}
 	if mutationTimeout != 30*time.Minute {
 		t.Errorf("mutationTimeout = %v, want 30m", mutationTimeout)
+	}
+}
+
+// TestUpdateDryRunReturnsNilWithoutRunning proves the dry-run branch of Update:
+// a state-changing command is skipped (not executed) under --dry-run, so the
+// in-flight-Update All cancellation path never runs the command in a preview.
+func TestUpdateDryRunReturnsNilWithoutRunning(t *testing.T) {
+	dryrun.Set(true)
+	t.Cleanup(func() { dryrun.Set(false) })
+
+	if err := Update(context.Background(), "", true); err != nil {
+		t.Fatalf("Update dry-run error = %v, want nil (command must not run)", err)
 	}
 }

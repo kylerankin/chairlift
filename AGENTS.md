@@ -12,7 +12,14 @@ The app builds pure-Go (`CGO_ENABLED=0`); the race detector needs CGO.
 
 - `make build` — builds `build/chairlift`, `build/chairlift-updex-helper`, and
   `build/chairlift-ublue-helper` (all `CGO_ENABLED=0`).
-- `make test` — `go test ./...`.
+- `make test` — `go test ./...`. Every target in the Makefile is a command
+  that produces no file of its own name, so every one must be declared
+  `.PHONY`. This is not a style nit: the repository has a `test/` directory,
+  and while the `test` target was undeclared make considered it already
+  satisfied — `make test` printed `'test' is up to date` and ran nothing,
+  exiting 0. `internal/installcheck`'s
+  `TestMakefilePhonyCoversEveryTarget` now holds the full target inventory in
+  both directions, so adding a target without declaring it fails CI.
 - `make fmt` — `gofmt -s -w .`.
 - `make lint` — `golangci-lint run`.
 - `make ci` — runs every **host-independent** CI gate, in CI's order (go.mod
@@ -42,18 +49,38 @@ The app builds pure-Go (`CGO_ENABLED=0`); the race detector needs CGO.
   the self-contained `projectbluefin-chairlift` package and the mutually exclusive
   `projectbluefin-chairlift-system-integration` companion for user-scoped GUI
   installs; every nFPM entry carrying policies must retain the same fixed
-  paths.
+  paths. Published packages declare their mandatory runtime dependencies
+  (issue #89): the full package carries its GTK4, Libadwaita, and Bash names
+  per format via `overrides` — the distro package names differ across
+  deb/rpm/apk, and GoReleaser's overrides merge replaces rather than appends
+  a base-level list — while the integration package declares none, because it
+  ships no GUI, desktop entry, or wrapper script. `internal/installcheck`'s
+  `TestGoreleaserDeclaresMandatoryRuntimeDependencies` holds both halves.
 
 CI (`.github/workflows/test.yml`) filters tests with `-run "^Test[^I]"
 -skip "Integration"`. That filter excludes *any* test whose name begins `TestI`
-— not only `TestIntegration` — or contains `Integration` anywhere. Those names
-are reserved for tests that require a real environment (a live `brew`,
-`flatpak`, `bootc`, or GTK display). Ordinary unit tests must not use the
-`TestI` prefix: a test that trips the filter is never executed by `make ci` or
-by CI and therefore protects nothing. The accident is easy to make, because
-plain unit-test names such as `TestIsValid`, `TestInitConfig`, or `TestIndexOf`
-all start with `TestI` and would be silently skipped; name them so the first
-letter after `Test` is not `I` (see the GTK-headless skill below).
+— not only `TestIntegration` — or contains `Integration` anywhere. Those two
+name shapes are reserved for tests that require a real environment (a live
+`brew`, `flatpak`, `bootc`, or GTK display), and such tests live under
+`test/e2e/`, which `make e2e` runs unfiltered. That placement is the whole
+reservation: no enforced gate runs `./internal/...` unfiltered, so a reserved
+name under `internal/` is executed by no gate at all — the unit-test step
+skips it and the E2E step never looks at that directory. The local `make
+test` convenience target does run `go test ./...` unfiltered and will
+execute such a test on a developer's machine, which is precisely how the
+shape survives review: it passes locally and is never selected in CI.
+
+Inside `internal/`, therefore, a reserved name is always an accident, and
+`internal/installcheck`'s `TestNoInternalTestNameIsExcludedByTheCIFilter`
+rejects it. The accident is easy to make, because plain unit-test names such
+as `TestIsValid`, `TestInitConfig`, or `TestIndexOf` all start with `TestI`;
+name them so the first letter after `Test` is the subject (see the
+GTK-headless and gated-test-placement skills below). When that gate was added
+it found nine such tests across `internal/distrobox`, `internal/gaming`,
+`internal/sysupdate`, `internal/version`, and `internal/installcheck` — among
+them the goreleaser test this file and ADR-0006 both cite as enforcing the
+system-integration package split; its name matched `-skip "Integration"`, so the
+filtered unit-test step never selected it.
 
 The separately invoked tests under `test/e2e/` are outside the
 `./internal/...` unit-test scope by design. They are enforced by the E2E
@@ -127,14 +154,15 @@ An agent must not break these:
   idempotent and exits 0 on an already-current system, so a successful OS
   phase is not by itself evidence anything changed.
 - **New privileged operations extend the ublue helper; they do not add a
-  binary.** `chairlift-ublue-helper` now carries eight subcommands
+  binary.** `chairlift-ublue-helper` now carries nine subcommands
   (`channel-switch`, `dx-enable`, `dx-disable`, `restart`, `rollback`,
-  `auto-updates-enable`, `auto-updates-disable`, `driver-switch`), each
-  selected by exactly one PolicyKit action. Every one takes a fixed argv or a
-  word validated against a closed set: no image reference, no username, no
-  systemd unit, no delay, and no rollback target crosses the boundary, because each would be a value an authenticated caller controls.
-  `internal/ubluehelper`'s tests assert this per command, and the e2e boundary
-  test asserts the installed binary rejects each shape.
+  `auto-updates-enable`, `auto-updates-disable`, `driver-switch`,
+  `factory-reset`), each selected by exactly one PolicyKit action. Every one
+  takes a fixed argv or a word validated against a closed set: no image
+  reference, no username, no systemd unit, no delay, and no rollback or reset
+  target crosses the boundary, because each would be a value an authenticated
+  caller controls. `internal/ubluehelper`'s tests assert this per command, and
+  the e2e boundary test asserts the installed binary rejects each shape.
 - **Every navigable page has a committed screenshot and a walkthrough entry.**
   `make screenshots` regenerates `docs/screenshots/` from the real
   application; `docs/walkthrough.md` is the user-facing tour built from them.
@@ -173,16 +201,26 @@ An agent must not break these:
   and channel closure for both `internal/bootc` and `internal/sysupdate`.
   Provider packages retain their fixed paths, host detection, dry-run logging,
   and public error adapters; do not copy the process loop back into either one.
+- **The escalation program name has one owner.** `internal/pkexec.Command` is
+  the only place the literal `pkexec` is spelled in Go code; every provider
+  (`internal/bootc`, `internal/sysupdate`, `internal/ublue`, `internal/updex`)
+  and `internal/views/pageview` names it instead of declaring a private copy.
+  `internal/helperexec` and `internal/stageexec` keep taking the program name
+  as an injected parameter — that is their test seam — but production callers
+  always pass `pkexec.Command`. `internal/installcheck`'s
+  `TestPkexecCommandHasOneOwner` parses every non-test file under `internal/`
+  and `cmd/` and fails on any other occurrence; it takes no exemptions.
 - **System-integration split.** The
   `projectbluefin-chairlift-system-integration` nFPM package contains the fixed-path
-  updex helper, all three PolicyKit policies, and package-maintainer config,
-  but not the GUI or an OS staging implementation. Distributions pairing it
-  with a user-scoped ChairLift install must provide their trusted stage helper
-  at `/usr/libexec/bootc-update-stage` before enabling `bootc_updates_group`;
-  native A/B hosts ship `/usr/libexec/snosi-sysupdate-stage` (and the
-  `/usr/lib/snosi/native-ab` marker) with the OS image, which
-  `sysupdate_updates_group` requires. Do not make the privileged path
-  configurable from ChairLift's user-writable configuration.
+  updex and ublue helpers, all four PolicyKit policies, package-maintainer
+  config, and the channel-table example, but not the GUI or an OS staging
+  implementation. Distributions pairing it with a user-scoped ChairLift install
+  must provide their trusted stage helper at `/usr/libexec/bootc-update-stage`
+  before enabling `bootc_updates_group`; native A/B hosts ship
+  `/usr/libexec/snosi-sysupdate-stage` (and the `/usr/lib/snosi/native-ab`
+  marker) with the OS image, which `sysupdate_updates_group` requires. Do not
+  make the privileged path configurable from ChairLift's user-writable
+  configuration.
 - **GTK main-thread safety.** All external tool calls run in goroutines; every
   UI update marshals back to the GTK main thread via
   `snowkit`'s `sgtk.RunOnMainThread(...)`. Never touch a widget directly from a
@@ -293,6 +331,26 @@ An agent must not break these:
   container at another image grants nothing running podman directly would
   not. Do not give it a pkexec route, and do not reintroduce a vendor/stack
   matrix in the UI.
+  Disabling must preserve the quadlet when `systemctl --user stop` fails and a
+  follow-up `is-active` check cannot prove the service stopped; removing the
+  unit while the service is still active makes the switch lie and removes the
+  user's management handle.
+
+  The four images in `internal/aistack`'s `stacks` map are pinned by digest,
+  and the digest must be the multi-arch **manifest index**, never one of its
+  per-architecture children. `.github/workflows/test.yml` ships a
+  `[amd64, arm64]` matrix, so a child-manifest pin silently removes the AI
+  stack from arm64 hosts. A request without the index `Accept` headers is how
+  the wrong digests were obtained: on 2026-09-18 a bare
+  `curl -sI quay.io/v2/ramalama/<image>/manifests/latest` against all four
+  images content-negotiated down to the amd64 child manifest rather than the
+  index. That is why the roll procedure recorded beside the map sends the
+  index `Accept` headers and confirms the response's `mediaType` is an index
+  before the value is used. `TestEveryStackIsPinnedByAnImmutableDigest`
+  holds the shape of the pin — `@sha256:` present, `:latest` absent — but it
+  cannot check architecture coverage or freshness, so both belong to whoever
+  rolls the digests. See
+  [`docs/skills/multi-arch-digest-pinning/SKILL.md`](docs/skills/multi-arch-digest-pinning/SKILL.md).
 - **Powerwash and Factory Reset are opt-in and always confirmed.**
   `reset_group` (maintenance_page) ships `enabled: false` in config.yml, the
   same default as `maintenance_cleanup_group`, because both actions are
@@ -375,6 +433,8 @@ its policy into this file. For local navigation, start at
 | Human decision gates | [`docs/skills/human-gates.md`](https://github.com/projectbluefin/common/blob/main/docs/skills/human-gates.md) |
 | Issue lifecycle and labels | [`docs/skills/label-workflow.md`](https://github.com/projectbluefin/common/blob/main/docs/skills/label-workflow.md) |
 | Skill improvement | [`docs/skills/skill-improvement.md`](https://github.com/projectbluefin/common/blob/main/docs/skills/skill-improvement.md) |
+| Commit attribution | [`docs/contributing/style-guide.md`](https://github.com/projectbluefin/common/blob/main/docs/contributing/style-guide.md) and Common's `AGENTS.md` PR rules |
+| Merge queue mechanics (local) | [`docs/skills/factory-onboarding/SKILL.md`](docs/skills/factory-onboarding/SKILL.md) |
 
 Every completed factory task has two outputs: the requested repository change
 and a knowledge decision. Preserve a durable lesson in the closest canonical
@@ -383,6 +443,18 @@ Banned stale-artifact patterns: no committed session notes, no append-only
 changelog/status files, and no "append here" instructions. ChairLift's normal
 PR and review rules remain in force; Common's `common`-only direct-push
 exception does not apply here.
+
+Two of those imports are load-bearing often enough to name here, without
+restating the policy behind them. First, an AI-authored commit carries **both**
+attribution trailers — `Assisted-by: <Model> via GitHub Copilot` and
+`Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>` — which
+is what `.github/pull_request_template.md` already asks a submitter to confirm;
+a single `Assisted-by:` naming some other runtime does not satisfy it. Second,
+this repository merges through a merge queue, so `gh pr merge` enqueues rather
+than merges and the gate question has to be settled before that call; the local
+mechanics, including the GraphQL `dequeuePullRequest` escape hatch and its
+narrow window, are in
+[`docs/skills/factory-onboarding/SKILL.md`](docs/skills/factory-onboarding/SKILL.md).
 
 ## Org-wide decisions
 

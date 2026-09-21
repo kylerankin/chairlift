@@ -223,6 +223,61 @@ func TestLoadAuthoritativeFailureLogsHighSignalDiagnostic(t *testing.T) {
 	}
 }
 
+func TestLoadDanglingAuthoritativeSymlinkFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "missing-target.yml")
+	link := filepath.Join(dir, "config.yml")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("creating dangling symlink: %v", err)
+	}
+	// The issue's reproduction: ReadFile follows the link and reports ENOENT,
+	// indistinguishable from an absent path without an Lstat on the candidate.
+	if _, err := os.ReadFile(link); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("setup: ReadFile(dangling symlink) err = %v, want ENOENT", err)
+	}
+	withConfigPaths(t, []string{link})
+
+	cfg, loadErr := Load()
+	if loadErr == nil {
+		t.Fatal("Load() error = nil, want authoritative failure for dangling symlink")
+	}
+	if loadErr.Kind != KindRead {
+		t.Fatalf("Load() error kind = %q, want %q", loadErr.Kind, KindRead)
+	}
+	if loadErr.Path != link {
+		t.Fatalf("Load() error path = %q, want %q", loadErr.Path, link)
+	}
+	if cfg == nil {
+		t.Fatal("Load() config = nil on authoritative failure")
+	}
+	// A dangling authoritative symlink must not fall back to package defaults:
+	// every known group stays disabled with a persistent error.
+	assertAllKnownGroupsDisabled(t, cfg)
+}
+
+func TestLoadDanglingHigherPriorityDoesNotFallThroughToValidCandidate(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "missing-target.yml")
+	high := filepath.Join(dir, "high.yml")
+	low := writeConfigFile(t, "system_page:\n  health_group:\n    enabled: true\n")
+	if err := os.Symlink(target, high); err != nil {
+		t.Fatalf("creating dangling symlink: %v", err)
+	}
+	withConfigPaths(t, []string{high, low})
+
+	cfg, loadErr := Load()
+	if loadErr == nil {
+		t.Fatal("Load() error = nil, want authoritative failure for dangling symlink")
+	}
+	if loadErr.Path != high {
+		t.Fatalf("Load() error path = %q, want the dangling %q", loadErr.Path, high)
+	}
+	if cfg.SystemPage["health_group"].Enabled {
+		t.Fatal("dangling authoritative symlink fell through to a valid lower-priority candidate")
+	}
+	assertAllKnownGroupsDisabled(t, cfg)
+}
+
 func TestLoadAllCandidatesAbsentReturnsDefaultsWithoutError(t *testing.T) {
 	dir := t.TempDir()
 	withConfigPaths(t, []string{
@@ -264,31 +319,118 @@ func TestWindowConfigFailureWiringIsPersistent(t *testing.T) {
 }
 
 func TestConfigurationGuideExamplePassesStrictValidation(t *testing.T) {
-	guidePath := filepath.Join(repoRoot(), "CONFIG.md")
-	guide, err := os.ReadFile(guidePath)
+	tests := []struct {
+		relPath string
+		heading string
+	}{
+		{"CONFIG.md", "## Example: Disabling Homebrew Features"},
+		{filepath.Join("docs", "reference.md"), "## Example"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.relPath, func(t *testing.T) {
+			path := filepath.Join(repoRoot(), tc.relPath)
+			guide, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read %s: %v", path, err)
+			}
+
+			afterHeading := string(guide)
+			headingIndex := strings.Index(afterHeading, tc.heading)
+			if headingIndex < 0 {
+				t.Fatalf("%s does not contain %q", path, tc.heading)
+			}
+			afterHeading = afterHeading[headingIndex+len(tc.heading):]
+			fenceStart := strings.Index(afterHeading, "```yaml")
+			if fenceStart < 0 {
+				t.Fatalf("%s example has no YAML fence", tc.heading)
+			}
+			afterFence := afterHeading[fenceStart+len("```yaml"):]
+			fenceEnd := strings.Index(afterFence, "```")
+			if fenceEnd < 0 {
+				t.Fatalf("%s example has no closing fence", tc.heading)
+			}
+
+			example := afterFence[:fenceEnd]
+			tmpPath := writeConfigFile(t, example)
+			merged, loadErr := loadFromPath(tmpPath)
+			if loadErr != nil {
+				t.Fatalf("%s documented YAML is rejected by the runtime validator: %v", tc.heading, loadErr)
+			}
+
+			for _, check := range []struct {
+				page  string
+				group string
+			}{
+				{"updates_page", "update_all_group"},
+				{"updates_page", "brew_updates_group"},
+				{"updates_page", "brew_trust_group"},
+				{"applications_page", "brew_group"},
+				{"applications_page", "brew_search_group"},
+				{"applications_page", "brew_bundles_group"},
+				{"maintenance_page", "maintenance_brew_group"},
+				{"features_page", "troubleshooting_group"},
+			} {
+				if merged.IsGroupEnabled(check.page, check.group) {
+					t.Errorf("%s example leaves %s.%s enabled", tc.relPath, check.page, check.group)
+				}
+			}
+		})
+	}
+}
+
+// TestLoadUntrustedCandidateSymlinkedIntoTrustedDirFailsClosed pins the
+// provenance decision to which fixed candidate matched rather than to what the
+// filesystem says about the path after the bytes were read. An attacker who
+// controls an untrusted candidate can point it at a trusted directory (or
+// re-point it between read and validation); Load() must still treat the
+// candidate as untrusted and refuse the privileged action it inherits.
+func TestLoadUntrustedCandidateSymlinkedIntoTrustedDirFailsClosed(t *testing.T) {
+	trustedDir := t.TempDir()
+	withTrustedConfigDirectories(t, []string{trustedDir})
+
+	target := filepath.Join(trustedDir, "config.yml")
+	if err := os.WriteFile(target, []byte("maintenance_page:\n  maintenance_cleanup_group:\n    enabled: true\n"), 0o600); err != nil {
+		t.Fatalf("writing config: %v", err)
+	}
+
+	candidate := filepath.Join(t.TempDir(), "config.dev.yml")
+	if err := os.Symlink(target, candidate); err != nil {
+		t.Fatalf("linking candidate: %v", err)
+	}
+	withConfigPaths(t, []string{candidate})
+
+	cfg, err := Load()
+	if err == nil {
+		t.Fatalf("Load() err = nil, want provenance failure (cfg = %+v)", cfg)
+	}
+	if err.Kind != KindSchema {
+		t.Fatalf("err.Kind = %v, want %v", err.Kind, KindSchema)
+	}
+	if !strings.Contains(err.Detail, "sudo actions are only permitted in trusted configurations") {
+		t.Fatalf("err.Detail = %q, want provenance error", err.Detail)
+	}
+	assertAllKnownGroupsDisabled(t, cfg)
+}
+
+// TestLoadTrustedCandidateKeepsPrivilegedDefault is the other half: a fixed
+// trusted candidate still loads the privileged default, so the index-free
+// provenance rule did not simply disable sudo everywhere.
+func TestLoadTrustedCandidateKeepsPrivilegedDefault(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yml")
+	if err := os.WriteFile(path, []byte("maintenance_page:\n  maintenance_cleanup_group:\n    enabled: true\n"), 0o600); err != nil {
+		t.Fatalf("writing config: %v", err)
+	}
+	withTrustedConfigPaths(t, []string{path})
+	withConfigPaths(t, []string{path})
+
+	cfg, err := Load()
 	if err != nil {
-		t.Fatalf("read %s: %v", guidePath, err)
+		t.Fatalf("Load() err = %v, want nil", err)
 	}
-
-	const heading = "## Example: Disabling Homebrew Features"
-	afterHeading := string(guide)
-	headingIndex := strings.Index(afterHeading, heading)
-	if headingIndex < 0 {
-		t.Fatalf("%s does not contain %q", guidePath, heading)
-	}
-	afterHeading = afterHeading[headingIndex+len(heading):]
-	fenceStart := strings.Index(afterHeading, "```yaml")
-	if fenceStart < 0 {
-		t.Fatalf("%s example has no YAML fence", heading)
-	}
-	afterFence := afterHeading[fenceStart+len("```yaml"):]
-	fenceEnd := strings.Index(afterFence, "```")
-	if fenceEnd < 0 {
-		t.Fatalf("%s example has no closing fence", heading)
-	}
-
-	example := []byte(afterFence[:fenceEnd])
-	if _, loadErr := parseAndValidate(guidePath, example); loadErr != nil {
-		t.Fatalf("%s documented YAML is rejected by the runtime validator: %v", heading, loadErr)
+	group := cfg.MaintenancePage["maintenance_cleanup_group"]
+	if !group.Enabled || len(group.Actions) != 1 || !group.Actions[0].Sudo {
+		t.Fatalf("maintenance_cleanup_group = %+v, want enabled with the privileged default action", group)
 	}
 }

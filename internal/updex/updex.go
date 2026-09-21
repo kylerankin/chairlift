@@ -6,11 +6,14 @@ package updex
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 
+	"github.com/frostyard/std/reporter"
 	updexapi "github.com/frostyard/updex/updex"
 	"github.com/projectbluefin/chairlift/internal/helperexec"
+	"github.com/projectbluefin/chairlift/internal/pkexec"
 	"github.com/projectbluefin/chairlift/internal/updexhelper"
 )
 
@@ -27,7 +30,6 @@ const (
 	// Makefile, which requires PREFIX=/usr (the default) to match.
 	HelperPath = "/usr/bin/chairlift-updex-helper"
 
-	pkexecCommand  = "pkexec"
 	DefaultTimeout = 5 * time.Minute
 )
 
@@ -59,18 +61,35 @@ var (
 
 func getClient() *updexapi.Client {
 	clientOnce.Do(func() {
-		apiClient = updexapi.NewClient(updexapi.ClientConfig{})
+		apiClient = newClient(updexapi.ClientConfig{})
 	})
 	return apiClient
 }
 
-// IsInstalled checks if updex features are configured on this system
+// newClient is the single construction site for updex API clients. The
+// singleton above serves every wrapper that needs no per-call state; callers
+// that must supply one (featuresChecker's progress reporter) build their own
+// client through this function so the two sites cannot drift.
+func newClient(cfg updexapi.ClientConfig) *updexapi.Client {
+	return updexapi.NewClient(cfg)
+}
+
+// featuresLister is an unexported injection seam for feature listing, allowing
+// availability check behavior (empty, populated, or error) to be tested without
+// relying on host system definitions.
+var featuresLister = func(ctx context.Context) ([]Feature, error) {
+	return getClient().Features(ctx)
+}
+
+// IsInstalled checks if updex features are configured on this system.
+// It returns true only if updex features can be listed without error and at least
+// one feature definition is present. An empty feature list is treated as unavailable.
 func IsInstalled() bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	_, err := getClient().Features(ctx)
-	return err == nil
+	features, err := featuresLister(ctx)
+	return err == nil && len(features) > 0
 }
 
 var (
@@ -95,30 +114,62 @@ func ListFeatures(ctx context.Context) ([]Feature, error) {
 	return features, nil
 }
 
-// CheckFeatures checks enabled features for available updates
-func CheckFeatures(ctx context.Context) ([]FeatureCheck, error) {
-	checks, err := getClient().CheckFeatures(ctx, updexapi.CheckFeaturesOptions{})
+// warningCapturingReporter captures warnings emitted by updex during operations.
+type warningCapturingReporter struct {
+	reporter.NoopReporter
+	mu       sync.Mutex
+	warnings []string
+}
+
+func (r *warningCapturingReporter) Warning(format string, args ...any) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.warnings = append(r.warnings, fmt.Sprintf(format, args...))
+}
+
+func (r *warningCapturingReporter) Warnings() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Clone(r.warnings)
+}
+
+// featuresChecker is an unexported injection seam for feature update checking,
+// allowing check behavior (checks, warnings, error) to be tested without
+// relying on host system definitions or network access. It cannot use the
+// getClient singleton: the warning-capturing reporter is per-call state, so the
+// client carrying it must be too. It still constructs through newClient.
+var featuresChecker = func(ctx context.Context) ([]FeatureCheck, []string, error) {
+	rep := &warningCapturingReporter{}
+	client := newClient(updexapi.ClientConfig{Progress: rep})
+	checks, err := client.CheckFeatures(ctx, updexapi.CheckFeaturesOptions{})
 	if err != nil {
-		return nil, &Error{Message: fmt.Sprintf("failed to check features: %v", err)}
+		return nil, rep.Warnings(), &Error{Message: fmt.Sprintf("failed to check features: %v", err)}
 	}
-	return checks, nil
+	return checks, rep.Warnings(), nil
+}
+
+// CheckFeatures checks enabled features for available updates, returning the
+// per-feature results, any warnings emitted during the check (such as per-component
+// manifest or version failures), and any top-level error.
+func CheckFeatures(ctx context.Context) ([]FeatureCheck, []string, error) {
+	return featuresChecker(ctx)
 }
 
 // EnableFeature enables a feature for download
 func EnableFeature(ctx context.Context, name string) error {
-	_, _, err := runHelper(ctx, pkexecCommand, updexhelper.CommandEnableFeature, name)
+	_, _, err := runHelper(ctx, pkexec.Command, updexhelper.CommandEnableFeature, name)
 	return err
 }
 
 // DisableFeature disables a feature
 func DisableFeature(ctx context.Context, name string) error {
-	_, _, err := runHelper(ctx, pkexecCommand, updexhelper.CommandDisableFeature, name)
+	_, _, err := runHelper(ctx, pkexec.Command, updexhelper.CommandDisableFeature, name)
 	return err
 }
 
 // UpdateFeatures downloads enabled features
 func UpdateFeatures(ctx context.Context) error {
-	_, _, err := runHelper(ctx, pkexecCommand, updexhelper.CommandUpdate)
+	_, _, err := runHelper(ctx, pkexec.Command, updexhelper.CommandUpdate)
 	return err
 }
 

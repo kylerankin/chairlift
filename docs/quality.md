@@ -87,6 +87,23 @@ for maintainers. `TestWorkflowActionsUseImmutableCommitSHAs` scans every `.yml` 
 `.yaml` file in `.github/workflows/`, so adding a floating tag or branch fails
 the ordinary unit-test gate.
 
+## Release gating
+
+The `goreleaser` workflow runs on pushed tags (`*`). Before any release or
+asset can be published, publication is gated on two required verification jobs:
+
+- **Host-independent quality gate** (`gate`) — runs with read-only repository
+  permission and executes `make ci` (tidy-module, vet, formatting,
+  `golangci-lint`, unit tests, race detector, and cross-architecture builds).
+- **End-to-end quality gate** (`e2e`) — runs with read-only repository
+  permission under a private GTK/Xvfb runtime and executes `make e2e`.
+
+The `goreleaser` publishing job depends on both gate jobs (`needs: [gate, e2e]`)
+and receives `contents: write` only after both have succeeded. A failure in
+either gate stops the pipeline before GoReleaser can publish, ensuring that
+broken behavior or install-boundary regressions never become an official
+release.
+
 ## Reviewing agent changes
 
 For an agent-authored pull request, audit the signals in this order:
@@ -176,7 +193,7 @@ A repository administrator must configure the `ANTHROPIC_API_KEY` Actions
 secret before the first review:
 
 ```bash
-gh secret set ANTHROPIC_API_KEY --repo frostyard/chairlift
+gh secret set ANTHROPIC_API_KEY --repo projectbluefin/chairlift
 ```
 
 Until the secret exists, a dispatch records a notice and exits without

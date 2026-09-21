@@ -8,21 +8,25 @@ Configuration files are searched in order (first found wins):
 
 1. `/etc/chairlift/config.yml` — system-wide (highest priority)
 2. `/usr/share/chairlift/config.yml` — package maintainer defaults
-3. `config.yml` — beside the executable when present, otherwise relative to
-   the current working directory (development fallback)
+3. `config.dev.yml` — source-checkout fallback, beside the executable when
+   present, otherwise relative to the current working directory
+4. `config.yml` — legacy development fallback, beside the executable when
+   present, otherwise relative to the current working directory
 
 Only a missing candidate advances the search. The first existing candidate is
 authoritative. If it cannot be read or fails YAML/schema validation, ChairLift
 hides every feature group, logs a `CONFIGURATION ERROR`, and displays a
 persistent toast with the path and cause. Fix the file and restart ChairLift.
 If no file is found, built-in defaults apply: all groups are enabled except
-`maintenance_cleanup_group`.
+`maintenance_cleanup_group` and `reset_group`.
 
 Source and nFPM installs provide the repository's maintainer defaults at
 `/usr/share/chairlift/config.yml`. Package upgrades may replace that file.
 Administrators should put local changes in `/etc/chairlift/config.yml`, which
 has higher precedence and is never created or overwritten by ChairLift's
 packages.
+The repository root includes `config.dev.yml` so source checkouts load
+unprivileged development defaults before the package default `config.yml`.
 
 ## Format
 
@@ -50,6 +54,7 @@ order below. Help is always retained.
 |-------|-----|-------------|
 | OS Info | `system_info_group` | Displays fields from `/etc/os-release` |
 | bootc Status | `bootc_status_group` | bootc deployment status (booted/staged/rollback image, version, digest); shown only when `bootc.IsBootcBootedCached()` reports a booted deployment |
+| Release Channel | `channel_group` | Release channel and graphics-driver switching; shown only when `/usr/share/ublue-os/image-info.json` is present |
 | Health | `health_group` | Launches a system monitor application |
 
 `health_group` supports:
@@ -60,6 +65,7 @@ order below. Help is always retained.
 
 | Group | Key | Description |
 |-------|-----|-------------|
+| Update All | `update_all_group` | Multi-phase update sequencing (OS image, Flatpaks, Homebrew) and automatic background updates switch |
 | bootc Updates | `bootc_updates_group` | Download and stage the next bootc system image update (applies on restart); shown only when bootc-booted and the fixed `/usr/libexec/bootc-update-stage` helper is present. Non-Snow distributions must provide a trusted implementation there before enabling this group; ChairLift's system-integration package does not supply one. |
 | Native A/B Updates | `sysupdate_updates_group` | Download and stage the next native A/B (systemd-sysupdate) system image update (applies on restart), plus a read-only previous-version rollback row; shown only when the `/usr/lib/snosi/native-ab` marker and the fixed `/usr/libexec/snosi-sysupdate-stage` helper are present. The OS image ships both; ChairLift's system-integration package supplies only the PolicyKit policy. |
 | Flatpak Updates | `flatpak_updates_group` | Pending Flatpak application updates |
@@ -98,10 +104,11 @@ Those operations belong to the configured external manager.
 
 | Group | Key | Description |
 |-------|-----|-------------|
-| Cleanup | `maintenance_cleanup_group` | Custom cleanup scripts |
+| Cleanup | `maintenance_cleanup_group` | Custom cleanup scripts (disabled by default) |
 | Homebrew Cleanup | `maintenance_brew_group` | `brew cleanup` (remove old versions and cache) |
 | Flatpak Cleanup | `maintenance_flatpak_group` | `flatpak uninstall --unused` (remove unused runtimes) |
 | Optimization | `maintenance_optimization_group` | System optimization (placeholder) |
+| Reset | `reset_group` | Powerwash (user Flatpaks and Distrobox containers) and Factory Reset (`bootc install reset --experimental`); irreversible actions disabled by default |
 
 `maintenance_cleanup_group` supports:
 
@@ -119,14 +126,23 @@ Each action has:
 | Field | Description |
 |-------|-------------|
 | `title` | Display name |
-| `script` | Absolute path to the script |
-| `sudo` | If `true`, runs via `pkexec` for elevated privileges |
+| `script` | Absolute path to the script. Required when `sudo` is `true`. |
+| `sudo` | If `true`, runs via `pkexec` for elevated privileges. Accepted only from trusted `/etc/chairlift/config.yml` or `/usr/share/chairlift/config.yml` configurations. The check covers the effective configuration: an untrusted file may not enable a group whose actions include a privileged one, including a privileged action inherited from the built-in defaults. |
 
 ### Features Page (`features_page`)
 
 | Group | Key | Description |
 |-------|-----|-------------|
 | Features | `features_group` | Toggle system features managed by updex |
+| Developer Mode | `dx_group` | Adds the invoking account to container, VM, and serial-device groups; shown only when `/usr/share/ublue-os/image-info.json` is present |
+| Gaming Mode | `gaming_group` | Toggles gaming optimizations; shown only when `/usr/share/ublue-os/image-info.json` is present |
+| Local AI | `ai_group` | Runs a language model in a rootless container on detected hardware; shown when Podman is present |
+| Enhanced Troubleshooting | `troubleshooting_group` | AI assistant for diagnosing system logs, services, and network; shown only when Homebrew is present |
+
+`ai_group` supports:
+
+- `ai_images` — map pinning container images per GPU vendor (`nvidia`, `amd`, `intel`, `none`)
+- `ai_model` — model reference to serve (default: `ollama://qwen2.5:7b`)
 
 Feature operations (enable, disable, update) require administrator
 authentication through PolicyKit and are performed by the fixed
@@ -161,12 +177,21 @@ applications_page:
     enabled: false
 
 updates_page:
+  update_all_group:
+    enabled: false
   brew_updates_group:
+    enabled: false
+  brew_trust_group:
     enabled: false
 
 maintenance_page:
   maintenance_brew_group:
     enabled: false
+
+features_page:
+  troubleshooting_group:
+    enabled: false
 ```
 
-All other groups remain enabled by default since they are not listed.
+All other groups remain enabled by default since they are not listed (except
+`maintenance_cleanup_group` and `reset_group`, which default to disabled).

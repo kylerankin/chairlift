@@ -22,10 +22,16 @@ package updateall
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
 )
+
+// cancelledDetail is the detail shown beside every phase that did not complete
+// because the user stopped the run, whether it was still running at that
+// moment or had not started yet.
+const cancelledDetail = "Cancelled"
 
 // PhaseID identifies one update phase.
 type PhaseID string
@@ -100,9 +106,10 @@ func Plan(availability Availability) []Phase {
 // Outcome is the result of one phase.
 type Outcome string
 
-// The phase outcomes. OutcomeSkipped is reserved for a phase that was in the
-// plan but did not run because an earlier phase's failure made it pointless;
-// a provider that is absent never enters the plan at all.
+// The phase outcomes. OutcomeSkipped covers a phase that was in the plan but
+// did not complete on its own terms: one the run abandoned after the user
+// cancelled, including the phase that was in flight when they did. A provider
+// that is absent never enters the plan at all.
 const (
 	OutcomeSucceeded Outcome = "succeeded"
 	OutcomeFailed    Outcome = "failed"
@@ -180,7 +187,7 @@ func (r Runner) Run(ctx context.Context, plan []Phase, events chan<- Event) []Re
 	for _, phase := range plan {
 		if cancelled || ctx.Err() != nil {
 			cancelled = true
-			result := Result{Phase: phase, Outcome: OutcomeSkipped, Detail: "Cancelled"}
+			result := Result{Phase: phase, Outcome: OutcomeSkipped, Detail: cancelledDetail}
 			results = append(results, result)
 			emit(events, Event{Type: EventPhaseFinished, Phase: phase, Result: result})
 			continue
@@ -206,7 +213,7 @@ func (r Runner) runPhase(ctx context.Context, phase Phase, events chan<- Event) 
 			emit(events, Event{Type: EventMessage, Phase: phase, Message: line})
 		})
 		if err != nil {
-			return failed(phase, err.Error())
+			return classify(phase, err)
 		}
 		staged, version := false, ""
 		if r.StagedAfter != nil {
@@ -223,7 +230,7 @@ func (r Runner) runPhase(ctx context.Context, phase Phase, events chan<- Event) 
 			return failed(phase, "Flatpak is unavailable")
 		}
 		if err := r.UpdateFlatpak(ctx); err != nil {
-			return failed(phase, err.Error())
+			return classify(phase, err)
 		}
 		return Result{Phase: phase, Outcome: OutcomeSucceeded, Detail: "Up to date"}
 
@@ -232,7 +239,7 @@ func (r Runner) runPhase(ctx context.Context, phase Phase, events chan<- Event) 
 			return failed(phase, "Homebrew is unavailable")
 		}
 		if err := r.UpdateBrew(ctx); err != nil {
-			return failed(phase, err.Error())
+			return classify(phase, err)
 		}
 		return Result{Phase: phase, Outcome: OutcomeSucceeded, Detail: "Up to date"}
 
@@ -252,6 +259,18 @@ func (r Result) Staged() bool {
 
 func failed(phase Phase, detail string) Result {
 	return Result{Phase: phase, Outcome: OutcomeFailed, Detail: detail}
+}
+
+// classify turns a phase's error into its Result. A cancellation is the user
+// asking to stop, not the provider failing: the phase that was in flight when
+// they pressed Stop must read the same way as the phases the run never
+// reached, or a user-requested stop is reported as a broken update. Every
+// other error is a failure.
+func classify(phase Phase, err error) Result {
+	if errors.Is(err, context.Canceled) {
+		return Result{Phase: phase, Outcome: OutcomeSkipped, Detail: cancelledDetail}
+	}
+	return failed(phase, err.Error())
 }
 
 // stagedDetail describes the OS phase's outcome. A successful run that staged

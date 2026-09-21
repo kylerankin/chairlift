@@ -152,9 +152,15 @@ func (uh *UserHome) checkFeatureUpdates(totalFeatures int) {
 	ctx, cancel := updex.DefaultContext()
 	defer cancel()
 
-	checks, err := updex.CheckFeatures(ctx)
+	checks, warnings, err := updex.CheckFeatures(ctx)
 
 	sgtk.RunOnMainThread(func() {
+		// Warnings are retained even when the check fails, so they are logged
+		// before the error path returns rather than discarded with it.
+		for _, w := range warnings {
+			log.Printf("Feature update check warning: %s", w)
+		}
+
 		if err != nil {
 			log.Printf("Feature update check failed: %v", err)
 			if uh.featuresGroup != nil {
@@ -163,6 +169,7 @@ func (uh *UserHome) checkFeatureUpdates(totalFeatures int) {
 			return
 		}
 
+		incomplete := len(warnings) > 0
 		updateCount := 0
 		for _, check := range checks {
 			row, ok := uh.featureRows[check.Feature]
@@ -179,10 +186,17 @@ func (uh *UserHome) checkFeatureUpdates(totalFeatures int) {
 			if status.HasUpdate {
 				updateCount++
 			}
+			if status.Incomplete {
+				incomplete = true
+			}
 		}
 
 		if uh.featuresGroup != nil {
-			uh.featuresGroup.SetDescription(featurestatus.GroupDescription(totalFeatures, updateCount))
+			if incomplete {
+				uh.featuresGroup.SetDescription(featurestatus.GroupDescriptionIncomplete(totalFeatures, updateCount))
+			} else {
+				uh.featuresGroup.SetDescription(featurestatus.GroupDescription(totalFeatures, updateCount))
+			}
 		}
 	})
 }
@@ -290,8 +304,34 @@ func (uh *UserHome) buildBluefinGroups(page *adw.PreferencesPage) {
 		uh.buildDeveloperGroup(page, status)
 	}
 	if gamingEnabled {
-		uh.buildGamingGroup(page)
+		// An image that already ships the gaming stack gets a readonly
+		// note instead of the switch. Gaming mode installs the stack as
+		// user Flatpaks, which on these images would shadow the system
+		// packages rather than add anything. See ublue.Status.Gaming.
+		if status.Gaming {
+			uh.buildGamingIncludedGroup(page)
+			log.Printf("views: gaming group suppressed, image ships the gaming stack ref=%s", status.Ref)
+		} else {
+			uh.buildGamingGroup(page)
+		}
 	}
+}
+
+// buildGamingIncludedGroup replaces the gaming-mode switch with a single
+// readonly row on images that ship the gaming stack as system packages. The
+// group is still rendered so the feature does not simply vanish on the images
+// most likely to be looking for it.
+func (uh *UserHome) buildGamingIncludedGroup(page *adw.PreferencesPage) {
+	group := adw.NewPreferencesGroup()
+	group.SetTitle("Gaming")
+	group.SetDescription("This image ships the gaming stack — there is nothing to switch on")
+
+	row := adw.NewActionRow()
+	row.SetTitle("Included in this image")
+	row.SetSubtitle("Steam and the rest of the gaming stack are installed as system packages. Installing them again as Flatpaks would shadow the versions the image provides.")
+	group.Add(&row.Widget)
+
+	page.Add(group)
 }
 
 // buildDeveloperGroup builds the developer-mode switch.

@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/projectbluefin/chairlift/internal/dryrun"
 	"github.com/projectbluefin/chairlift/internal/journal"
@@ -162,6 +163,12 @@ func TestRunJournalsDryRunFlagAsSuppressed(t *testing.T) {
 	if !reflect.DeepEqual(entry.WouldRun, wantArgv) {
 		t.Errorf("journalled WouldRun = %v, want %v (--dry-run appended last)", entry.WouldRun, wantArgv)
 	}
+	// Args must record only the caller's real inputs, not the internal
+	// --dry-run flag appended for WouldRun/logging.
+	wantArgs := map[string]string{"args": "arg1"}
+	if !reflect.DeepEqual(entry.Args, wantArgs) {
+		t.Errorf("journalled Args = %v, want %v (must not include --dry-run)", entry.Args, wantArgs)
+	}
 }
 
 func readJournal(t *testing.T, path string) []journal.Entry {
@@ -184,4 +191,251 @@ func readJournal(t *testing.T, path string) []journal.Entry {
 		entries = append(entries, entry)
 	}
 	return entries
+}
+
+// TestRunCancellationBoundedWhenDescendantRetainsOutputPipe pins issue #82:
+// Run cancels only the direct pkexec process, but a privileged descendant
+// that inherited stdout/stderr can live on after that kill and hold the pipe
+// open. Without a finite WaitDelay the output-copy goroutines would block
+// forever waiting for EOF and the GUI action would stay stuck. The test
+// spawns such a descendant and asserts Run returns promptly (bounded by
+// WaitDelay) with a canceled classification instead of hanging.
+func TestRunCancellationBoundedWhenDescendantRetainsOutputPipe(t *testing.T) {
+	dryrun.Set(false)
+	t.Cleanup(func() { dryrun.Set(false) })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	marker := filepath.Join(t.TempDir(), "helper-started")
+	helper := filepath.Join(t.TempDir(), "fake-helper")
+	body := "#!/bin/sh\n" +
+		"echo started\n" +
+		"( exec sleep 100 ) &\n" +
+		"echo ready >\"" + marker + "\"\n" +
+		"wait\n"
+	if err := os.WriteFile(helper, []byte(body), 0o755); err != nil {
+		t.Fatalf("writing fake helper: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() { _, _, e := Run(ctx, "/bin/sh", helper, "do-thing"); done <- e }()
+
+	// Wait until the helper has spawned the descendant that owns the pipe.
+	waited := 0
+	for {
+		if _, err := os.Stat(marker); err == nil {
+			break
+		}
+		waited++
+		if waited > 500 {
+			t.Fatal("fake helper never started")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+
+	// Run must return within WaitDelay plus a small margin rather than wait
+	// for EOF on a pipe only the orphaned descendant still owns.
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "canceled") {
+			t.Errorf("Run error = %v, want a canceled classification", err)
+		}
+		// The sentinel must stay reachable through errors.Is, the
+		// convention internal/stageexec's errors follow.
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("errors.Is(%v, context.Canceled) = false, want true", err)
+		}
+		// Cancellation kills only the direct child, so the message must
+		// not claim the privileged work itself stopped.
+		if !strings.Contains(err.Error(), "may still be running") {
+			t.Errorf("canceled message = %q, want it to warn the privileged work may continue", err.Error())
+		}
+	case <-time.After(WaitDelay + 2*time.Second):
+		t.Fatal("Run waited for a descendant retaining the output pipe")
+	}
+}
+
+// shortenWaitDelay narrows Run's pipe-drain bound for tests that deliberately
+// strand a descendant on the output pipes, so they cost milliseconds instead
+// of the production WaitDelay.
+func shortenWaitDelay(t *testing.T, d time.Duration) {
+	t.Helper()
+	previous := waitDelay
+	waitDelay = d
+	t.Cleanup(func() { waitDelay = previous })
+}
+
+// writePipeHoldingHelper writes a helper that spawns a descendant inheriting
+// stdout/stderr, touches marker, and exits with exitCode while that
+// descendant keeps the pipes open — the shape that makes cmd.Run report
+// exec.ErrWaitDelay even though the helper itself is done.
+func writePipeHoldingHelper(t *testing.T, marker string, exitCode int) string {
+	t.Helper()
+	helper := filepath.Join(t.TempDir(), "fake-helper")
+	body := "#!/bin/sh\n" +
+		"echo helper-output\n" +
+		"( exec sleep 100 ) &\n" +
+		"echo ready >\"" + marker + "\"\n" +
+		fmt.Sprintf("exit %d\n", exitCode)
+	if err := os.WriteFile(helper, []byte(body), 0o755); err != nil {
+		t.Fatalf("writing fake helper: %v", err)
+	}
+	return helper
+}
+
+// TestRunReportsSuccessWhenDescendantHoldsPipesAfterCleanExit pins the
+// consequence of bounding the wait: WaitDelay applies to every run, not only
+// canceled ones, so a helper that succeeded while a descendant kept the
+// inherited pipes open makes cmd.Run return exec.ErrWaitDelay. The helper's
+// own exit status is authoritative there — reporting failure would tell the
+// GUI a completed privileged action failed and invite a retry of work that
+// already happened.
+func TestRunReportsSuccessWhenDescendantHoldsPipesAfterCleanExit(t *testing.T) {
+	dryrun.Set(false)
+	t.Cleanup(func() { dryrun.Set(false) })
+	shortenWaitDelay(t, 200*time.Millisecond)
+
+	marker := filepath.Join(t.TempDir(), "helper-started")
+	helper := writePipeHoldingHelper(t, marker, 0)
+
+	stdout, _, err := Run(context.Background(), "/bin/sh", helper, "do-thing")
+	if err != nil {
+		t.Fatalf("Run = %v, want success for a helper that exited 0", err)
+	}
+	if !strings.Contains(stdout, "helper-output") {
+		t.Errorf("stdout = %q, want the helper's output preserved", stdout)
+	}
+}
+
+// TestRunReportsHelperExitCodeWhenDescendantHoldsPipes pins the other half:
+// when the helper fails while a descendant holds the pipes, the failure must
+// keep its exit code and stderr rather than degrade to the generic
+// pipe-drain message.
+func TestRunReportsHelperExitCodeWhenDescendantHoldsPipes(t *testing.T) {
+	dryrun.Set(false)
+	t.Cleanup(func() { dryrun.Set(false) })
+	shortenWaitDelay(t, 200*time.Millisecond)
+
+	marker := filepath.Join(t.TempDir(), "helper-started")
+	helper := writePipeHoldingHelper(t, marker, 3)
+
+	_, _, err := Run(context.Background(), "/bin/sh", helper, "do-thing")
+	if err == nil || !strings.Contains(err.Error(), "exit 3") {
+		t.Fatalf("Run error = %v, want the helper's exit code reported", err)
+	}
+}
+
+// TestRunCancelDoesNotMaskHelperFailure pins that a cancel racing a genuine
+// helper failure does not erase that failure's classification. The helper
+// exits 3 but a descendant holds the pipes, so Run is still inside its
+// bounded drain when ctx is canceled: ctx.Err() is non-nil, yet the helper
+// terminated with its own status and that status is what the caller needs.
+func TestRunCancelDoesNotMaskHelperFailure(t *testing.T) {
+	dryrun.Set(false)
+	t.Cleanup(func() { dryrun.Set(false) })
+	shortenWaitDelay(t, 3*time.Second)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	marker := filepath.Join(t.TempDir(), "helper-started")
+	helper := writePipeHoldingHelper(t, marker, 3)
+
+	done := make(chan error, 1)
+	go func() { _, _, e := Run(ctx, "/bin/sh", helper, "do-thing"); done <- e }()
+
+	waitForMarker(t, marker)
+	// The marker is written immediately before exit; give the helper time to
+	// actually exit so the cancel lands during the pipe drain, not before.
+	time.Sleep(300 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "exit 3") {
+			t.Fatalf("Run error = %v, want the helper's exit 3 preserved despite the cancel", err)
+		}
+		if errors.Is(err, context.Canceled) {
+			t.Errorf("Run error = %v, want it not classified as cancellation", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run never returned")
+	}
+}
+
+// TestRunCancelDoesNotMaskCleanExit pins the success side of the same race: a
+// helper that already exited 0 did its privileged work, so a cancel landing
+// while Run is still draining pipes a descendant holds must not turn that
+// completed action into a failure the user is invited to retry.
+func TestRunCancelDoesNotMaskCleanExit(t *testing.T) {
+	dryrun.Set(false)
+	t.Cleanup(func() { dryrun.Set(false) })
+	shortenWaitDelay(t, 3*time.Second)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	marker := filepath.Join(t.TempDir(), "helper-started")
+	helper := writePipeHoldingHelper(t, marker, 0)
+
+	type result struct {
+		stdout string
+		err    error
+	}
+	done := make(chan result, 1)
+	go func() {
+		out, _, e := Run(ctx, "/bin/sh", helper, "do-thing")
+		done <- result{stdout: out, err: e}
+	}()
+
+	waitForMarker(t, marker)
+	time.Sleep(300 * time.Millisecond)
+	cancel()
+
+	select {
+	case got := <-done:
+		if got.err != nil {
+			t.Fatalf("Run = %v, want success for a helper that already exited 0", got.err)
+		}
+		if !strings.Contains(got.stdout, "helper-output") {
+			t.Errorf("stdout = %q, want the helper's output preserved", got.stdout)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run never returned")
+	}
+}
+
+// TestRunClassifiesDeadlineWithUnwrappableSentinel pins the timeout half of
+// the context taxonomy, including the errors.Is reachability the cancel case
+// gained.
+func TestRunClassifiesDeadlineWithUnwrappableSentinel(t *testing.T) {
+	dryrun.Set(false)
+	t.Cleanup(func() { dryrun.Set(false) })
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
+	t.Cleanup(cancel)
+	<-ctx.Done()
+
+	_, _, err := Run(ctx, "/bin/sh", "/usr/bin/chairlift-example-helper", "do-thing")
+	if err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("Run error = %v, want a timeout classification", err)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("errors.Is(%v, context.DeadlineExceeded) = false, want true", err)
+	}
+}
+
+// waitForMarker blocks until the fake helper reports it reached the point the
+// test cares about.
+func waitForMarker(t *testing.T, marker string) {
+	t.Helper()
+	for waited := 0; waited <= 500; waited++ {
+		if _, err := os.Stat(marker); err == nil {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("fake helper never started")
 }

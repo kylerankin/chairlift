@@ -3,6 +3,7 @@ package updateall
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -232,6 +233,106 @@ func TestRunSkipsRemainingPhasesOnCancellation(t *testing.T) {
 		if result.Outcome != OutcomeSkipped {
 			t.Errorf("%s outcome = %q after cancellation, want %q", result.Phase.ID, result.Outcome, OutcomeSkipped)
 		}
+	}
+}
+
+// The phase that is still running when the user presses Stop reports the
+// cancellation as its own error. Reporting that as a failure would tell the
+// user their update broke when they were the one who stopped it, and would
+// make Summarize count a failure and pick the "problem(s)" headline.
+func TestRunReportsTheInFlightPhaseAsCancelledNotFailed(t *testing.T) {
+	tests := []struct {
+		name   string
+		runner func(context.CancelFunc) Runner
+		wantID PhaseID
+	}{
+		{
+			name: "os",
+			runner: func(cancel context.CancelFunc) Runner {
+				runner := okRunner()
+				runner.StageOS = func(context.Context, func(string)) error {
+					cancel()
+					return context.Canceled
+				}
+				return runner
+			},
+			wantID: PhaseOS,
+		},
+		{
+			name: "flatpak",
+			runner: func(cancel context.CancelFunc) Runner {
+				runner := okRunner()
+				runner.UpdateFlatpak = func(context.Context) error {
+					cancel()
+					return fmt.Errorf("Command 'flatpak update -y' was canceled: %w", context.Canceled)
+				}
+				return runner
+			},
+			wantID: PhaseFlatpak,
+		},
+		{
+			name: "brew",
+			runner: func(cancel context.CancelFunc) Runner {
+				runner := okRunner()
+				runner.UpdateBrew = func(context.Context) error {
+					cancel()
+					return fmt.Errorf("Command 'brew update' was canceled: %w", context.Canceled)
+				}
+				return runner
+			},
+			wantID: PhaseBrew,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			events := make(chan Event, 64)
+			go func() {
+				for range events {
+				}
+			}()
+			results := test.runner(cancel).Run(ctx, Plan(Availability{OS: true, Flatpak: true, Brew: true}), events)
+
+			for _, result := range results {
+				if result.Phase.ID != test.wantID {
+					continue
+				}
+				if result.Outcome != OutcomeSkipped {
+					t.Errorf("in-flight %s outcome = %q, want %q", test.wantID, result.Outcome, OutcomeSkipped)
+				}
+				if result.Detail != "Cancelled" {
+					t.Errorf("in-flight %s detail = %q, want %q", test.wantID, result.Detail, "Cancelled")
+				}
+			}
+
+			summary := Summarize(results)
+			if summary.Failed != 0 {
+				t.Errorf("Summarize() counted %d failures for a cancelled run, want 0", summary.Failed)
+			}
+			if summary.Headline != "Update cancelled" {
+				t.Errorf("Summarize() headline = %q, want %q", summary.Headline, "Update cancelled")
+			}
+		})
+	}
+}
+
+// Only cancellation is exempt: a provider that fails while the run is healthy
+// must still be reported as a failure.
+func TestRunReportsNonCancellationErrorsAsFailures(t *testing.T) {
+	runner := okRunner()
+	runner.UpdateBrew = func(context.Context) error { return errors.New("brew exploded") }
+
+	results, _ := runWith(t, runner, Plan(Availability{OS: true, Flatpak: true, Brew: true}))
+
+	brew := results[len(results)-1]
+	if brew.Outcome != OutcomeFailed {
+		t.Errorf("brew outcome = %q, want %q", brew.Outcome, OutcomeFailed)
+	}
+	if brew.Detail != "brew exploded" {
+		t.Errorf("brew detail = %q, want the provider's message", brew.Detail)
 	}
 }
 

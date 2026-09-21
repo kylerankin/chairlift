@@ -1,6 +1,7 @@
 package views
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -138,7 +139,7 @@ func (uh *UserHome) buildUpdatesPage() {
 		page.Add(group)
 
 		// Load flatpak updates asynchronously
-		go uh.loadFlatpakUpdates()
+		uh.loadFlatpakUpdates()
 	}
 
 	// Homebrew Updates group
@@ -455,13 +456,24 @@ func (uh *UserHome) loadOutdatedPackagesGeneration(generation uint64, done func(
 	})
 }
 
-// loadFlatpakUpdates loads available Flatpak updates asynchronously
+// loadFlatpakUpdates starts a versioned refresh of the Flatpak update
+// inventory. Only the newest request may publish its result, so a slow reload
+// that is overtaken by a later one is discarded instead of restoring rows the
+// later reload already retired.
 func (uh *UserHome) loadFlatpakUpdates() {
-	if !flatpak.IsInstalledCached() {
-		uh.updateCounts.Set(badgestate.Flatpak, 0)
-		uh.updateBadgeCount()
+	generation := uh.flatpakUpdatesRefresh.Begin()
+	go uh.loadFlatpakUpdatesGeneration(generation)
+}
 
+func (uh *UserHome) loadFlatpakUpdatesGeneration(generation uint64) {
+	if !flatpak.IsInstalledCached() {
 		sgtk.RunOnMainThread(func() {
+			if !uh.flatpakUpdatesRefresh.IsCurrent(generation) {
+				return
+			}
+			uh.updateCounts.Set(badgestate.Flatpak, 0)
+			uh.updateBadgeCount()
+
 			if uh.flatpakUpdatesExpander != nil {
 				uh.flatpakUpdatesExpander.SetSubtitle("Flatpak not installed")
 			}
@@ -491,12 +503,29 @@ func (uh *UserHome) loadFlatpakUpdates() {
 
 	status := flatpakstatus.Subtitle(len(allUpdates), userErr != nil, systemErr != nil)
 
-	// Update the badge count
-	uh.updateCounts.Set(badgestate.Flatpak, len(allUpdates))
-	uh.updateBadgeCount()
-
 	sgtk.RunOnMainThread(func() {
+		if !uh.flatpakUpdatesRefresh.IsCurrent(generation) {
+			return
+		}
+
+		// A load in which both queries failed knows nothing, so it keeps the
+		// last known count instead of publishing an empty inventory.
+		refresh := actionstate.OutdatedRefresh(
+			status.Authoritative,
+			uh.updateCounts.Get(badgestate.Flatpak),
+			len(allUpdates),
+		)
+		uh.updateCounts.Set(badgestate.Flatpak, refresh.Count)
+		uh.updateBadgeCount()
+
 		if uh.flatpakUpdatesExpander == nil {
+			return
+		}
+
+		if !refresh.ReplaceRows {
+			// Say the check failed, but leave the previously discovered rows
+			// reachable rather than wiping them.
+			uh.flatpakUpdatesExpander.SetSubtitle(status.Subtitle)
 			return
 		}
 
@@ -535,7 +564,7 @@ func (uh *UserHome) loadFlatpakUpdates() {
 				btn.SetSensitive(false)
 				btn.SetLabel("Updating...")
 				go func() {
-					if err := flatpak.Update(appID, isUser); err != nil {
+					if err := flatpak.Update(context.Background(), appID, isUser); err != nil {
 						sgtk.RunOnMainThread(func() {
 							btn.SetSensitive(true)
 							btn.SetLabel("Update")
@@ -545,8 +574,10 @@ func (uh *UserHome) loadFlatpakUpdates() {
 					}
 					sgtk.RunOnMainThread(func() {
 						uh.toastAdder.ShowToast(actionmsg.Update(dryrun.Enabled(), appID))
-						// Refresh the updates list
-						go uh.loadFlatpakUpdates()
+						// Refresh the updates list. Called on the main thread so
+						// concurrent completions take generations in the order
+						// they finished.
+						uh.loadFlatpakUpdates()
 					})
 				}()
 			}
@@ -845,7 +876,7 @@ func (uh *UserHome) onSysupdateStageClicked() {
 // updateHomebrew updates Homebrew metadata, then refreshes the outdated list
 // before restoring the top-level action.
 func (uh *UserHome) updateHomebrew(button gtk.Button, gate *actionstate.Gate) {
-	err := homebrew.Update()
+	err := homebrew.Update(context.Background())
 	dryRun := dryrun.Enabled()
 	decision := actionstate.MetadataUpdate(err == nil, dryRun)
 	if err != nil {

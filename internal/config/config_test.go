@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"regexp"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -46,7 +47,13 @@ func groupsEqual(t *testing.T, page, name string, got, want GroupConfig) {
 
 func writeConfigFile(t *testing.T, content string) string {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "config.yml")
+	dir := t.TempDir()
+	// These tests exercise administrator/package-owned configuration
+	// semantics, so the temporary directory stands in for a trusted tier;
+	// otherwise validateEffectiveSudoProvenance would reject any example
+	// that enables a group carrying a privileged action.
+	trustConfigDirectory(t, dir)
+	path := filepath.Join(dir, "config.yml")
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatalf("writing test config file: %v", err)
 	}
@@ -63,6 +70,15 @@ func withConfigPaths(t *testing.T, paths []string) {
 	orig := configPaths
 	t.Cleanup(func() { configPaths = orig })
 	configPaths = paths
+}
+
+// withTrustedConfigPaths overrides the fixed candidates Load() treats as
+// trusted for the duration of the calling test.
+func withTrustedConfigPaths(t *testing.T, paths []string) {
+	t.Helper()
+	orig := trustedConfigPaths
+	t.Cleanup(func() { trustedConfigPaths = orig })
+	trustedConfigPaths = paths
 }
 
 // TestLoadFromPathUnreadablePathReturnsError confirms loadFromPath surfaces
@@ -103,6 +119,67 @@ func TestLoadAbsentFileFallsBackToDefaultConfig(t *testing.T) {
 			}
 			groupsEqual(t, page, name, gotGroup, wantGroup)
 		}
+	}
+}
+
+func TestDevelopmentConfigShadowsRepositoryDefault(t *testing.T) {
+	wantPaths := []string{
+		"/etc/chairlift/config.yml",
+		"/usr/share/chairlift/config.yml",
+		"config.dev.yml",
+		"config.yml",
+	}
+	if !reflect.DeepEqual(configPaths, wantPaths) {
+		t.Fatalf("configPaths = %v, want %v", configPaths, wantPaths)
+	}
+
+	root := t.TempDir()
+	exeDir := filepath.Join(root, "bin")
+	cwd := filepath.Join(root, "checkout")
+	if err := os.MkdirAll(exeDir, 0o755); err != nil {
+		t.Fatalf("creating executable directory: %v", err)
+	}
+	if err := os.MkdirAll(cwd, 0o755); err != nil {
+		t.Fatalf("creating checkout directory: %v", err)
+	}
+	withConfigPaths(t, []string{
+		filepath.Join(root, "etc", "chairlift", "config.yml"),
+		filepath.Join(root, "usr", "share", "chairlift", "config.yml"),
+		"config.dev.yml",
+		"config.yml",
+	})
+	withPathResolutionSeams(t,
+		func() (string, error) { return filepath.Join(exeDir, "chairlift"), nil },
+		func() (string, error) { return cwd, nil },
+	)
+
+	devPath := filepath.Join(cwd, "config.dev.yml")
+	if err := os.WriteFile(devPath, []byte("maintenance_page:\n  maintenance_cleanup_group:\n    actions:\n      - title: Clean Up Boot Old Entries\n        script: /usr/libexec/bls-gc\n"), 0o600); err != nil {
+		t.Fatalf("writing development config: %v", err)
+	}
+	repoPath := filepath.Join(cwd, "config.yml")
+	if err := os.WriteFile(repoPath, []byte("maintenance_page:\n  maintenance_cleanup_group:\n    actions:\n      - title: Clean Up Boot Old Entries\n        script: /usr/libexec/bls-gc\n        sudo: true\n"), 0o600); err != nil {
+		t.Fatalf("writing repository config: %v", err)
+	}
+
+	var reads []string
+	withReadFile(t, func(path string) ([]byte, error) {
+		reads = append(reads, path)
+		return os.ReadFile(path)
+	})
+
+	cfg, loadErr := Load()
+	if loadErr != nil {
+		t.Fatalf("Load() error = %v, want nil", loadErr)
+	}
+	got := cfg.MaintenancePage["maintenance_cleanup_group"].Actions
+	want := []ActionConfig{{Title: "Clean Up Boot Old Entries", Script: "/usr/libexec/bls-gc", Sudo: false}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("maintenance_cleanup_group.Actions = %+v, want %+v", got, want)
+	}
+	wantReads := []string{configPaths[0], configPaths[1], devPath}
+	if !reflect.DeepEqual(reads, wantReads) {
+		t.Fatalf("read paths = %v, want %v", reads, wantReads)
 	}
 }
 
@@ -231,19 +308,17 @@ func TestOmittedEnabledInheritsDocumentedDefault(t *testing.T) {
 			"  maintenance_cleanup_group:\n" +
 			"    actions:\n" +
 			"      - title: Custom\n" +
-			"        script: /usr/libexec/custom\n" +
-			"        sudo: true\n"
+			"        script: /usr/libexec/custom\n"
 		path := writeConfigFile(t, content)
 		cfg, err := loadFromPath(path)
 		if err != nil {
 			t.Fatalf("loadFromPath(%q): %v", path, err)
 		}
-
 		got := cfg.MaintenancePage["maintenance_cleanup_group"]
 		if got.Enabled {
 			t.Errorf("maintenance_cleanup_group: omitted `enabled` got %v, want false (default, not the Go zero-value coincidence)", got.Enabled)
 		}
-		wantActions := []ActionConfig{{Title: "Custom", Script: "/usr/libexec/custom", Sudo: true}}
+		wantActions := []ActionConfig{{Title: "Custom", Script: "/usr/libexec/custom", Sudo: false}}
 		if !reflect.DeepEqual(got.Actions, wantActions) {
 			t.Errorf("maintenance_cleanup_group: Actions override not applied, got %+v, want %+v", got.Actions, wantActions)
 		}
@@ -500,5 +575,67 @@ func TestAIOverridesMergeLikeEveryOtherGroupField(t *testing.T) {
 	// Overriding one vendor must not disturb the group's own default state.
 	if !group.Enabled {
 		t.Error("ai_group was disabled by an unrelated override")
+	}
+}
+
+// TestUntrustedConfigCannotEnableInheritedSudoAction covers the merged-config
+// provenance gate: a config in an untrusted location that only flips
+// maintenance_cleanup_group on inherits defaultConfig()'s privileged bls-gc
+// action without ever spelling out sudo: true, so the node-level gate never
+// sees it. Loading must fail closed instead.
+func TestUntrustedConfigCannotEnableInheritedSudoAction(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yml")
+	if err := os.WriteFile(path, []byte("maintenance_page:\n  maintenance_cleanup_group:\n    enabled: true\n"), 0o600); err != nil {
+		t.Fatalf("writing config: %v", err)
+	}
+
+	cfg, err := loadFromPath(path)
+	if err == nil {
+		t.Fatalf("loadFromPath(%q) err = nil, want provenance failure (cfg = %+v)", path, cfg)
+	}
+	if err.Kind != KindSchema {
+		t.Fatalf("err.Kind = %v, want %v", err.Kind, KindSchema)
+	}
+	if !strings.Contains(err.Detail, "sudo actions are only permitted in trusted configurations") {
+		t.Fatalf("err.Detail = %q, want provenance error", err.Detail)
+	}
+}
+
+// TestUntrustedConfigKeepingSudoGroupDisabledLoads pins the other half of the
+// merged-config gate: the privileged default ships disabled, so an untrusted
+// config that leaves it alone still loads.
+func TestUntrustedConfigKeepingSudoGroupDisabledLoads(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yml")
+	if err := os.WriteFile(path, []byte("maintenance_page:\n  maintenance_brew_group:\n    enabled: true\n"), 0o600); err != nil {
+		t.Fatalf("writing config: %v", err)
+	}
+
+	cfg, err := loadFromPath(path)
+	if err != nil {
+		t.Fatalf("loadFromPath(%q) err = %v, want nil", path, err)
+	}
+	if cfg.MaintenancePage["maintenance_cleanup_group"].Enabled {
+		t.Fatal("maintenance_cleanup_group = enabled, want disabled default")
+	}
+}
+
+// TestTrustedConfigMayEnableInheritedSudoAction confirms the merged-config
+// gate keys on provenance, not on the action itself: the same file under a
+// trusted directory loads with the privileged default intact.
+func TestTrustedConfigMayEnableInheritedSudoAction(t *testing.T) {
+	dir := t.TempDir()
+	withTrustedConfigDirectories(t, []string{dir})
+	path := filepath.Join(dir, "config.yml")
+	if err := os.WriteFile(path, []byte("maintenance_page:\n  maintenance_cleanup_group:\n    enabled: true\n"), 0o600); err != nil {
+		t.Fatalf("writing config: %v", err)
+	}
+
+	cfg, err := loadFromPath(path)
+	if err != nil {
+		t.Fatalf("loadFromPath(%q) err = %v, want nil", path, err)
+	}
+	group := cfg.MaintenancePage["maintenance_cleanup_group"]
+	if !group.Enabled || len(group.Actions) != 1 || !group.Actions[0].Sudo {
+		t.Fatalf("maintenance_cleanup_group = %+v, want enabled with the privileged default action", group)
 	}
 }

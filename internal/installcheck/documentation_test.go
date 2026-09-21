@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/projectbluefin/chairlift/internal/config"
 	"gopkg.in/yaml.v3"
 )
 
@@ -100,6 +101,53 @@ func TestCurrentDocumentationMatchesSourceFacts(t *testing.T) {
 		}
 	})
 
+	t.Run("privileged integration inventory is complete", func(t *testing.T) {
+		ubluePolicy := readRepoFile(t, filepath.Join("data", "io.projectbluefin.chairlift.ublue.policy"))
+		if got := strings.Count(ubluePolicy, `<action id="io.projectbluefin.chairlift.ublue.`); got != 9 {
+			t.Fatalf("ublue policy actions = %d, want 9", got)
+		}
+
+		current := strings.Join([]string{
+			readRepoFile(t, "README.md"),
+			readRepoFile(t, "AGENTS.md"),
+			readRepoFile(t, filepath.Join("docs", "index.md")),
+			readRepoFile(t, filepath.Join("docs", "adr", "0006-split-system-integration-package-with-mutual-conflicts.md")),
+			readRepoFile(t, filepath.Join("docs", "design", "overview.md")),
+			readRepoFile(t, filepath.Join("docs", "design", "package-managers.md")),
+		}, "\n")
+
+		for _, required := range []string{
+			"/usr/bin/chairlift-updex-helper",
+			"/usr/bin/chairlift-ublue-helper",
+			"/usr/share/polkit-1/actions/io.projectbluefin.chairlift.bootc.policy",
+			"/usr/share/polkit-1/actions/io.projectbluefin.chairlift.sysupdate.policy",
+			"/usr/share/polkit-1/actions/io.projectbluefin.chairlift.updex.policy",
+			"/usr/share/polkit-1/actions/io.projectbluefin.chairlift.ublue.policy",
+			"/usr/share/chairlift/config.yml",
+			"/usr/share/doc/chairlift/channels.example.yml",
+			"nine actions",
+			"factory-reset",
+		} {
+			if !strings.Contains(current, required) {
+				t.Errorf("current documentation does not contain %q", required)
+			}
+		}
+
+		for _, stale := range []string{
+			"all three PolicyKit policies",
+			"all three policies",
+			"the three PolicyKit policies",
+			"eight subcommands",
+			"declaring the three actions",
+			"builds two binaries",
+			"chairlift-updex-helper` only",
+		} {
+			if strings.Contains(current, stale) {
+				t.Errorf("current documentation still contains stale privileged-inventory claim %q", stale)
+			}
+		}
+	})
+
 	t.Run("public metrics catalog stays auditable", func(t *testing.T) {
 		catalog := strings.Join(strings.Fields(readRepoFile(t, filepath.Join("docs", "metrics", "README.md"))), " ")
 		for _, required := range []string{
@@ -107,12 +155,36 @@ func TestCurrentDocumentationMatchesSourceFacts(t *testing.T) {
 			"actions/workflows/test.yml",
 			"actions/workflows/nightly-compliance.yml",
 			"app.codecov.io/gh/projectbluefin/chairlift",
+			"https://api.github.com/repos/projectbluefin/chairlift",
 			"does not currently attach a reliable provenance marker",
 			"does not collect application usage telemetry",
 		} {
 			if !strings.Contains(catalog, required) {
 				t.Errorf("docs/metrics/README.md does not contain %q", required)
 			}
+		}
+	})
+
+	t.Run("operational commands target canonical repo", func(t *testing.T) {
+		metricsDoc := readRepoFile(t, filepath.Join("docs", "metrics.md"))
+		if !strings.Contains(metricsDoc, "--repo projectbluefin/chairlift") {
+			t.Error("docs/metrics.md does not target projectbluefin/chairlift")
+		}
+		if strings.Contains(metricsDoc, "frostyard/chairlift") {
+			t.Error("docs/metrics.md still references frostyard/chairlift")
+		}
+
+		qualityDoc := readRepoFile(t, filepath.Join("docs", "quality.md"))
+		if !strings.Contains(qualityDoc, "gh secret set ANTHROPIC_API_KEY --repo projectbluefin/chairlift") {
+			t.Error("docs/quality.md does not target projectbluefin/chairlift for ANTHROPIC_API_KEY secret")
+		}
+		if strings.Contains(qualityDoc, "--repo frostyard/chairlift") {
+			t.Error("docs/quality.md still references --repo frostyard/chairlift")
+		}
+
+		metricsReadme := readRepoFile(t, filepath.Join("docs", "metrics", "README.md"))
+		if strings.Contains(metricsReadme, "frostyard/chairlift") {
+			t.Error("docs/metrics/README.md still references frostyard/chairlift")
 		}
 	})
 
@@ -128,12 +200,77 @@ func TestCurrentDocumentationMatchesSourceFacts(t *testing.T) {
 			"Help page coming soon",
 			"Help is coming soon",
 			"Groups for unavailable tools are hidden automatically",
+			"all features default to enabled, except\n`maintenance_cleanup_group`, which defaults to disabled",
+			"all features default to enabled except\n`maintenance_cleanup_group`, which defaults to disabled",
+			"all groups are enabled except\n`maintenance_cleanup_group`.",
+			"every group except `maintenance_cleanup_group`, which\n    defaults to `false`",
 		} {
 			if strings.Contains(current, stale) {
 				t.Errorf("current documentation still contains stale claim %q", stale)
 			}
 		}
 	})
+}
+
+func TestDocumentedConfigInventoryMatchesCanonicalSchema(t *testing.T) {
+	pages, err := config.SchemaPages()
+	if err != nil {
+		t.Fatalf("config.SchemaPages(): %v", err)
+	}
+
+	for _, docName := range []string{"CONFIG.md", filepath.Join("docs", "reference.md")} {
+		t.Run(docName, func(t *testing.T) {
+			content := readRepoFile(t, docName)
+			for _, page := range pages {
+				groups, err := config.SchemaGroups(page)
+				if err != nil {
+					t.Fatalf("config.SchemaGroups(%q): %v", page, err)
+				}
+				for _, group := range groups {
+					if !strings.Contains(content, "`"+group+"`") {
+						t.Errorf("%s does not document canonical group %s.%s", docName, page, group)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestDocumentedDefaultsMatchCanonicalSchema(t *testing.T) {
+	for _, docName := range []string{
+		"CONFIG.md",
+		filepath.Join("docs", "reference.md"),
+		filepath.Join("docs", "design", "overview.md"),
+	} {
+		t.Run(docName, func(t *testing.T) {
+			content := readRepoFile(t, docName)
+			for _, required := range []string{
+				"maintenance_cleanup_group",
+				"reset_group",
+			} {
+				if !strings.Contains(content, required) {
+					t.Errorf("%s does not mention %s", docName, required)
+				}
+			}
+		})
+	}
+}
+
+func TestDocumentedOptionalFieldsCoverCanonicalGroupFields(t *testing.T) {
+	fields, err := config.SchemaGroupFields()
+	if err != nil {
+		t.Fatalf("config.SchemaGroupFields(): %v", err)
+	}
+
+	configDoc := readRepoFile(t, "CONFIG.md")
+	for _, field := range fields {
+		if field == "enabled" {
+			continue // handled separately in docs
+		}
+		if !strings.Contains(configDoc, "`"+field+"`") {
+			t.Errorf("CONFIG.md does not document optional field %q", field)
+		}
+	}
 }
 
 func TestAIFixRequestedWorkflowIsLabelScoped(t *testing.T) {

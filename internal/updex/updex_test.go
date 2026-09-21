@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"github.com/projectbluefin/chairlift/internal/dryrun"
+	"github.com/projectbluefin/chairlift/internal/pkexec"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -91,7 +92,7 @@ func TestPrivilegedOperationsUseExactHelperArguments(t *testing.T) {
 
 	dir := t.TempDir()
 	capturedArgsFile := filepath.Join(dir, "captured-args")
-	fakePkexec := filepath.Join(dir, pkexecCommand)
+	fakePkexec := filepath.Join(dir, pkexec.Command)
 	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$CHAIRLIFT_UPDEX_ARGS\"\n"
 	if err := os.WriteFile(fakePkexec, []byte(script), 0o755); err != nil {
 		t.Fatalf("writing fake pkexec: %v", err)
@@ -197,5 +198,111 @@ func TestDryRunStateAndDefaultContext(t *testing.T) {
 	remaining := time.Until(deadline)
 	if remaining <= DefaultTimeout-time.Second || remaining > DefaultTimeout {
 		t.Fatalf("DefaultContext deadline remaining = %v, want approximately %v", remaining, DefaultTimeout)
+	}
+}
+
+func TestUpdexAvailabilityRequiresNonEmptyFeatures(t *testing.T) {
+	origLister := featuresLister
+	t.Cleanup(func() { featuresLister = origLister })
+
+	t.Run("returns false when feature list is empty", func(t *testing.T) {
+		featuresLister = func(ctx context.Context) ([]Feature, error) {
+			return []Feature{}, nil
+		}
+		if IsInstalled() {
+			t.Fatal("IsInstalled() = true with empty feature list, want false")
+		}
+	})
+
+	t.Run("returns false when features listing returns error", func(t *testing.T) {
+		featuresLister = func(ctx context.Context) ([]Feature, error) {
+			return nil, errors.New("failed to read features")
+		}
+		if IsInstalled() {
+			t.Fatal("IsInstalled() = true with listing error, want false")
+		}
+	})
+
+	t.Run("returns true when features list is non-empty and error is nil", func(t *testing.T) {
+		featuresLister = func(ctx context.Context) ([]Feature, error) {
+			return []Feature{{Name: "test-feature", Enabled: true}}, nil
+		}
+		if !IsInstalled() {
+			t.Fatal("IsInstalled() = false with non-empty features, want true")
+		}
+	})
+}
+
+func TestCheckFeaturesReturnsResultsAndRetainsWarnings(t *testing.T) {
+	origChecker := featuresChecker
+	t.Cleanup(func() { featuresChecker = origChecker })
+
+	expectedChecks := []FeatureCheck{
+		{
+			Feature: "demo",
+			Results: []CheckResult{
+				{
+					Component:       "comp1",
+					CurrentVersion:  "1.0",
+					NewestVersion:   "2.0",
+					UpdateAvailable: true,
+				},
+			},
+		},
+	}
+	expectedWarnings := []string{
+		"failed to get available versions for comp2: 404 Not Found",
+	}
+
+	featuresChecker = func(ctx context.Context) ([]FeatureCheck, []string, error) {
+		return expectedChecks, expectedWarnings, nil
+	}
+
+	ctx := context.Background()
+	checks, warnings, err := CheckFeatures(ctx)
+	if err != nil {
+		t.Fatalf("CheckFeatures() returned unexpected error: %v", err)
+	}
+	if !reflect.DeepEqual(checks, expectedChecks) {
+		t.Fatalf("CheckFeatures() checks = %#v, want %#v", checks, expectedChecks)
+	}
+	if !reflect.DeepEqual(warnings, expectedWarnings) {
+		t.Fatalf("CheckFeatures() warnings = %#v, want %#v", warnings, expectedWarnings)
+	}
+}
+
+func TestCheckFeaturesPropagatesError(t *testing.T) {
+	origChecker := featuresChecker
+	t.Cleanup(func() { featuresChecker = origChecker })
+
+	expectedErr := errors.New("check failed")
+	expectedWarnings := []string{"manifest error"}
+
+	featuresChecker = func(ctx context.Context) ([]FeatureCheck, []string, error) {
+		return nil, expectedWarnings, expectedErr
+	}
+
+	ctx := context.Background()
+	checks, warnings, err := CheckFeatures(ctx)
+	if !errors.Is(err, expectedErr) {
+		t.Fatalf("CheckFeatures() error = %v, want %v", err, expectedErr)
+	}
+	if checks != nil {
+		t.Fatalf("CheckFeatures() checks = %#v, want nil", checks)
+	}
+	if !reflect.DeepEqual(warnings, expectedWarnings) {
+		t.Fatalf("CheckFeatures() warnings = %#v, want %#v", warnings, expectedWarnings)
+	}
+}
+
+func TestWarningCapturingReporterCapturesFormattedWarnings(t *testing.T) {
+	rep := &warningCapturingReporter{}
+	rep.Warning("warning %d: %s", 1, "test")
+	rep.Warning("second warning")
+
+	got := rep.Warnings()
+	want := []string{"warning 1: test", "second warning"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Warnings() = %#v, want %#v", got, want)
 	}
 }

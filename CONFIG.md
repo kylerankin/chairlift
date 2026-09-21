@@ -9,17 +9,21 @@ ChairLift searches for the configuration file in the following locations (in ord
 1. `/etc/chairlift/config.yml` (system-wide configuration - highest priority)
 2. `/usr/share/chairlift/config.yml` (package maintainer defaults installed by
    source and nFPM packages)
-3. `config.yml` beside the ChairLift executable, or in the current working
-   directory when no executable-relative file exists (development fallback)
+3. `config.dev.yml` beside the ChairLift executable, or in the current working
+   directory when no executable-relative file exists (source-checkout fallback)
+4. `config.yml` beside the ChairLift executable, or in the current working
+   directory when no executable-relative file exists (legacy development fallback)
 
 If no configuration file is found, all features default to enabled, except
-`maintenance_cleanup_group`, which defaults to disabled.
+`maintenance_cleanup_group` and `reset_group`, which default to disabled.
 
 Packages own and may replace the `/usr/share` defaults during an upgrade.
 Administrators should put local changes in `/etc/chairlift/config.yml`;
 ChairLift's install and packaging paths never create or overwrite that file.
 The `projectbluefin-chairlift-system-integration` package also provides the
 `/usr/share` defaults for a user-scoped GUI installation.
+The repository root includes `config.dev.yml` so `go run .` from a checkout can
+load unprivileged development defaults before the package default `config.yml`.
 
 The first file that exists in this order is authoritative. ChairLift does not
 fall through to a lower-priority file when that file is unreadable, malformed,
@@ -55,11 +59,13 @@ valid page.
 
 - `system_info_group`: Operating system information from /etc/os-release
 - `bootc_status_group`: System status information from bootc (when available)
+- `channel_group`: Release channel and graphics-driver switching; shown only when `/usr/share/ublue-os/image-info.json` is present
 - `health_group`: System health monitoring and performance tools
   - `app_id`: Application ID for the system monitoring tool (default: `io.missioncenter.MissionCenter`)
 
 ### Updates Page (`updates_page`)
 
+- `update_all_group`: Multi-phase update sequencing (OS image, Flatpaks, Homebrew) and automatic background updates switch
 - `bootc_updates_group`: System-wide bootc updates
 - `sysupdate_updates_group`: System-wide native A/B (systemd-sysupdate) updates; shown only on native A/B installs
 - `flatpak_updates_group`: Available Flatpak application updates (user and system)
@@ -91,15 +97,22 @@ valid page.
 - `maintenance_cleanup_group`: System cleanup utilities (disabled by default)
   - `actions`: Array of maintenance scripts that can be executed
     - `title`: Display name for the action
-    - `script`: Absolute path to the script to execute
-    - `sudo`: Boolean indicating if the script requires administrator privileges (uses pkexec)
+    - `script`: Absolute path to the script to execute. Required when `sudo: true`.
+    - `sudo`: Boolean indicating if the script requires administrator privileges (uses pkexec). `sudo: true` is accepted only from trusted `/etc/chairlift/config.yml` or `/usr/share/chairlift/config.yml` configurations. The rule is applied to the effective configuration, so an untrusted file may not enable a group whose actions include a privileged one, even when it inherits that action from the built-in defaults rather than declaring `sudo: true` itself.
 - `maintenance_brew_group`: Homebrew cleanup (runs `brew cleanup` to remove old versions and cache)
 - `maintenance_flatpak_group`: Flatpak cleanup (runs `flatpak uninstall --unused` to remove unused runtimes)
 - `maintenance_optimization_group`: System optimization tools
+- `reset_group`: Powerwash (removes user Flatpaks and Distrobox containers) and Factory Reset (`bootc install reset --experimental`) utilities (disabled by default)
 
 ### Features Page (`features_page`)
 
 - `features_group`: System features managed by updex (requires `updex` command)
+- `dx_group`: Developer Mode; adds the invoking account to container, VM, and serial-device groups (shown only when `/usr/share/ublue-os/image-info.json` is present)
+- `gaming_group`: Gaming Mode; toggles gaming optimizations (shown only when `/usr/share/ublue-os/image-info.json` is present)
+- `ai_group`: Local AI language model served in a rootless container via Quadlet/Podman; shown when Podman is present
+  - `ai_images`: Map of container image references per GPU vendor (`nvidia`, `amd`, `intel`, `none`)
+  - `ai_model`: Model reference to serve (default: `ollama://qwen2.5:7b`)
+- `troubleshooting_group`: Enhanced Troubleshooting; AI diagnostic assistant installed via Homebrew (shown only when Homebrew is present)
 
 ### Help Page (`help_page`)
 
@@ -114,12 +127,16 @@ To create a distribution-specific configuration that disables all Homebrew featu
 
 ```yaml
 updates_page:
+  update_all_group:
+    enabled: false # Hide Update All so it cannot run Homebrew updates
   bootc_updates_group:
     enabled: true
   flatpak_updates_group:
     enabled: true # Keep Flatpak updates
   brew_updates_group:
     enabled: false # Hide Homebrew updates
+  brew_trust_group:
+    enabled: false # Hide Homebrew tap trust
 
 applications_page:
   applications_installed_group:
@@ -146,11 +163,15 @@ maintenance_page:
   maintenance_cleanup_group:
     enabled: true
   maintenance_brew_group:
-    enabled: true
+    enabled: false # Hide Homebrew cleanup
   maintenance_flatpak_group:
     enabled: true
   maintenance_optimization_group:
     enabled: true
+
+features_page:
+  troubleshooting_group:
+    enabled: false # Hide Homebrew-backed troubleshooting assistant
 
 help_page:
   help_resources_group:
@@ -187,10 +208,10 @@ install -D -m 644 config.yml debian/tmp/usr/share/chairlift/config.yml
 - A configuration file is applied as an overlay on top of the built-in
   defaults, field by field, not as a full replacement:
   - An omitted `enabled` key inherits that group's documented default
-    (`true` for every group except `maintenance_cleanup_group`, which
-    defaults to `false`)
+    (`true` for every group except `maintenance_cleanup_group` and
+    `reset_group`, which default to `false`)
   - An omitted optional field (`app_id`, `website`, `issues`, `chat`,
-    `actions`, `bundles_paths`) inherits its documented default value
+    `actions`, `bundles_paths`, `ai_images`, `ai_model`) inherits its documented default value
   - An explicit empty list (e.g. `actions: []`) clears the field
   - A non-empty list, or an explicitly set scalar value, replaces the
     default outright

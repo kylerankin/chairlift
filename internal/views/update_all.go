@@ -40,20 +40,56 @@ const autoUpdateProbeTimeout = 5 * time.Second
 // the provider seams, marshals events back to the GTK main thread, and
 // renders the result.
 
-// buildUpdateAllGroup builds the Update All group at the top of the Updates
-// page. The group is omitted entirely when no provider on this host can be
-// updated, rather than offering a button that would do nothing.
+// buildUpdateAllGroup builds the Update All group shell at the top of the
+// Updates page. Only the shell is built synchronously: the bootc, Flatpak,
+// and Homebrew availability probes and the automatic-updates systemctl query
+// can each approach a multi-second timeout on a slow or wedged host, and none
+// of them may stall the first window (chairlift#79). The group stays hidden
+// until a worker has answered those probes and populated the real rows on the
+// GTK main thread via loadUpdateAllGroup.
+//
 // The group's config guard is applied by its caller in updates_page.go,
 // because internal/config and internal/navigation both scan that one file for
 // each page's IsGroupEnabled call sites.
 func (uh *UserHome) buildUpdateAllGroup(page *adw.PreferencesPage) {
+	group := adw.NewPreferencesGroup()
+	group.SetTitle("Update All")
+	group.SetDescription("Checking what this system can update…")
+	group.SetVisible(false)
+
+	uh.updateAllGroup = group
+	page.Add(group)
+
+	go uh.loadUpdateAllGroup(group)
+}
+
+// loadUpdateAllGroup probes which providers exist on this host and, once the
+// probe results are known, populates the Update All group. It runs in a
+// worker goroutine; widgets are only touched on the GTK main thread. When no
+// provider can be updated the group stays hidden, matching the behaviour the
+// synchronous builder had of omitting the group entirely rather than offering
+// a button that would do nothing.
+func (uh *UserHome) loadUpdateAllGroup(group *adw.PreferencesGroup) {
 	plan := updateall.Plan(hostAvailability())
 	if len(plan) == 0 {
 		return
 	}
 
-	group := adw.NewPreferencesGroup()
-	group.SetTitle("Update All")
+	ctx, cancel := context.WithTimeout(context.Background(), autoUpdateProbeTimeout)
+	defer cancel()
+	state := autoupdate.Detect(ctx)
+
+	sgtk.RunOnMainThread(func() {
+		uh.populateUpdateAllGroup(group, plan, state)
+	})
+}
+
+// populateUpdateAllGroup builds the Update All rows into the group shell
+// created by buildUpdateAllGroup. Main thread only, after the provider probes
+// have answered.
+func (uh *UserHome) populateUpdateAllGroup(group *adw.PreferencesGroup, plan []updateall.Phase, state autoupdate.State) {
+	group.SetDescription("")
+	group.SetVisible(true)
 
 	row := adw.NewActionRow()
 	presentation := pageview.UpdateAllRow(len(plan))
@@ -97,11 +133,10 @@ func (uh *UserHome) buildUpdateAllGroup(page *adw.PreferencesPage) {
 	// own: they answer the same question — how does this system get updated
 	// — and separating them would imply they are unrelated settings. They
 	// share update_all_group's config key for the same reason; see
-	// config.yml.
-	uh.buildAutomaticUpdatesRow(group)
+	// config.yml. The probe already ran in loadUpdateAllGroup; this only
+	// renders the row.
+	uh.buildAutomaticUpdatesRow(group, state)
 
-	page.Add(group)
-	uh.updateAllGroup = group
 	uh.updateAllRow = row
 	uh.updateAllBtn = button
 	uh.updateAllRestart = restart
@@ -113,11 +148,7 @@ func (uh *UserHome) buildUpdateAllGroup(page *adw.PreferencesPage) {
 // row is omitted entirely when the unattended-update timer is not installed,
 // so a host that cannot update itself never shows a switch that would do
 // nothing.
-func (uh *UserHome) buildAutomaticUpdatesRow(group *adw.PreferencesGroup) {
-	ctx, cancel := context.WithTimeout(context.Background(), autoUpdateProbeTimeout)
-	defer cancel()
-
-	state := autoupdate.Detect(ctx)
+func (uh *UserHome) buildAutomaticUpdatesRow(group *adw.PreferencesGroup, state autoupdate.State) {
 	if !state.Available() {
 		log.Printf("views: automatic updates unavailable (%s not installed)", autoupdate.TimerUnit)
 		return
@@ -211,13 +242,16 @@ func hostRunner() updateall.Runner {
 			}
 			return true, status.Status.Staged.Version()
 		},
-		UpdateFlatpak: func(context.Context) error {
+		UpdateFlatpak: func(ctx context.Context) error {
 			// The empty application ID updates every installed application;
-			// the user scope is the one ChairLift installs into.
-			return flatpak.Update("", true)
+			// the user scope is the one ChairLift installs into. The run's
+			// context is passed through so cancelling Update All stops the
+			// in-flight update instead of leaving it running to its own 30-
+			// minute budget.
+			return flatpak.Update(ctx, "", true)
 		},
-		UpdateBrew: func(context.Context) error {
-			return homebrew.Update()
+		UpdateBrew: func(ctx context.Context) error {
+			return homebrew.Update(ctx)
 		},
 	}
 }

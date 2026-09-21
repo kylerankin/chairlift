@@ -10,6 +10,7 @@ import (
 	"github.com/projectbluefin/chairlift/internal/dryrun"
 	"github.com/projectbluefin/chairlift/internal/flatpak"
 	"github.com/projectbluefin/chairlift/internal/homebrew"
+	"github.com/projectbluefin/chairlift/internal/launcher"
 	"github.com/projectbluefin/chairlift/internal/views/actionmsg"
 	"github.com/projectbluefin/chairlift/internal/views/actionstate"
 	"github.com/projectbluefin/chairlift/internal/views/bundleview"
@@ -249,6 +250,11 @@ func (uh *UserHome) loadBrewBundles(paths []string) {
 							gate.Complete()
 							btn.SetLabel("Installed")
 							btn.SetSensitive(false)
+							// A live bundle install can add formulae and casks the
+							// current inventory snapshot predates, so refresh the
+							// installed list to match. Under dry-run decision.Complete
+							// is false — nothing was changed — so the inventory stays put.
+							go uh.loadHomebrewPackages()
 						} else {
 							gate.Reset()
 							btn.SetLabel("Install")
@@ -563,8 +569,12 @@ func setHomebrewControlsSensitive(controls []*gtk.Button, sensitive bool) {
 
 // loadFlatpakApplications loads installed Flatpak applications asynchronously
 func (uh *UserHome) loadFlatpakApplications() {
+	generation := uh.flatpakPackagesRefresh.Begin()
 	if !flatpak.IsInstalledCached() {
 		sgtk.RunOnMainThread(func() {
+			if !uh.flatpakPackagesRefresh.IsCurrent(generation) {
+				return
+			}
 			if uh.flatpakUserExpander != nil {
 				uh.flatpakUserExpander.SetSubtitle("Flatpak not installed")
 			}
@@ -580,10 +590,16 @@ func (uh *UserHome) loadFlatpakApplications() {
 		userApps, err := flatpak.ListUserApplications()
 		if err != nil {
 			sgtk.RunOnMainThread(func() {
+				if !uh.flatpakPackagesRefresh.IsCurrent(generation) {
+					return
+				}
 				uh.flatpakUserExpander.SetSubtitle(fmt.Sprintf("Error: %v", err))
 			})
 		} else {
 			sgtk.RunOnMainThread(func() {
+				if !uh.flatpakPackagesRefresh.IsCurrent(generation) {
+					return
+				}
 				// Clear rows added by a previous load before repopulating
 				uh.flatpakUserRows.Clear(func(r *adw.ActionRow) { uh.flatpakUserExpander.Remove(&r.Widget) })
 
@@ -634,10 +650,16 @@ func (uh *UserHome) loadFlatpakApplications() {
 		systemApps, err := flatpak.ListSystemApplications()
 		if err != nil {
 			sgtk.RunOnMainThread(func() {
+				if !uh.flatpakPackagesRefresh.IsCurrent(generation) {
+					return
+				}
 				uh.flatpakSystemExpander.SetSubtitle(fmt.Sprintf("Error: %v", err))
 			})
 		} else {
 			sgtk.RunOnMainThread(func() {
+				if !uh.flatpakPackagesRefresh.IsCurrent(generation) {
+					return
+				}
 				// Clear rows added by a previous load before repopulating
 				uh.flatpakSystemRows.Clear(func(r *adw.ActionRow) { uh.flatpakSystemExpander.Remove(&r.Widget) })
 
@@ -808,14 +830,17 @@ func (uh *UserHome) launchApp(appID string) {
 	cmd := exec.Command("gtk-launch", appID)
 	cmd.Env = os.Environ()
 
-	if err := cmd.Start(); err != nil {
+	if err := launcher.Start(cmd, func(err error) {
+		log.Printf("Failed to launch app %s: %v", appID, err)
+		// gtk-launch exits nonzero when the desktop app ID is missing or
+		// the launch fails; surface that async failure instead of silently
+		// dropping it. Must run on the GTK main thread.
+		sgtk.RunOnMainThread(func() {
+			uh.toastAdder.ShowErrorToast(fmt.Sprintf("Failed to launch %s", appID))
+		})
+	}); err != nil {
 		log.Printf("Failed to launch app %s: %v", appID, err)
 		uh.toastAdder.ShowErrorToast(fmt.Sprintf("Failed to launch %s", appID))
 		return
 	}
-
-	// Don't wait for the command to finish - it's a GUI app
-	go func() {
-		_ = cmd.Wait()
-	}()
 }

@@ -73,6 +73,14 @@ type Invocation struct {
 	DryRun  bool
 }
 
+// UsesChannelTable reports whether this invocation needs the administrator's
+// channel and driver configuration to resolve its fixed target. Every other
+// command uses fixed argv and must remain available if that optional table is
+// malformed.
+func (i Invocation) UsesChannelTable() bool {
+	return i.Command == CommandChannelSwitch || i.Command == CommandDriverSwitch
+}
+
 // SupportedCommands returns the complete first-argument set accepted by the
 // privileged helper, in the order the policy file declares its actions. The
 // returned slice is a fresh value so callers cannot mutate the package's
@@ -91,7 +99,7 @@ func SupportedCommands() []string {
 	}
 }
 
-// ParseInvocation accepts only the three argv shapes ChairLift emits:
+// ParseInvocation accepts only the nine argv shapes ChairLift emits:
 //
 //	channel-switch <stable|testing> [--dry-run]
 //	dx-enable [--dry-run]
