@@ -6,10 +6,12 @@ import (
 	"time"
 
 	"github.com/projectbluefin/chairlift/internal/config"
+	"github.com/projectbluefin/chairlift/internal/livery"
 	"github.com/projectbluefin/chairlift/internal/troubleshoot"
 	"github.com/projectbluefin/chairlift/internal/views/actionstate"
 	"github.com/projectbluefin/chairlift/internal/views/badgestate"
 	"github.com/projectbluefin/chairlift/internal/views/bundleview"
+	"github.com/projectbluefin/chairlift/internal/views/pageview"
 	"github.com/projectbluefin/chairlift/internal/views/rowset"
 
 	sgtk "github.com/frostyard/snowkit/gtk"
@@ -41,6 +43,7 @@ type UserHome struct {
 	applicationsPage *adw.ToolbarView
 	maintenancePage  *adw.ToolbarView
 	featuresPage     *adw.ToolbarView
+	liveryPage       *adw.ToolbarView
 	helpPage         *adw.ToolbarView
 
 	// PreferencesPages inside each ToolbarView - keep references to prevent GC
@@ -49,6 +52,7 @@ type UserHome struct {
 	applicationsPrefsPage *adw.PreferencesPage
 	maintenancePrefsPage  *adw.PreferencesPage
 	featuresPrefsPage     *adw.PreferencesPage
+	liveryPrefsPage       *adw.PreferencesPage
 	helpPrefsPage         *adw.PreferencesPage
 
 	// References for dynamic updates
@@ -71,6 +75,57 @@ type UserHome struct {
 	brewTrustGroup         *adw.PreferencesGroup
 	brewTrustRows          map[string]*adw.ActionRow
 	outdatedRows           rowset.Tracker[*adw.ActionRow]
+
+	// Livery references. liveryState is the last state the page loaded and
+	// is what every handler compares against, so a programmatic widget
+	// update during restore is recognized as "no change" instead of being
+	// replayed as a user action; liverySuppress closes the same window
+	// explicitly. See applyLiveryState.
+	liveryAppGridGroup    *adw.PreferencesGroup
+	liveryAppGridSwitch   *gtk.Switch
+	liveryAppGridRow      *adw.ActionRow
+	liveryPickerMode      liveryPickerMode
+	liveryPanelGroup      *adw.PreferencesGroup
+	liveryPanelRow        *adw.ActionRow
+	liveryPanelSwitch     *gtk.Switch
+	liveryPanelMarkRow    *adw.ActionRow
+	liveryPanelRotate     *gtk.Switch
+	liveryDockGroup       *adw.PreferencesGroup
+	liveryDockSwitch      *gtk.Switch
+	liveryPickerDialog    *adw.Dialog
+	liveryPickerSearch    *gtk.SearchEntry
+	liveryPickerList      *gtk.ListBox
+	liveryDockSelectedRow *adw.ActionRow
+	liveryDockRotate      *gtk.Switch
+	// liveryDockVisible is the result set currently drawn, so the list's one
+	// row-activated handler can map a row index back to a project without
+	// allocating a callback per row. See refreshLiveryPickerRows.
+	liveryDockVisible []pageview.LiveryProjectResult
+	liveryState       livery.State
+	liverySuppress    bool
+	liveryLoaded      bool
+	// One gate per section serializes that section's toggle work. Every
+	// section's Apply and Clear touch the same mark file, so an off-then-on
+	// flip without a gate can land Clear after Apply and leave the switch
+	// showing enabled with no mark installed. See liveryToggleGate.
+	liveryAppGridGate actionstate.Gate
+	liveryPanelGate   actionstate.Gate
+	liveryDockGate    actionstate.Gate
+	// One serializer per section orders that section's selection work. A
+	// selection carries a value, so refusing the second pick would discard
+	// it; these queue instead, and a pick that a newer one has already
+	// overtaken drops out. Without them two rapid picks can interleave and
+	// leave the persisted id naming one mark while the installed icon is
+	// another. See liverySelectionWork.
+	liveryAppGridWork actionstate.Serializer
+	liveryPanelWork   actionstate.Serializer
+	liveryDockWork    actionstate.Serializer
+	// One serializer covers rotation for both sections, because both rotate
+	// switches write the same systemd user unit. Without it a rapid on/off
+	// flip can land RemoveRotation before the earlier InstallRotation and
+	// leave the unit's presence disagreeing with the persisted keys. See
+	// onLiveryRotateToggled.
+	liveryRotateWork actionstate.Serializer
 
 	// Update All references
 	updateAllGroup   *adw.PreferencesGroup
@@ -194,6 +249,7 @@ func New(cfg *config.Config, toastAdder ToastAdder) *UserHome {
 	uh.applicationsPage, uh.applicationsPrefsPage = uh.createPage()
 	uh.maintenancePage, uh.maintenancePrefsPage = uh.createPage()
 	uh.featuresPage, uh.featuresPrefsPage = uh.createPage()
+	uh.liveryPage, uh.liveryPrefsPage = uh.createPage()
 	uh.helpPage, uh.helpPrefsPage = uh.createPage()
 
 	// Build page content
@@ -202,6 +258,7 @@ func New(cfg *config.Config, toastAdder ToastAdder) *UserHome {
 	uh.buildApplicationsPage()
 	uh.buildMaintenancePage()
 	uh.buildFeaturesPage()
+	uh.buildLiveryPage()
 	uh.buildHelpPage()
 
 	log.Printf("views: all pages built in %s", time.Since(start))
@@ -231,6 +288,8 @@ func (uh *UserHome) GetPage(name string) *adw.ToolbarView {
 		return uh.maintenancePage
 	case "features":
 		return uh.featuresPage
+	case "livery":
+		return uh.liveryPage
 	case "help":
 		return uh.helpPage
 	default:
