@@ -132,10 +132,10 @@ asset can be published, publication is gated on two required verification jobs:
   permission under a private GTK/Xvfb runtime and executes `make e2e`.
 
 The `goreleaser` publishing job depends on both gate jobs (`needs: [gate, e2e]`)
-and receives `contents: write` only after both have succeeded. A failure in
-either gate stops the pipeline before GoReleaser can publish, ensuring that
-broken behavior or install-boundary regressions never become an official
-release.
+and receives `contents: write` and `id-token: write` (for keyless cosign signing)
+only after both have succeeded. A failure in either gate stops the pipeline before
+GoReleaser can publish, ensuring that broken behavior or install-boundary
+regressions never become an official release.
 
 ## Reviewing agent changes
 

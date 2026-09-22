@@ -93,6 +93,36 @@ archives:
 checksum:
   name_template: "checksums.txt"
 
+sboms:
+  # Machine-readable bill of materials for every published archive, so signers
+  # and verifiers have provenance alongside the binary.
+  - artifacts: archive
+
+signs:
+  # Keyless cosign signing (Fulcio/Rekor) of the archives and the checksums
+  # file. Requires the id-token: write permission in .github/workflows/release
+  # and the cosign binary installed there. Emits <asset>.sigstore.json
+  # alongside each asset. Verify against the release notes instructions below.
+  - id: cosign-archives
+    cmd: cosign
+    signature: "${artifact}.sigstore.json"
+    args:
+      - sign-blob
+      - "--yes"
+      - "--bundle=${signature}"
+      - "${artifact}"
+    artifacts: archive
+
+  - id: cosign-checksums
+    cmd: cosign
+    signature: "${artifact}.sigstore.json"
+    args:
+      - sign-blob
+      - "--yes"
+      - "--bundle=${signature}"
+      - "${artifact}"
+    artifacts: checksum
+
 changelog:
   sort: asc
   use: github
@@ -291,6 +321,28 @@ nfpms:
       - apk
 
 release:
+  header: |
+    ## Verifying this release
+
+    The archives and `checksums.txt` in this release are signed keyless with
+    [cosign](https://docs.sigstore.dev/) (Fulcio/Rekor). A Sigstore bundle (`.sigstore.json`)
+    ships alongside each asset. Verify an archive:
+
+    ```bash
+    cosign verify-blob \
+      --bundle <archive>.tar.gz.sigstore.json \
+      --certificate-identity-regexp "^https://github\\.com/projectbluefin/chairlift/\\.github/workflows/release\\.yml@refs/tags/.+$" \
+      --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+      <archive>.tar.gz
+    ```
+
+    Verify the checksum file the same way, replacing the paths with
+    `checksums.txt.sigstore.json` and `checksums.txt`. Then confirm asset integrity
+    against the signed checksums:
+
+    ```bash
+    sha256sum --ignore-missing -c checksums.txt
+    ```
   footer: |
     **Full Changelog**: https://github.com/projectbluefin/chairlift/compare/{{ .PreviousTag }}...{{ .Tag }}
 
