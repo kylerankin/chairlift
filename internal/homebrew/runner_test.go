@@ -159,6 +159,32 @@ exit 1`)
 		}
 	})
 
+	// `brew bundle install` prints its untrusted-tap summary on stderr while
+	// the only parseable "from untrusted tap <user>/<tap>" line is replayed on
+	// stdout, so the stderr-matched branch must still recover the tap name
+	// from the combined diagnostic or the toast loses its `brew trust`
+	// guidance.
+	t.Run("untrusted tap summary on stderr still extracts tap from stdout", func(t *testing.T) {
+		script := fakeBrew(t, `echo "Error: Refusing to load formula x from untrusted tap foo/bar.baz."
+echo "Error: the following taps are not trusted" >&2
+exit 1`)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		_, err := runBrewCommandAt(ctx, script, "bundle", "install", "--file=/x.Brewfile")
+		if err == nil {
+			t.Fatal("runBrewCommandAt = nil error, want failure")
+		}
+		var trustErr *UntrustedTapError
+		if !errors.As(err, &trustErr) {
+			t.Fatalf("err = %T (%v), want *UntrustedTapError", err, err)
+		}
+		if trustErr.Tap != "foo/bar.baz" {
+			t.Fatalf("trustErr.Tap = %q, want \"foo/bar.baz\"", trustErr.Tap)
+		}
+	})
+
 	t.Run("warning on untrusted taps on stdout with No such formula yields Error not UntrustedTapError", func(t *testing.T) {
 		script := fakeBrew(t, `echo "Warning: The following taps are not trusted:
   some/untrusted-tap"

@@ -135,6 +135,14 @@ func TestUntrustedTapFromErrorLine(t *testing.T) {
 	}{
 		{"Error: Refusing to load formula opencode from untrusted tap anomalyco/tap.", "anomalyco/tap", true},
 		{"Error: Refusing to load cask foo from untrusted tap bar/baz.", "bar/baz", true},
+		// Repository names may contain dots; only brew's sentence-ending
+		// period is stripped, so the suggested `brew trust` target stays whole.
+		{"Error: Refusing to load formula opencode from untrusted tap foo/bar.baz.", "foo/bar.baz", true},
+		// Installer output replayed on stdout is attacker-influenced: the
+		// capture charset stops shell metacharacters from reaching the
+		// suggested `brew trust <tap>` command.
+		{"Error: Refusing to load formula x from untrusted tap foo/bar;rm -rf ~", "foo/bar", true},
+		{"Error: Refusing to load formula x from untrusted tap $(id)/evil", "", false},
 		{"Warning: The following taps are not trusted:\n  multica-ai/tap", "", false},
 		{"Error: No such formula", "", false},
 		{"", "", false},

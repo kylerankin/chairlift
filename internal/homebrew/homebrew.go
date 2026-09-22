@@ -268,7 +268,14 @@ func runBrewCommandAt(ctx context.Context, exe string, args ...string) (string, 
 				message = summarizeDiagnostic(diagnosticText)
 			}
 			if isUntrustedTapMessage(stderrText) {
-				tap, _ := untrustedTapFromErrorLine(stderrText)
+				// The parseable "from untrusted tap <user>/<tap>" line is
+				// often only in the replayed stdout of `brew bundle install`,
+				// while stderr carries just the summary, so fall back to the
+				// full diagnostic when stderr names no tap.
+				tap, ok := untrustedTapFromErrorLine(stderrText)
+				if !ok {
+					tap, _ = untrustedTapFromErrorLine(diagnosticText)
+				}
 				return "", &UntrustedTapError{Message: fmt.Sprintf("Brew command failed: %s", message), Tap: tap}
 			} else if tap, ok := untrustedTapFromErrorLine(diagnosticText); ok {
 				return "", &UntrustedTapError{Message: fmt.Sprintf("Brew command failed: %s", message), Tap: tap}
