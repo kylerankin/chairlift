@@ -179,7 +179,7 @@ type UserHome struct {
 	changelogStaged   string
 	changelogGate     actionstate.Gate
 
-	// Enhanced Troubleshooting (features_page troubleshooting_group)
+	// Enhanced Troubleshooting (help_page troubleshooting_group)
 	troubleshootGroup  *adw.PreferencesGroup
 	troubleshootRow    *adw.ActionRow
 	troubleshootButton *gtk.Button

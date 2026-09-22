@@ -1799,7 +1799,7 @@ page_name:
 | `features_page`     | `dx_group`                       | Developer Mode (gated on `/usr/share/ublue-os/image-info.json`)                                                                                                                                          |
 | `features_page`     | `gaming_group`                   | Gaming Mode optimizations (gated on `/usr/share/ublue-os/image-info.json`)                                                                                                                              |
 | `features_page`     | `ai_group`                       | Local AI language model served in rootless Quadlet/Podman container (configurable `ai_images`, `ai_model`)                                                                                             |
-| `features_page`     | `troubleshooting_group`          | Enhanced Troubleshooting AI assistant (gated on Homebrew)                                                                                                                                               |
+| `help_page`         | `troubleshooting_group`          | Enhanced Troubleshooting AI assistant (gated on Homebrew); moved from Features (issue #249)                                                                                                             |
 | `help_page`         | `help_resources_group`           | Configurable links (website, issues, chat)                                                                                                                                                              |
 
 ## Build and Release

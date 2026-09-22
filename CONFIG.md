@@ -112,7 +112,6 @@ valid page.
 - `ai_group`: Local AI language model served in a rootless container via Quadlet/Podman; shown when Podman is present
   - `ai_images`: Map of container image references per GPU vendor (`nvidia`, `amd`, `intel`, `none`)
   - `ai_model`: Model reference to serve (default: `ollama://qwen2.5:7b`)
-- `troubleshooting_group`: Enhanced Troubleshooting; AI diagnostic assistant installed via Homebrew (shown only when Homebrew is present)
 
 ### Livery Page (`livery_page`)
 
@@ -126,6 +125,7 @@ and nothing is written outside `$XDG_DATA_HOME` and `$XDG_CONFIG_HOME`.
 
 ### Help Page (`help_page`)
 
+- `troubleshooting_group`: Enhanced Troubleshooting; AI diagnostic assistant installed via Homebrew (moved here from Features, issue #249; shown only when Homebrew is present)
 - `help_resources_group`: Help and support resources
   - `website`: URL to the project website
   - `issues`: URL to the issue tracker for bug reports and feature requests
@@ -179,11 +179,9 @@ maintenance_page:
   maintenance_optimization_group:
     enabled: true
 
-features_page:
+help_page:
   troubleshooting_group:
     enabled: false # Hide Homebrew-backed troubleshooting assistant
-
-help_page:
   help_resources_group:
     enabled: true
 ```
