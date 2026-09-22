@@ -203,6 +203,53 @@ exit 1`)
 			t.Fatalf("err = %T (%v), want regular *Error instead of *UntrustedTapError", err, err)
 		}
 	})
+
+	// A third-party installer's stdout is replayed into the diagnostic, so a
+	// forged "from untrusted tap" line there must not reclassify an unrelated
+	// failure of a non-bundle command: the toast would otherwise tell the user
+	// to run `brew trust` on a tap the attacker picked.
+	t.Run("forged untrusted tap line on stdout of a non-bundle command yields Error", func(t *testing.T) {
+		script := fakeBrew(t, `echo "Error: Refusing to load formula x from untrusted tap attacker/evil."
+echo "Error: Failure while executing; git exited with 1." >&2
+exit 1`)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		_, err := runBrewCommandAt(ctx, script, "install", "somepkg")
+		if err == nil {
+			t.Fatal("runBrewCommandAt = nil error, want failure")
+		}
+		var trustErr *UntrustedTapError
+		if errors.As(err, &trustErr) {
+			t.Fatalf("err = %T (%v), want regular *Error instead of *UntrustedTapError", err, err)
+		}
+	})
+
+	// When stderr does corroborate the trust failure, a non-bundle command is
+	// still classified as an untrusted-tap error, but the tap name may only
+	// come from stderr — never from the replayed stdout an installer controls.
+	t.Run("untrusted tap on stderr of a non-bundle command ignores a stdout tap name", func(t *testing.T) {
+		script := fakeBrew(t, `echo "Error: Refusing to load formula x from untrusted tap attacker/evil."
+echo "Error: the following taps are not trusted" >&2
+exit 1`)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		_, err := runBrewCommandAt(ctx, script, "upgrade", "somepkg")
+		if err == nil {
+			t.Fatal("runBrewCommandAt = nil error, want failure")
+		}
+		var trustErr *UntrustedTapError
+		if !errors.As(err, &trustErr) {
+			t.Fatalf("err = %T (%v), want *UntrustedTapError", err, err)
+		}
+		if trustErr.Tap != "" {
+			t.Fatalf("trustErr.Tap = %q, want \"\" (stdout must not name the tap)", trustErr.Tap)
+		}
+	})
+
 	t.Run("missing executable path yields NotFoundError", func(t *testing.T) {
 		missing := filepath.Join(t.TempDir(), "definitely-not-here")
 
