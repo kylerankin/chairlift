@@ -101,7 +101,7 @@ sboms:
 signs:
   # Keyless cosign signing (Fulcio/Rekor) of the archives and the checksums
   # file. Requires the id-token: write permission in .github/workflows/release
-  # and the cosign binary installed there. Emits <asset>.sig and <asset>.crt
+  # and the cosign binary installed there. Emits <asset>.sigstore.json
   # alongside each asset. Verify against the release notes instructions below.
   - id: cosign-archives
     cmd: cosign
