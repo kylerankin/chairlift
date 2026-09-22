@@ -1654,11 +1654,14 @@ page_name:
   both `.yml` and `.yaml` workflow files and rejects mutable tags, branches,
   short SHAs, and expressions while allowing repository-local `./` actions.
 - **Release**: GoReleaser config at `.goreleaser.yaml` (GoReleaser OSS, run in
-  `.github/workflows/release.yml` with `GITHUB_TOKEN`). The repository URL is a
-  literal in `release.footer`'s "Full Changelog" line — there is no
-  `metadata.homepage` to template from, since OSS has no `metadata:` block —
-  and that literal is the single source of truth for it; a static test guards
-  it — see the "Install-path consistency (`internal/installcheck`)" section of
+  `.github/workflows/release.yml` with `GITHUB_TOKEN` and `id-token: write`).
+  Releases generate Syft SBOMs (`sboms:`) for published archives and sign
+  archives and `checksums.txt` keyless using Sigstore bundles (`.sigstore.json`)
+  via cosign. The repository URL is a literal in `release.footer`'s
+  "Full Changelog" line — there is no `metadata.homepage` to template from,
+  since OSS has no `metadata:` block — and that literal is the single source
+  of truth for it; a static test guards it — see the "Install-path consistency
+  (`internal/installcheck`)" section of
   [package-managers.md](./package-managers.md#install-path-consistency-internalinstallcheck).
   The `snapshot:` block in `.goreleaser.yaml` configures local
   `goreleaser release --snapshot` builds and needs no workflow.
