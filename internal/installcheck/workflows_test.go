@@ -205,8 +205,8 @@ func TestReleaseWorkflowGatedOnRequiredChecks(t *testing.T) {
 	if !ok {
 		t.Fatal("release.yml must define a 'goreleaser' job")
 	}
-	if goreleaserJob.Permissions["contents"] != "write" || (len(goreleaserJob.Permissions) == 2 && goreleaserJob.Permissions["id-token"] != "write") || len(goreleaserJob.Permissions) > 2 {
-		t.Errorf("goreleaser job permissions = %v, want contents: write and optional id-token: write", goreleaserJob.Permissions)
+	if len(goreleaserJob.Permissions) != 2 || goreleaserJob.Permissions["contents"] != "write" || goreleaserJob.Permissions["id-token"] != "write" {
+		t.Errorf("goreleaser job permissions = %v, want contents: write and id-token: write", goreleaserJob.Permissions)
 	}
 
 	var needsList []string

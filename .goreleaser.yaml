@@ -105,21 +105,21 @@ signs:
   # alongside each asset. Verify against the release notes instructions below.
   - id: cosign-archives
     cmd: cosign
+    signature: "${artifact}.sigstore.json"
     args:
       - sign-blob
       - "--yes"
-      - "--output-certificate=${artifact}.crt"
-      - "--output-signature=${artifact}.sig"
+      - "--bundle=${signature}"
       - "${artifact}"
     artifacts: archive
 
   - id: cosign-checksums
     cmd: cosign
+    signature: "${artifact}.sigstore.json"
     args:
       - sign-blob
       - "--yes"
-      - "--output-certificate=${artifact}.crt"
-      - "--output-signature=${artifact}.sig"
+      - "--bundle=${signature}"
       - "${artifact}"
     artifacts: checksum
 
@@ -311,21 +311,19 @@ release:
     ## Verifying this release
 
     The archives and `checksums.txt` in this release are signed keyless with
-    [cosign](https://docs.sigstore.dev/) (Fulcio/Rekor). A `.sig` and `.crt`
-    ship alongside each asset. Verify an archive:
+    [cosign](https://docs.sigstore.dev/) (Fulcio/Rekor). A Sigstore bundle (`.sigstore.json`)
+    ships alongside each asset. Verify an archive:
 
     ```bash
     cosign verify-blob \
-      --yes \
-      --signature <archive>.tar.gz.sig \
-      --certificate <archive>.tar.gz.crt \
+      --bundle <archive>.tar.gz.sigstore.json \
+      --certificate-identity-regexp "^https://github.com/projectbluefin/chairlift/" \
       --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-      --expected-https-repository https://github.com/projectbluefin/chairlift \
       <archive>.tar.gz
     ```
 
     Verify the checksum file the same way, replacing the paths with
-    `checksums.txt.sig` / `checksums.txt.crt`. Then confirm asset integrity
+    `checksums.txt.sigstore.json` and `checksums.txt`. Then confirm asset integrity
     against the signed checksums:
 
     ```bash
