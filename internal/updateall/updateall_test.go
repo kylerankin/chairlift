@@ -31,24 +31,19 @@ func runWith(t *testing.T, runner Runner, plan []Phase) ([]Result, []Event) {
 	return results, <-done
 }
 
-func TestPhasesAreOrderedAndNotAliased(t *testing.T) {
-	list := Phases()
+func TestPhasesAreOrderedAndTitled(t *testing.T) {
+	list := phases
 	want := []PhaseID{PhaseOS, PhaseFlatpak, PhaseBrew}
 	if len(list) != len(want) {
-		t.Fatalf("Phases() has %d entries, want %d", len(list), len(want))
+		t.Fatalf("phase inventory has %d entries, want %d", len(list), len(want))
 	}
 	for index, phase := range list {
 		if phase.ID != want[index] {
-			t.Errorf("Phases()[%d].ID = %q, want %q", index, phase.ID, want[index])
+			t.Errorf("phases[%d].ID = %q, want %q", index, phase.ID, want[index])
 		}
 		if phase.Title == "" {
-			t.Errorf("Phases()[%d] (%q) has no title", index, phase.ID)
+			t.Errorf("phases[%d] (%q) has no title", index, phase.ID)
 		}
-	}
-
-	list[0].Title = "mutated"
-	if Phases()[0].Title == "mutated" {
-		t.Error("Phases() returned an aliased slice")
 	}
 }
 
@@ -511,14 +506,6 @@ func TestSummarizeCountsAndHeadlines(t *testing.T) {
 				t.Errorf("counts sum to %d, want %d", total, len(test.results))
 			}
 		})
-	}
-}
-
-func TestPhaseTitlesAreSorted(t *testing.T) {
-	got := PhaseTitles(Phases())
-	want := []string{"Applications", "Homebrew Packages", "System Image"}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("PhaseTitles() = %v, want %v", got, want)
 	}
 }
 

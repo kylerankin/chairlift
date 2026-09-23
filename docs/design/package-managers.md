@@ -283,11 +283,11 @@ Two of the nine small, puregotk-free packages under `internal/views/` (the other
   - `Update(dryRun bool, appID string) string` — Flatpak per-app update toast (c3)
   - `SelfUpdate(dryRun bool, tool string) string` — Homebrew self-update ("Update Homebrew" button) toast (c3)
   - `TapTrustDecision{MutateUI bool; Toast string}` + `TapTrust(dryRun bool, tapName string) TapTrustDecision` — gates whether `trustTap` removes the tap's row, hides the group, and refreshes outdated packages (c3)
-  - `BootcStage(dryRun bool, staged bool) string` — bootc stage-button completion toast; string-only since the subtitle stays live in both modes and there is no mutation left to gate (c4)
+  - `SystemStage(dryRun bool, staged bool) string` — bootc and native A/B stage-button completion toast; string-only since subtitles stay live in both modes and there is no mutation left to gate (c4)
   - `FeatureToggleDecision{Confirm bool; Toast string}` + `FeatureToggle(dryRun, enable bool, name string) FeatureToggleDecision` — gates whether `onFeatureToggled`'s switch confirms the flip or reverts it (c5)
   - `FeatureUpdate(dryRun bool) string` — Features page "Update" button toast (c5)
 
-  The plain-`string` functions (`BundleDump`, `Cleanup`, `Install`, `Uninstall`, `Pin`, `Upgrade`, `Update`, `SelfUpdate`, `BootcStage`, `FeatureUpdate`) select toast wording only. Where an application action also changes row controls or requests an inventory refresh, the separate tested `actionstate` decision owns that UI-side effect. The four decision-struct functions in `actionmsg` exist because their call sites have no wrapper- or `actionstate`-level gate for the *second* effect: script execution has no wrapper package; a bundle row must distinguish a real completion from a dry-run wrapper success; tap-trust row removal and switch confirmation are view-local state that the wrapper's own dry-run skip does not touch.
+  The plain-`string` functions (`BundleDump`, `Cleanup`, `Install`, `Uninstall`, `Pin`, `Upgrade`, `Update`, `SelfUpdate`, `SystemStage`, `FeatureUpdate`) select toast wording only. Where an application action also changes row controls or requests an inventory refresh, the separate tested `actionstate` decision owns that UI-side effect. The four decision-struct functions in `actionmsg` exist because their call sites have no wrapper- or `actionstate`-level gate for the *second* effect: script execution has no wrapper package; a bundle row must distinguish a real completion from a dry-run wrapper success; tap-trust row removal and switch confirmation are view-local state that the wrapper's own dry-run skip does not touch.
 
 ### View-layer update action state (`internal/views/actionstate`)
 
@@ -773,7 +773,7 @@ would-be command, emits the synthetic `EventMessage`+`EventComplete` pair,
 closes the channel, returns nil — pkexec is never invoked and no auth
 dialog appears. Status and rollback reads are **not** dry-run-gated (they
 are side-effect-free reads of real state), matching the bootc toast/subtitle
-split: only the toast (`actionmsg.SysupdateStage`) is dry-run-aware.
+split: only the toast (`actionmsg.SystemStage`) is dry-run-aware.
 
 ### Operations
 
@@ -795,7 +795,7 @@ both), then re-read `GetStatus()` and `RollbackVersion()` from real state
 (not stream output) to set the subtitle
 (`pageview.SysupdateStageResultSubtitle`), rollback row, badge
 (`badgestate.Sysupdate`, 1 iff `IsStaged()`), and toast
-(`actionmsg.SysupdateStage`). `loadSysupdateUpdateStatus()` performs the
+(`actionmsg.SystemStage`). `loadSysupdateUpdateStatus()` performs the
 initial gate + reveal.
 
 ## Dated-build registry catalog (`internal/registrytags`)
@@ -939,8 +939,8 @@ Behavior varies by wrapper:
 |---------|-----------------|
 | Homebrew | Skips state-changing commands, returns mock message |
 | Flatpak | Skips state-changing commands, returns mock message |
-| bootc | `StageUpdate` never invokes pkexec; emits synthetic `EventMessage`+`EventComplete` and returns. The Updates page's stage button shows an explicit `actionmsg.BootcStage(dryrun.Enabled(), staged)` preview toast, distinct from its normal staged/up-to-date toasts; the expander subtitle intentionally stays live (from `bootc.GetStatus()`) in both modes |
-| sysupdate | `StageUpdate` never invokes pkexec; emits synthetic `EventMessage`+`EventComplete` and returns. The stage button's toast is `actionmsg.SysupdateStage(dryrun.Enabled(), staged)`; the expander subtitle and rollback row stay live (from the `/run/snosi` state files and partition labels) in both modes |
+| bootc | `StageUpdate` never invokes pkexec; emits synthetic `EventMessage`+`EventComplete` and returns. The Updates page's stage button shows an explicit `actionmsg.SystemStage(dryrun.Enabled(), staged)` preview toast, distinct from its normal staged/up-to-date toasts; the expander subtitle intentionally stays live (from `bootc.GetStatus()`) in both modes |
+| sysupdate | `StageUpdate` never invokes pkexec; emits synthetic `EventMessage`+`EventComplete` and returns. The stage button's toast is `actionmsg.SystemStage(dryrun.Enabled(), staged)`; the expander subtitle and rollback row stay live (from the `/run/snosi` state files and partition labels) in both modes |
 | Updex | Skips helper execution, returns empty results; the helper binary itself (`cmd/chairlift-updex-helper`, via `internal/updexhelper`) also honors `--dry-run` for all three subcommands, defense-in-depth even though `updex.runHelper` never invokes pkexec under dry-run |
 | views (custom maintenance scripts) | `runMaintenanceAction` never constructs an `exec.Cmd` (no `pkexec`, no direct script exec); logs `[DRY-RUN] Would execute: ...` instead |
 
@@ -1017,7 +1017,7 @@ external Homebrew calls remain on worker goroutines and all widget mutations,
 including row removal and control restoration, remain inside
 `sgtk.RunOnMainThread`.
 
-The Updates page's bootc "Check for Updates" stage button (`onBootcStageClicked`, `internal/views/updates_page.go`) follows the same `actionmsg` pattern, with one difference from the buttons above: unlike `Install`/`Upgrade`/etc., whose completion text is selected purely by `dryrun.Enabled()`, `BootcStage(dryrun.Enabled(), staged)` also takes the live `staged` result from the post-`wg.Wait()` `bootc.GetStatus()` re-read, because the non-dry-run branch still needs to pick between the "staged" and "up to date" strings. Under dry-run, `staged` is ignored entirely and a single preview string is returned instead — see "Dry-run behavior" under bootc above for why. The expander's `SetSubtitle` calls in the same code block are *not* routed through `actionmsg`; they keep reading live `GetStatus()` output unconditionally, since the subtitle is a persistent status display rather than a per-click completion claim.
+The Updates page's bootc "Check for Updates" stage button (`onBootcStageClicked`, `internal/views/updates_page.go`) follows the same `actionmsg` pattern, with one difference from the buttons above: unlike `Install`/`Upgrade`/etc., whose completion text is selected purely by `dryrun.Enabled()`, `SystemStage(dryrun.Enabled(), staged)` also takes the live `staged` result from the post-`wg.Wait()` `bootc.GetStatus()` re-read, because the non-dry-run branch still needs to pick between the "staged" and "up to date" strings. Under dry-run, `staged` is ignored entirely and a single preview string is returned instead — see "Dry-run behavior" under bootc above for why. The expander's `SetSubtitle` calls in the same code block are *not* routed through `actionmsg`; they keep reading live `GetStatus()` output unconditionally, since the subtitle is a persistent status display rather than a per-click completion claim. Native A/B staging follows the identical split with `SystemStage`.
 
 The Features page's per-feature switch (`onFeatureToggled`, `internal/views/features_page.go`) follows the same decision-struct pattern as maintenance-script execution and tap trust: on a successful `updex.EnableFeature`/`DisableFeature` call, `decision := actionmsg.FeatureToggle(dryrun.Enabled(), enabled, name)` is computed once, and the switch's visual state is driven solely by `decision.Confirm` — `toggle.SetActive(enabled)` (confirming the flip) when `Confirm` is true, `toggle.SetActive(!enabled)` (reverting to the pre-click state) when it is false. Under dry-run, `updex.runHelper` returns before ever invoking pkexec, so nothing was actually toggled and the switch must not visually confirm a change that did not happen — this is the other "switch/list implies a state change after a preview" bug (the tap-trust row-removal case is the same pattern in Homebrew's Untrusted Taps list). The Update button (`onUpdateFeaturesClicked`) has no equivalent mutation to gate — its `SetSensitive`/`SetLabel` reset is unconditional in both modes — so its toast is a plain string, `actionmsg.FeatureUpdate(dryrun.Enabled())`.
 

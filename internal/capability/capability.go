@@ -295,17 +295,14 @@ var prerequisites = []Prerequisite{
 	{Page: "help_page", Group: "help_resources_group"},
 }
 
-// requirementIndex is prerequisites keyed by page and then group, built once
+type pageGroup struct{ page, group string }
+
+// requirementIndex is prerequisites keyed by page and group, built once
 // so a lookup does not scan the list per group per page build.
-var requirementIndex = func() map[string]map[string][]Capability {
-	index := make(map[string]map[string][]Capability, len(prerequisites))
+var requirementIndex = func() map[pageGroup][]Capability {
+	index := make(map[pageGroup][]Capability, len(prerequisites))
 	for _, p := range prerequisites {
-		groups, ok := index[p.Page]
-		if !ok {
-			groups = make(map[string][]Capability)
-			index[p.Page] = groups
-		}
-		groups[p.Group] = p.AnyOf
+		index[pageGroup{p.Page, p.Group}] = p.AnyOf
 	}
 	return index
 }()
@@ -316,11 +313,7 @@ var requirementIndex = func() map[string]map[string][]Capability {
 // The returned slice is a copy: a caller may sort or truncate it without
 // changing the resolved table.
 func Required(page, group string) (required []Capability, classified bool) {
-	groups, ok := requirementIndex[page]
-	if !ok {
-		return nil, false
-	}
-	anyOf, ok := groups[group]
+	anyOf, ok := requirementIndex[pageGroup{page, group}]
 	if !ok {
 		return nil, false
 	}
