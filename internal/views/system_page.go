@@ -371,7 +371,7 @@ func (uh *UserHome) onDriverSwitchClicked(driver imageinfo.Driver, button *gtk.B
 		err := ublue.SwitchDriver(ctx, driver)
 
 		sgtk.RunOnMainThread(func() {
-			uh.driverGate.Complete()
+			uh.driverGate.Reset()
 			button.SetSensitive(true)
 			button.SetLabel("Switch")
 

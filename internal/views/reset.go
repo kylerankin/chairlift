@@ -118,7 +118,7 @@ func (uh *UserHome) runPowerwash(button *gtk.Button, row *adw.ActionRow) {
 			summary.Succeeded, summary.Failed, summary.Skipped)
 
 		sgtk.RunOnMainThread(func() {
-			uh.powerwashGate.Complete()
+			uh.powerwashGate.Reset()
 			button.SetSensitive(true)
 			button.SetLabel("Remove Everything")
 
@@ -170,7 +170,7 @@ func (uh *UserHome) runFactoryReset(button *gtk.Button, row *adw.ActionRow) {
 		err := ublue.FactoryReset(ctx)
 
 		sgtk.RunOnMainThread(func() {
-			uh.factoryResetGate.Complete()
+			uh.factoryResetGate.Reset()
 			button.SetSensitive(true)
 			button.SetLabel("Factory Reset")
 
