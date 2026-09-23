@@ -281,7 +281,7 @@ var prerequisites = []Prerequisite{
 	{Page: "features_page", Group: "dx_group", AnyOf: []Capability{ImageDescriptor}},
 	{Page: "features_page", Group: "gaming_group", AnyOf: []Capability{ImageDescriptor}},
 	{Page: "features_page", Group: "ai_group", AnyOf: []Capability{Podman}},
-	{Page: "features_page", Group: "troubleshooting_group", AnyOf: []Capability{Homebrew}},
+	{Page: "help_page", Group: "troubleshooting_group", AnyOf: []Capability{Homebrew}},
 
 	// Livery. The app-grid mark, dock, and panel foundation marks write
 	// icons into the user's theme and preferences into dconf, with no
