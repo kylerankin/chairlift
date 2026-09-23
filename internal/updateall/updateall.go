@@ -24,7 +24,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
 )
 
@@ -57,14 +56,6 @@ var phases = []Phase{
 	{ID: PhaseOS, Title: "System Image"},
 	{ID: PhaseFlatpak, Title: "Applications"},
 	{ID: PhaseBrew, Title: "Homebrew Packages"},
-}
-
-// Phases returns the canonical phase inventory in execution order. The
-// returned slice is freshly allocated on every call.
-func Phases() []Phase {
-	result := make([]Phase, len(phases))
-	copy(result, phases)
-	return result
 }
 
 // Availability reports which providers exist on this host. A provider that is
@@ -367,15 +358,4 @@ func headline(summary Summary, total int) string {
 	default:
 		return "Everything is up to date"
 	}
-}
-
-// PhaseTitles returns the titles of the supplied phases, sorted, for
-// diagnostics and test assertions.
-func PhaseTitles(list []Phase) []string {
-	titles := make([]string, 0, len(list))
-	for _, phase := range list {
-		titles = append(titles, phase.Title)
-	}
-	sort.Strings(titles)
-	return titles
 }

@@ -767,7 +767,7 @@ func (uh *UserHome) onBootcStageClicked() {
 				version = status.Status.Staged.Version()
 			}
 			expander.SetSubtitle(pageview.BootcStageResultSubtitle(staged, version, lastMessage))
-			uh.toastAdder.ShowToast(actionmsg.BootcStage(dryrun.Enabled(), staged))
+			uh.toastAdder.ShowToast(actionmsg.SystemStage(dryrun.Enabled(), staged))
 		})
 	}()
 }
@@ -878,7 +878,7 @@ func (uh *UserHome) onSysupdateStageClicked() {
 			}
 
 			expander.SetSubtitle(pageview.SysupdateStageResultSubtitle(staged, version, lastMessage))
-			uh.toastAdder.ShowToast(actionmsg.SysupdateStage(dryrun.Enabled(), staged))
+			uh.toastAdder.ShowToast(actionmsg.SystemStage(dryrun.Enabled(), staged))
 		})
 	}()
 }
