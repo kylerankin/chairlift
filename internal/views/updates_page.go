@@ -762,6 +762,20 @@ func (uh *UserHome) onBootcStageClicked() {
 				return
 			}
 
+			if statusErr == nil {
+				uh.refreshChangelogAvailability(status)
+			}
+			if statusErr != nil {
+				message := fmt.Sprintf("Could not verify staged update: %v", statusErr)
+				expander.SetSubtitle(message)
+				if dryrun.Enabled() {
+					uh.toastAdder.ShowToast(actionmsg.BootcStage(true, false))
+				} else {
+					uh.toastAdder.ShowErrorToast(message)
+				}
+				return
+			}
+
 			version := ""
 			if staged {
 				version = status.Status.Staged.Version()
@@ -873,6 +887,17 @@ func (uh *UserHome) onSysupdateStageClicked() {
 			if stageErr != nil {
 				expander.SetSubtitle(fmt.Sprintf("Update failed: %v", stageErr))
 				uh.toastAdder.ShowErrorToast(fmt.Sprintf("Update failed: %v", stageErr))
+				return
+			}
+
+			if statusErr != nil {
+				message := fmt.Sprintf("Could not verify staged update: %v", statusErr)
+				expander.SetSubtitle(message)
+				if dryrun.Enabled() {
+					uh.toastAdder.ShowToast(actionmsg.SysupdateStage(true, false))
+				} else {
+					uh.toastAdder.ShowErrorToast(message)
+				}
 				return
 			}
 

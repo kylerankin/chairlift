@@ -224,17 +224,21 @@ func (uh *UserHome) onBootcRollbackClicked() {
 		err := ublue.Rollback(ctx)
 
 		sgtk.RunOnMainThread(func() {
-			uh.bootcRollbackGate.Complete()
-			button.SetSensitive(true)
-
 			if err != nil {
+				uh.bootcRollbackGate.Reset()
+				button.SetSensitive(true)
 				uh.toastAdder.ShowErrorToast(fmt.Sprintf("Rollback failed: %v", err))
 				return
 			}
 
 			decision := actionmsg.Rollback(dryrun.Enabled())
 			if decision.Confirm {
+				uh.bootcRollbackGate.Complete()
+				button.SetSensitive(false)
 				row.SetSubtitle(pageview.BootcRollbackResultSubtitle())
+			} else {
+				uh.bootcRollbackGate.Reset()
+				button.SetSensitive(true)
 			}
 			uh.toastAdder.ShowToast(decision.Toast)
 		})

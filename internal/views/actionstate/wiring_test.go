@@ -120,7 +120,7 @@ func TestRollbackGateCompletesOnlyAfterLiveSuccess(t *testing.T) {
 	if !ok {
 		t.Fatal("runtime.Caller could not locate wiring_test.go")
 	}
-	data, err := os.ReadFile(filepath.Join(filepath.Dir(filename), "..", "updates_page.go"))
+	data, err := os.ReadFile(filepath.Join(filepath.Dir(filename), "..", "recovery.go"))
 	if err != nil {
 		t.Fatal(err)
 	}
