@@ -45,6 +45,7 @@ type UserHome struct {
 	featuresPage     *adw.ToolbarView
 	liveryPage       *adw.ToolbarView
 	helpPage         *adw.ToolbarView
+	recoveryPage     *adw.ToolbarView // Recovery detail, reached from System, not a sidebar page
 
 	// PreferencesPages inside each ToolbarView - keep references to prevent GC
 	systemPrefsPage       *adw.PreferencesPage
@@ -54,6 +55,7 @@ type UserHome struct {
 	featuresPrefsPage     *adw.PreferencesPage
 	liveryPrefsPage       *adw.PreferencesPage
 	helpPrefsPage         *adw.PreferencesPage
+	recoveryPrefsPage     *adw.PreferencesPage
 
 	// References for dynamic updates
 	formulaeExpander       *adw.ExpanderRow
@@ -205,6 +207,13 @@ type UserHome struct {
 	maintenanceBrewGroup    *adw.PreferencesGroup
 	maintenanceFlatpakGroup *adw.PreferencesGroup
 
+	// Recovery detail navigation, wired by the window after construction.
+	// The System page opens Recovery; Recovery's back button returns to
+	// System. Recovery is a detail, not a sidebar page, so it is not part of
+	// navigation.Items() — see #241 for the canonical route.
+	openRecoveryDetail  func()
+	closeRecoveryDetail func()
+
 	// Update badge tracking
 	updateCounts badgestate.Counts
 
@@ -251,6 +260,7 @@ func New(cfg *config.Config, toastAdder ToastAdder) *UserHome {
 	uh.featuresPage, uh.featuresPrefsPage = uh.createPage()
 	uh.liveryPage, uh.liveryPrefsPage = uh.createPage()
 	uh.helpPage, uh.helpPrefsPage = uh.createPage()
+	uh.recoveryPage, uh.recoveryPrefsPage = uh.createRecoveryPage()
 
 	// Build page content
 	uh.buildSystemPage()
@@ -260,6 +270,7 @@ func New(cfg *config.Config, toastAdder ToastAdder) *UserHome {
 	uh.buildFeaturesPage()
 	uh.buildLiveryPage()
 	uh.buildHelpPage()
+	uh.buildRecoveryPage()
 
 	log.Printf("views: all pages built in %s", time.Since(start))
 

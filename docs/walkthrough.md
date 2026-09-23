@@ -19,10 +19,11 @@ actually needs one. **Automatic Updates** keeps everything up to date in the
 background. The Flatpak and Homebrew groups below let you update just one
 thing if you prefer.
 
-**System Updates** adds **Roll Back**, which returns you to the previous
-version if an update went badly, and **What's Changing**, which lists exactly
-what software a pending update will add, remove, or upgrade. That group only
-appears on systems that update as a whole, so it's not in the shot above.
+**System Updates** adds **What's Changing**, which lists exactly what software
+a pending update will add, remove, or upgrade. That group only appears on
+systems that update as a whole, so it's not in the shot above. **Roll Back** —
+returning to the previous version if an update went badly — lives under
+**Recovery**, and only appears where a previous deployment actually exists.
 
 ---
 
@@ -36,7 +37,26 @@ whole, so it's not in the shot above. **Release Channel** switches between
 the stable version and the early one. **Graphics Driver** switches you to
 the NVIDIA driver if your card wants it. Neither appears unless there's
 actually something to switch to. **Mission Center** opens the system
-monitor.
+monitor. Under **Recovery** you can return to a previous system version or, if
+you've opted in, reset this machine. It only shows when there's something to
+return to or a reset is enabled.
+
+## Recovery
+
+Return to a previous system version, or reset this machine. This is not part
+of routine maintenance: you open it deliberately from **System → Recovery**, and
+routine Free Up Space never reaches it.
+
+**Roll Back** returns you to the previous system deployment if an update went
+badly — offered only when a previous deployment actually exists. **Previous
+Version** shows the native A/B version you could return to, kept informational
+unless a rollback is verified to work.
+
+**Powerwash** removes everything you installed — your Flatpak apps and Distrobox
+containers, not Homebrew or arbitrary software — and asks for confirmation
+because it cannot be undone. **Factory Reset** puts the system back to how it
+shipped, keeping its experimental warning and current-image-only target. Both
+are switched off by default, so the rows stay hidden until you turn them on.
 
 ---
 
@@ -124,10 +144,8 @@ Homebrew tap.
 ![Maintenance](screenshots/2-maintenance.png)
 
 Clean up files you no longer need, plus anything else your distribution added
-here. **Reset** holds the two you can't undo, so each asks first: Powerwash
-removes everything you installed, and Factory Reset puts the system back to
-how it shipped. It's switched off normally, and turned on above so you can
-see it.
+here. The irreversible resets — Powerwash and Factory Reset — live under
+**System → Recovery**, so they never appear in routine cleanup.
 
 ---
 
