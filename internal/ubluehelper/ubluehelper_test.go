@@ -256,9 +256,9 @@ func TestDriverSwitchArgsBuildPublishedReferencesOnly(t *testing.T) {
 	}{
 		{
 			name:   "dakota to nvidia",
-			info:   imageinfo.Info{Name: "dakota", Tag: "latest", Ref: "docker://ghcr.io/projectbluefin/dakota"},
+			info:   imageinfo.Info{Name: "dakota", Tag: "stable", Ref: "docker://ghcr.io/projectbluefin/dakota"},
 			driver: imageinfo.DriverNVIDIA,
-			want:   []string{"switch", "--enforce-container-sigpolicy", "ghcr.io/projectbluefin/dakota-nvidia:latest"},
+			want:   []string{"switch", "--enforce-container-sigpolicy", "ghcr.io/projectbluefin/dakota-nvidia:stable"},
 			wantOK: true,
 		},
 		{

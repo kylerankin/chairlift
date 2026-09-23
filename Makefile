@@ -148,12 +148,20 @@ SCREENSHOT_DIR=docs/screenshots
 # Only the GUI is built with E2E_TAGS. Both privileged helpers are built
 # exactly as they ship, so the boundary assertions in test/e2e exercise the
 # real binaries.
-e2e: build-e2e
+# The compiled schemas come along for the same reason `screenshots` builds
+# them: without CHAIRLIFT_SCHEMA_DIR the Livery page logs "the Livery
+# settings schema is not installed" and renders without its saved state, and
+# the walkthrough captures this target uploads are exactly what ships in
+# docs/screenshots.
+e2e: build-e2e schemas
 ifeq ($(E2E_COVERDIR),)
-	CHAIRLIFT_E2E_BUILD_DIR=$(abspath $(BUILD_DIR)) $(GOTEST) -v ./test/e2e
+	CHAIRLIFT_E2E_BUILD_DIR=$(abspath $(BUILD_DIR)) \
+		CHAIRLIFT_SCHEMA_DIR=$(abspath $(BUILD_DIR))/schemas \
+		$(GOTEST) -v ./test/e2e
 else
 	@rm -rf "$(E2E_COVERDIR)" && mkdir -p "$(E2E_COVERDIR)"
 	CHAIRLIFT_E2E_BUILD_DIR=$(abspath $(BUILD_DIR)) \
+		CHAIRLIFT_SCHEMA_DIR=$(abspath $(BUILD_DIR))/schemas \
 		GOCOVERDIR=$(abspath $(E2E_COVERDIR)) \
 		$(GOTEST) -v ./test/e2e
 	$(GOCMD) tool covdata textfmt -i=$(abspath $(E2E_COVERDIR)) -o=e2e-coverage.out
@@ -186,12 +194,12 @@ install: build
 	install -Dm755 $(BUILD_DIR)/$(BINARY_NAME) $(DESTDIR)$(BINDIR)/$(BINARY_NAME)
 	# Install wrapper script
 	install -Dm755 data/chairlift-wrapper.sh $(DESTDIR)$(BINDIR)/chairlift-wrapper
-	# Install the Livery GSettings schema, then recompile the system schema
-	# cache so `gsettings` can see it. ChairLift ships exactly one schema.
+	# Install the Livery and Updates GSettings schemas, then recompile the system schema
+	# cache so `gsettings` can see them.
 	install -Dm644 data/io.projectbluefin.chairlift.livery.gschema.xml $(DESTDIR)$(SCHEMASDIR)/io.projectbluefin.chairlift.livery.gschema.xml
+	install -Dm644 data/io.projectbluefin.chairlift.updates.gschema.xml $(DESTDIR)$(SCHEMASDIR)/io.projectbluefin.chairlift.updates.gschema.xml
 	# Only for a direct install. Under DESTDIR the tree is a staging area
 	# holding this schema alone, so compiling there would produce a
-	# gschemas.compiled containing only ChairLift's schema — and a package
 	# shipping that file would overwrite the system cache and break GSettings
 	# for every other application. Packages run glib-compile-schemas from
 	# their postinstall scriptlet instead; see packaging/postinstall.sh.
@@ -245,6 +253,7 @@ schemas:
 	else \
 		mkdir -p $(BUILD_DIR)/schemas && \
 		cp data/io.projectbluefin.chairlift.livery.gschema.xml $(BUILD_DIR)/schemas/ && \
+		cp data/io.projectbluefin.chairlift.updates.gschema.xml $(BUILD_DIR)/schemas/ && \
 		glib-compile-schemas $(BUILD_DIR)/schemas && \
 		echo "==> schemas compiled to $(BUILD_DIR)/schemas"; \
 	fi
@@ -256,6 +265,7 @@ uninstall:
 	rm -f $(DESTDIR)$(APPLICATIONSDIR)/io.projectbluefin.chairlift.desktop
 	rm -f $(DESTDIR)$(CONFIGDIR)/config.yml
 	rm -f $(DESTDIR)$(SCHEMASDIR)/io.projectbluefin.chairlift.livery.gschema.xml
+	rm -f $(DESTDIR)$(SCHEMASDIR)/io.projectbluefin.chairlift.updates.gschema.xml
 	rm -f $(DESTDIR)$(ICONSDIR)/hicolor/scalable/apps/io.projectbluefin.chairlift.svg
 	rm -f $(DESTDIR)$(ICONSDIR)/hicolor/symbolic/apps/io.projectbluefin.chairlift-symbolic.svg
 	rm -f $(DESTDIR)$(BINDIR)/$(HELPER_NAME)
@@ -297,7 +307,7 @@ ci:
 	$(MAKE) build
 	@echo "==> CI mirror passed"
 
-bump: ## generate a new version with svu
+bump: ## tag the next calendar version (YY.MM.N); PRE=alpha.1 for a prerelease
 	@$(MAKE) build
 	@$(MAKE) test
 	@$(MAKE) fmt
@@ -307,7 +317,7 @@ bump: ## generate a new version with svu
 		exit 1; \
 	fi
 	@echo "Creating new tag..."
-	@version=$$(svu next); \
+	@version=$$(./scripts/next-version.sh $(PRE)); \
 		git tag -a $$version -m "Version $$version"; \
 		echo "Tagged version $$version"; \
 		echo "Pushing tag $$version to origin..."; \

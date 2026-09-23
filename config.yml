@@ -3,31 +3,29 @@
 # Set "enabled: false" to hide a preference group on any page. A functional
 # page is omitted when all of its groups are disabled; Help is always retained.
 
-system_page:
-  system_info_group:
+# A language model served from a rootless container, on whichever accelerator
+# this machine has. Shown everywhere Podman exists; the model is only
+# downloaded once the switch is turned on.
+#
+# ai_images pins the container image per GPU vendor (nvidia, amd, intel,
+# none) — for a site that mirrors registries — and ai_model changes what is
+# served. Both are ordinary settings rather than root-only ones because the
+# container runs unprivileged in the user's own account.
+agents_page:
+  agents_group:
     enabled: true
-  bootc_status_group:
-    enabled: true
-  # Which image this machine runs, and the graphics driver it carries. Hidden
-  # on a host with no /usr/share/ublue-os/image-info.json.
-  channel_group:
-    enabled: true
-  health_group:
-    enabled: true
-    app_id: io.missioncenter.MissionCenter
+    # ai_images:
+    #   nvidia: registry.example.internal/ramalama/cuda:latest
+    # ai_model: ollama://qwen2.5:7b
 
 updates_page:
-  # Update All leads the page; the per-provider groups below it remain
-  # available for anything it does not cover.
+  # Whether this system installs updates on its own schedule. Updating now
+  # is the status-first shell's single action and needs no config key; this
+  # switch is a preference about the future, so it gets its own group.
   #
-  # The Automatic Updates switch is rendered inside this group, because it
-  # answers the same question — how does this system get updated — and
-  # splitting it out would present two unrelated-looking settings. Disabling
-  # this group therefore hides that switch too. There is deliberately no
-  # separate key for it: an independent key could be enabled while this one
-  # was disabled, which would leave the Updates page claiming a group it does
-  # not draw.
-  update_all_group:
+  # Hidden entirely on a host with no unattended-update timer, so a machine
+  # that cannot update itself never shows a switch that would do nothing.
+  automatic_updates_group:
     enabled: true
   bootc_updates_group:
     enabled: true
@@ -39,25 +37,31 @@ updates_page:
     enabled: true
   brew_trust_group:
     enabled: true
+  # Which release stream this machine follows, and the graphics driver the
+  # image carries. Both replace the operating system and need a restart, so
+  # they sit with updates. Hidden on a host with no image information.
+  channel_group:
+    enabled: true
+  # Compact system-version readout; technical identity stays behind details.
+  bootc_status_group:
+    enabled: true
 
 applications_page:
   applications_installed_group:
-    enabled: true
+    enabled: false
     app_id: io.github.kolunmi.Bazaar
   flatpak_user_group:
-    enabled: true
+    enabled: false
   flatpak_system_group:
-    enabled: true
+    enabled: false
   brew_group:
-    enabled: true
+    enabled: false
   brew_search_group:
-    enabled: true
+    enabled: false
   brew_bundles_group:
     enabled: true
     bundles_paths:
       - /usr/share/ublue-os/homebrew
-      - /usr/share/chairlift/bundles
-      - /etc/chairlift/bundles
 
 maintenance_page:
   maintenance_cleanup_group:
@@ -66,11 +70,9 @@ maintenance_page:
       - title: Clean Up Boot Old Entries
         script: /usr/libexec/bls-gc
         sudo: true
-  maintenance_brew_group:
-    enabled: true
-  maintenance_flatpak_group:
-    enabled: true
-  maintenance_optimization_group:
+  # One routine cleanup action. It removes cached downloads and unused
+  # supporting software — never installed apps, documents, or containers.
+  maintenance_freespace_group:
     enabled: true
   # Powerwash (remove every user Flatpak and Distrobox container) and Factory
   # Reset (bootc install reset --experimental). Both are irreversible, so
@@ -88,19 +90,8 @@ features_page:
     enabled: true
   gaming_group:
     enabled: true
-  # A language model served from a rootless container, on whichever
-  # accelerator this machine has. Shown everywhere Podman exists; the model
-  # is only downloaded once the switch is turned on.
-  #
-  # ai_images pins the container image per GPU vendor (nvidia, amd, intel,
-  # none) — for a site that mirrors registries — and ai_model changes what is
-  # served. Both are ordinary settings rather than root-only ones because the
-  # container runs unprivileged in the user's own account.
-  ai_group:
-    enabled: true
-    # ai_images:
-    #   nvidia: registry.example.internal/ramalama/cuda:latest
-    # ai_model: ollama://qwen2.5:7b
+  # A language model served from a rootless container now lives on its own
+  # Agents page; see agents_page above.
 
 # Who you are, who you stand with, and what you roll with. Each section
 # shadows one icon-theme name in the user's own theme; nothing here is
@@ -129,6 +120,6 @@ help_page:
     enabled: true
   help_resources_group:
     enabled: true
-    website: https://docs.projectbluefin.io/
-    issues: https://issues.projectbluefin.io/
-    chat: https://ask.projectbluefin.io/
+    website: https://projectbluefin.io
+    issues: https://github.com/projectbluefin/dakota/issues
+    chat: https://docs.projectbluefin.io/

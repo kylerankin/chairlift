@@ -141,7 +141,7 @@ func TestWalkthroughScreenshots(t *testing.T) {
 	}
 
 	assertBluefinGroupsRendered(t, outDir)
-	assertUpdateAllRendered(t, outDir)
+	assertAutomaticUpdatesRendered(t, outDir)
 	// The reset group is opt-in and the capture enables it explicitly; a
 	// higher-priority checkout config must not silently hide both rows.
 	findLogLine(t, outDir, "views: reset group built")
@@ -321,26 +321,27 @@ func frameDigest(t *testing.T, path string) string {
 	return string(data)
 }
 
-// assertUpdateAllRendered confirms the captured session built the Update All
-// group, and that its plan covers every provider available on the runner.
+// assertAutomaticUpdatesRendered confirms the captured session built the
+// automatic-background-updates switch in its on state.
 //
-// Like the Bluefin groups, a hidden Update All group and a rendered one both
-// produce a plausible Updates page, so the pixel checks cannot tell them
-// apart. The group hides itself when no provider is available, which is a
-// legitimate state — so this asserts the marker exists and names a non-zero
-// plan, rather than asserting a fixed phase count the runner may not have.
-func assertUpdateAllRendered(t *testing.T, outDir string) {
+// Like the Bluefin groups, a hidden switch and a rendered one both produce a
+// plausible Updates page, so the pixel checks cannot tell them apart. The
+// group hides itself on a host with no unattended-update timer, which is a
+// legitimate state and what an unstubbed runner produces —
+// capture_walkthrough.sh supplies a stubbed systemd answer so the shown
+// state is the one captured, and internal/autoupdate's classification table
+// covers the hidden one.
+//
+// There is deliberately no assertion here about the page's update action.
+// It used to check a "views: update all group built" marker emitted by the
+// legacy Update All group; that group is gone, and the status-first shell
+// that replaced it renders from an immutable updateflow.Snapshot whose
+// every phase and action is already covered by internal/updateflow and
+// internal/views/updatepresent table tests. Re-deriving that here would pin
+// a log line rather than a behaviour.
+func assertAutomaticUpdatesRendered(t *testing.T, outDir string) {
 	t.Helper()
 
-	line := findLogLine(t, outDir, "views: update all group built")
-	if strings.Contains(line, "phases=0") {
-		t.Errorf("Update All rendered with an empty plan; the group should have been omitted entirely\n  %s", line)
-	}
-
-	// The automatic-updates switch shares the group. capture_walkthrough.sh
-	// supplies a stubbed systemd answer so the shown state is captured; the
-	// hidden state is what an unstubbed runner produces and is covered by
-	// internal/autoupdate's classification table.
 	autoLine := findLogLine(t, outDir, "views: automatic updates row built")
 	if !strings.Contains(autoLine, "state=on") {
 		t.Errorf("automatic updates row did not render in the on state\n  %s", autoLine)
@@ -399,8 +400,10 @@ func assertBluefinGroupsRendered(t *testing.T, outDir string) {
 		}
 	}
 
-	// The release channel and graphics driver moved to the System page, so
-	// their own marker is what proves they rendered.
+	// The release channel and graphics driver live on the Updates page,
+	// beside the thing that changes them, so their own marker is what
+	// proves they rendered. (They were on the System page until it was
+	// deleted — "about this computer" is GNOME Settings' job.)
 	identity := findLogLine(t, outDir, "views: image identity group built")
 	for _, want := range []string{"variant=dakota", "switchable=true", "driver=standard"} {
 		if !strings.Contains(identity, want) {
@@ -408,15 +411,20 @@ func assertBluefinGroupsRendered(t *testing.T, outDir string) {
 		}
 	}
 
-	// The local-AI row selects its image from the stubbed GPU. The script
+	// The local-AI stack selects its image from the stubbed GPU. The script
 	// stubs an Intel + NVIDIA hybrid, so the captured frame must show the
 	// CUDA stack — the case a vendor-directory catalog gets wrong. The
 	// repository part alone is matched: the reference carries a pinned index
 	// digest that is rolled periodically, and this gate is about selection.
-	ai := findLogLine(t, outDir, "views: ai stack group built")
+	//
+	// The marker is the Agents page's, not a group's: local AI moved off
+	// Features onto its own destination, because what it turns on is a
+	// service a person then points other applications at rather than one
+	// more system preference.
+	ai := findLogLine(t, outDir, "views: agents page built")
 	for _, want := range []string{"vendor=nvidia", "accelerator=CUDA", "image=quay.io/ramalama/cuda"} {
 		if !strings.Contains(ai, want) {
-			t.Errorf("ai stack marker missing %q\n  %s", want, ai)
+			t.Errorf("agents page marker missing %q\n  %s", want, ai)
 		}
 	}
 }

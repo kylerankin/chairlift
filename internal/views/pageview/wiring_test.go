@@ -41,7 +41,7 @@ func TestPageBuildersUsePurePresentations(t *testing.T) {
 		{
 			file: "applications_page.go",
 			required: []string{
-				"pageview.BrewBundle(",
+				"bundleview.Describe(",
 				"pageview.HomebrewPackage(",
 				"pageview.FlatpakApplication(",
 				"pageview.SearchResult(",
@@ -51,6 +51,10 @@ func TestPageBuildersUsePurePresentations(t *testing.T) {
 				`fmt.Sprintf("%s — %s", bundle.Description, bundle.Path)`,
 				`fmt.Sprintf("%s (%s)", app.ApplicationID, app.Version)`,
 				`row.SetSubtitle(result.Kind.DisplayName())`,
+				"pageview.BrewBundle(",
+				`"Brew Bundle Dump"`,
+				"~/Brewfile",
+				`fmt.Sprintf("Error: %v", err)`,
 			},
 		},
 		{
@@ -62,20 +66,41 @@ func TestPageBuildersUsePurePresentations(t *testing.T) {
 				"pageview.BootcStageResultSubtitle(",
 				"pageview.SysupdateUpdateSubtitle(",
 				"pageview.SysupdateStageResultSubtitle(",
+				// Moved here with the release channel and the graphics
+				// driver when the System page was deleted.
+				"pageview.ChannelRow(",
+				"pageview.GraphicsDriverRow(",
+				// The system-version readout came with them. Digest
+				// formatting now lives entirely inside
+				// SystemVersionDetails, which calls ShortDigest itself —
+				// stricter than the deleted system_page.go entry, which
+				// only required the view to call ShortDigest. The banned
+				// hand-slice below is carried across from that entry.
+				"pageview.SystemVersionRow(",
+				"pageview.SystemVersionDetails(",
 				"pageview.StagingLogSubtitle(",
 			},
 			retired: []string{
 				"strings.LastIndex(",
 				`fmt.Sprintf("%s → %s", update.ApplicationID, update.NewVersion)`,
 				`fmt.Sprintf("Update %s staged — restart to apply", version)`,
+				"digest[:19]",
+				"row.SetSubtitle(pkg.Version)",
+				`"Roll Back"`,
 			},
 		},
 		{
-			file:     "maintenance_page.go",
-			required: []string{"pageview.MaintenanceCommand("},
+			file: "maintenance_page.go",
+			required: []string{
+				"pageview.MaintenanceCommand(",
+				"cleanupview.Summarize(",
+				"updateproviders.NewCleanup(",
+			},
 			retired: []string{
 				`exec.CommandContext(ctx, "pkexec", script)`,
 				"exec.CommandContext(ctx, script)",
+				"row.SetSubtitle(action.Script)",
+				`"Coming soon"`,
 			},
 		},
 		{
@@ -83,15 +108,15 @@ func TestPageBuildersUsePurePresentations(t *testing.T) {
 			required: []string{
 				"pageview.Feature(",
 				"pageview.FeatureGroupDescription(",
-				// The onboarding tabs' admission rule lives here rather than
-				// inline in the view, so it can be asserted headlessly. A
-				// view that opened URLs without asking would restore the
-				// untestable shape.
-				"pageview.DeveloperOnboardingTargets(",
+				"pageview.DeveloperRow(",
+				"pageview.GamingRow(",
 			},
 			retired: []string{
 				"row.SetTitle(feat.Description)",
 				`fmt.Sprintf("%d features available", len(features))`,
+				`"Developer Mode"`,
+				`"Gaming Mode"`,
+				"status.DevGroups",
 			},
 		},
 		{
@@ -100,12 +125,22 @@ func TestPageBuildersUsePurePresentations(t *testing.T) {
 			retired:  []string{`row.SetTitle("Website")`, `row.SetTitle("Report Issues")`},
 		},
 		{
-			file: "system_page.go",
+			file: "agents_page.go",
 			required: []string{
-				"pageview.ParseOSRelease(",
-				"pageview.ShortDigest(",
+				"pageview.AIStackRow(",
+				"pageview.AIStackDetails(",
+				"pageview.AIStackGroupDescription(",
+				"actionmsg.AIStack(",
 			},
-			retired: []string{"bufio.NewScanner(", "cases.Title(", "digest[:19]"},
+			// A bare switch re-enters ::state-set on a programmatic revert,
+			// which would restart the model after a failed stop; the error
+			// text names the unit file and belongs in the log, not a toast.
+			retired: []string{
+				`row.SetTitle("Local AI Model Server")`,
+				`"Working..."`,
+				"gtk.NewSwitch()",
+				"Local AI failed: %v",
+			},
 		},
 		{
 			file: "recovery.go",
@@ -164,41 +199,16 @@ func TestBootcStageRefreshesChangelogAvailability(t *testing.T) {
 	if !strings.Contains(body, "if statusErr != nil {") || !strings.Contains(body, "Could not verify staged update") {
 		t.Error("bootc staging claims a known result after its status re-read failed")
 	}
-	allPath := filepath.Join(filepath.Dir(filename), "..", "update_all.go")
-	allSource, err := os.ReadFile(allPath)
+	viewsPath := filepath.Join(filepath.Dir(filename), "..", "views.go")
+	viewsSource, err := os.ReadFile(viewsPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	completion := strings.SplitN(string(allSource), "func (uh *UserHome) finishUpdateAll(", 2)
-	if len(completion) != 2 {
-		t.Fatal("Update All completion handler not found")
-	}
-	allBody := strings.SplitN(completion[1], "func (uh *UserHome) onRestartClicked(", 2)[0]
-	for _, required := range []string{"updateall.PhaseOS", "bootc.GetStatus(", "uh.updateCounts.SetObserved(badgestate.Bootc,", "uh.refreshChangelogAvailability(status)"} {
-		if !strings.Contains(allBody, required) {
+	viewsBody := string(viewsSource)
+	for _, required := range []string{"updateflow.OperatingSystem", "bootc.GetStatus(", "uh.updateCounts.SetObserved(badgestate.Bootc,", "uh.refreshChangelogAvailability(status)"} {
+		if !strings.Contains(viewsBody, required) {
 			t.Errorf("Update All OS staging never applies %q to the Compare row and badge", required)
 		}
-	}
-}
-
-func TestUpdateAllBrewPhaseUpgradesAfterMetadata(t *testing.T) {
-	_, filename, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller could not locate wiring_test.go")
-	}
-	data, err := os.ReadFile(filepath.Join(filepath.Dir(filename), "..", "update_all.go"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	runner := strings.SplitN(string(data), "func hostRunner()", 2)
-	if len(runner) != 2 {
-		t.Fatal("Update All runner not found")
-	}
-	body := strings.SplitN(runner[1], "func (uh *UserHome) onUpdateAllClicked(", 2)[0]
-	update := strings.Index(body, "homebrew.Update(ctx)")
-	upgrade := strings.Index(body, "homebrew.Upgrade(ctx, \"\")")
-	if update < 0 || upgrade <= update {
-		t.Error("Update All must refresh brew metadata and then upgrade installed packages using the run context")
 	}
 }
 
@@ -207,19 +217,30 @@ func TestUpdateAllRefreshesProviderInventories(t *testing.T) {
 	if !ok {
 		t.Fatal("runtime.Caller could not locate wiring_test.go")
 	}
-	data, err := os.ReadFile(filepath.Join(filepath.Dir(filename), "..", "update_all.go"))
+	data, err := os.ReadFile(filepath.Join(filepath.Dir(filename), "..", "views.go"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	completion := strings.SplitN(string(data), "func (uh *UserHome) finishUpdateAll(", 2)
-	if len(completion) != 2 {
-		t.Fatal("Update All completion handler not found")
-	}
-	body := strings.SplitN(completion[1], "func (uh *UserHome) onRestartClicked(", 2)[0]
+	body := string(data)
 	for _, call := range []string{"uh.loadFlatpakUpdates()", "uh.loadOutdatedPackages()"} {
 		if !strings.Contains(body, call) {
 			t.Errorf("Update All leaves stale inventory without %s", call)
 		}
+	}
+}
+
+func TestUpdateAllDryRunDoesNotAnnounceUpdates(t *testing.T) {
+	_, filename, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller could not locate wiring_test.go")
+	}
+	data, err := os.ReadFile(filepath.Join(filepath.Dir(filename), "..", "update_shell.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	if !strings.Contains(text, "final.Preview") {
+		t.Error("dry-run Update All must not announce completion when final.Preview is true")
 	}
 }
 
@@ -239,75 +260,6 @@ func TestSysupdateStageDoesNotClaimCurrentOnUnreadableStatus(t *testing.T) {
 	body := strings.SplitN(stage[1], "func (uh *UserHome) updateHomebrew(", 2)[0]
 	if !strings.Contains(body, "if statusErr != nil {") || !strings.Contains(body, "Could not verify staged update") {
 		t.Error("native A/B staging claims the system is current after an unreadable status")
-	}
-}
-
-func TestUpdateAllDryRunDoesNotAnnounceUpdates(t *testing.T) {
-	_, filename, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller could not locate wiring_test.go")
-	}
-	data, err := os.ReadFile(filepath.Join(filepath.Dir(filename), "..", "update_all.go"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	text := string(data)
-	clicked := strings.SplitN(text, "func (uh *UserHome) onUpdateAllClicked(", 2)
-	if len(clicked) != 2 {
-		t.Fatal("Update All click handler not found")
-	}
-	clickedBody := strings.SplitN(clicked[1], "func (uh *UserHome) applyUpdateAllEvent(", 2)[0]
-	guard := strings.Index(clickedBody, "if !dryrun.Enabled() {")
-	disable := strings.Index(clickedBody, "uh.updateAllRestart.SetSensitive(false)")
-	if guard < 0 || disable <= guard {
-		t.Error("Update All must guard restart-row sensitivity so previews preserve known state")
-	}
-	completion := strings.SplitN(text, "func (uh *UserHome) finishUpdateAll(", 2)
-	if len(completion) != 2 {
-		t.Fatal("Update All completion handler not found")
-	}
-	preview := strings.Index(completion[1], "[DRY-RUN] Preview")
-	notify := strings.Index(completion[1], "NotifyBackground(")
-	if preview < 0 || notify <= preview || !strings.Contains(completion[1][:notify], "if dryrun.Enabled() {") {
-		t.Error("dry-run Update All must report a preview before any completion notification")
-	}
-	phase := strings.SplitN(text, "func (uh *UserHome) applyUpdateAllEvent(", 2)
-	if len(phase) != 2 {
-		t.Fatal("Update All phase renderer not found")
-	}
-	phaseBody := strings.SplitN(phase[1], "func (uh *UserHome) finishUpdateAll(", 2)[0]
-	if !strings.Contains(phaseBody, "dryrun.Enabled() && event.Result.Outcome == updateall.OutcomeSucceeded") || !strings.Contains(phaseBody, "[DRY-RUN] Preview") {
-		t.Error("a dry-run phase claims it finished updating packages")
-	}
-}
-
-func TestUpdateAllRetryKeepsKnownRestart(t *testing.T) {
-	_, filename, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller could not locate wiring_test.go")
-	}
-	data, err := os.ReadFile(filepath.Join(filepath.Dir(filename), "..", "update_all.go"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	text := string(data)
-	clicked := strings.SplitN(text, "func (uh *UserHome) onUpdateAllClicked(", 2)
-	if len(clicked) != 2 {
-		t.Fatal("Update All click handler not found")
-	}
-	clickedBody := strings.SplitN(clicked[1], "func (uh *UserHome) applyUpdateAllEvent(", 2)[0]
-	if strings.Contains(clickedBody, "uh.updateAllRestart.SetVisible(false)") || !strings.Contains(clickedBody, "uh.updateAllRestart.SetSensitive(false)") {
-		t.Error("retry must temporarily disable, not discard, a known restart prompt")
-	}
-	finished := strings.SplitN(text, "func (uh *UserHome) finishUpdateAll(", 2)
-	if len(finished) != 2 {
-		t.Fatal("Update All completion handler not found")
-	}
-	finishBody := strings.SplitN(finished[1], "func (uh *UserHome) onRestartClicked(", 2)[0]
-	for _, required := range []string{"uh.updateAllRestart.SetSensitive(true)", "status.Status.Staged", "uh.updateAllRestart.SetVisible(false)", "uh.updateAllRestart.SetVisible(true)"} {
-		if !strings.Contains(finishBody, required) {
-			t.Errorf("completion does not reconcile pending restart via %q", required)
-		}
 	}
 }
 

@@ -65,6 +65,12 @@ func main() {
 		runDriverSwitch(ctx, invocation)
 	case ubluehelper.CommandFactoryReset:
 		runFactoryReset(ctx, invocation)
+	default:
+		// Unreachable: ParseInvocation accepts only the commands above. The
+		// arm exists so a command added to the parser without a dispatch arm
+		// fails loudly instead of exiting 0 having done nothing, which is
+		// indistinguishable from a successful privileged action.
+		fatal(fmt.Sprintf("unhandled command: %s", invocation.Command))
 	}
 }
 

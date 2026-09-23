@@ -21,12 +21,13 @@ func TestUpdatesPageUsesGuardedRefreshDecisions(t *testing.T) {
 	}
 	text := string(source)
 
+	// The guard here is the gate/generation/row bookkeeping, not the button
+	// copy: label text and its typography belong to the HIG pass, so the
+	// control-state assertions below are deliberately copy-agnostic.
 	for _, required := range []string{
 		`if !updateGate.TryStart()`,
-		`btn.SetLabel("Updating...")`,
 		`go uh.updateHomebrew(btn, updateGate)`,
 		`if !upgradeGate.TryStart()`,
-		`btn.SetLabel("Upgrading...")`,
 		`dryRun := dryrun.Enabled()`,
 		`actionstate.PackageUpgrade(err == nil, dryRun)`,
 		`actionstate.OutdatedRefresh(err == nil, currentCount, len(packages))`,
@@ -40,10 +41,8 @@ func TestUpdatesPageUsesGuardedRefreshDecisions(t *testing.T) {
 		`generation := uh.brewRefresh.Begin()`,
 		`go uh.loadOutdatedPackagesGeneration(generation, done)`,
 		`!uh.brewRefresh.IsCurrent(generation)`,
-		`button.SetLabel("Update")`,
 		`uh.outdatedRows.Clear(func(row *adw.ActionRow)`,
 		`uh.outdatedRows.Add(row)`,
-		`Error refreshing updates:`,
 	} {
 		if !strings.Contains(text, required) {
 			t.Errorf("updates-page wiring does not contain %q", required)
@@ -78,7 +77,14 @@ func TestFeaturesPageDeveloperModeUsesGate(t *testing.T) {
 	for _, required := range []string{
 		`uh.developerGate.TryStart()`,
 		`uh.developerGate.Reset()`,
-		`toggle.SetState(`,
+		// The recursion guard used to be a bare `toggle.SetState(` beside
+		// every `SetActive`, which only held while every call site
+		// remembered to pair them. guardedSwitch owns that pairing —
+		// newGuardedSwitch sets both, and set() re-enters behind an
+		// `applying` flag the handler checks — so the property is now
+		// asserted where it is enforced rather than at each call site.
+		`toggle.set(`,
+		`newGuardedSwitch(`,
 	} {
 		if !strings.Contains(featuresText, required) {
 			t.Errorf("features_page wiring does not contain %q", required)
@@ -96,9 +102,8 @@ func TestRepeatableControlsReleaseTheirGates(t *testing.T) {
 	}
 	viewsDir := filepath.Clean(filepath.Join(filepath.Dir(filename), ".."))
 	for file, gates := range map[string][]string{
-		"update_all.go":  {"updateAllGate"},
-		"system_page.go": {"driverGate"},
-		"reset.go":       {"powerwashGate", "factoryResetGate"},
+		"updates_page.go": {"driverGate"},
+		"reset.go":        {"powerwashGate", "factoryResetGate"},
 	} {
 		data, err := os.ReadFile(filepath.Join(viewsDir, file))
 		if err != nil {

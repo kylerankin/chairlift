@@ -138,6 +138,8 @@ func TestCurrentDocumentationMatchesSourceFacts(t *testing.T) {
 			"all three policies",
 			"the three PolicyKit policies",
 			"eight subcommands",
+			"ten subcommands",
+			"ten actions",
 			"declaring the three actions",
 			"builds two binaries",
 			"chairlift-updex-helper` only",

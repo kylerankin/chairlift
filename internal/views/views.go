@@ -5,12 +5,14 @@ import (
 	"log"
 	"time"
 
+	"github.com/projectbluefin/chairlift/internal/bootc"
 	"github.com/projectbluefin/chairlift/internal/config"
 	"github.com/projectbluefin/chairlift/internal/livery"
+	"github.com/projectbluefin/chairlift/internal/sysupdate"
 	"github.com/projectbluefin/chairlift/internal/troubleshoot"
+	"github.com/projectbluefin/chairlift/internal/updateflow"
 	"github.com/projectbluefin/chairlift/internal/views/actionstate"
 	"github.com/projectbluefin/chairlift/internal/views/badgestate"
-	"github.com/projectbluefin/chairlift/internal/views/bundleview"
 	"github.com/projectbluefin/chairlift/internal/views/pageview"
 	"github.com/projectbluefin/chairlift/internal/views/rowset"
 
@@ -38,7 +40,7 @@ type UserHome struct {
 	toastAdder ToastAdder
 
 	// Pages (ToolbarViews)
-	systemPage       *adw.ToolbarView
+	agentsPage       *adw.ToolbarView
 	updatesPage      *adw.ToolbarView
 	applicationsPage *adw.ToolbarView
 	maintenancePage  *adw.ToolbarView
@@ -48,7 +50,7 @@ type UserHome struct {
 	recoveryPage     *adw.ToolbarView // Recovery detail, reached from System, not a sidebar page
 
 	// PreferencesPages inside each ToolbarView - keep references to prevent GC
-	systemPrefsPage       *adw.PreferencesPage
+	agentsPrefsPage       *adw.PreferencesPage
 	updatesPrefsPage      *adw.PreferencesPage
 	applicationsPrefsPage *adw.PreferencesPage
 	maintenancePrefsPage  *adw.PreferencesPage
@@ -73,7 +75,6 @@ type UserHome struct {
 	caskRows               rowset.Tracker[*adw.ActionRow]
 	searchResultRows       rowset.Tracker[*adw.ActionRow]
 	brewBundlesGroup       *adw.PreferencesGroup
-	brewBundleRows         map[string]*bundleRowWidgets
 	brewTrustGroup         *adw.PreferencesGroup
 	brewTrustRows          map[string]*adw.ActionRow
 	outdatedRows           rowset.Tracker[*adw.ActionRow]
@@ -128,14 +129,6 @@ type UserHome struct {
 	// leave the unit's presence disagreeing with the persisted keys. See
 	// onLiveryRotateToggled.
 	liveryRotateWork actionstate.Serializer
-
-	// Update All references
-	updateAllGroup   *adw.PreferencesGroup
-	updateAllRow     *adw.ActionRow
-	updateAllBtn     *gtk.Button
-	updateAllPhases  map[string]*adw.ActionRow
-	updateAllRestart *adw.ActionRow
-	updateAllGate    actionstate.Gate
 
 	// Automatic background updates
 	autoUpdatesRow    *adw.ActionRow
@@ -204,8 +197,6 @@ type UserHome struct {
 	featureRows              map[string]*adw.ActionRow
 
 	// Groups with deferred visibility
-	maintenanceBrewGroup    *adw.PreferencesGroup
-	maintenanceFlatpakGroup *adw.PreferencesGroup
 
 	// Recovery detail navigation, wired by the window after construction.
 	// The System page opens Recovery; Recovery's back button returns to
@@ -220,9 +211,6 @@ type UserHome struct {
 	brewRefresh         actionstate.RefreshGate
 	searchRefresh       actionstate.RefreshGate
 	brewPackagesRefresh actionstate.RefreshGate
-	// brewBundlesRefresh bounds overlapping Brew bundle reloads so only the
-	// newest reload may publish its results.
-	brewBundlesRefresh actionstate.RefreshGate
 	// flatpakPackagesRefresh bounds overlapping Flatpak inventory reloads so
 	// only the newest reload may publish. Two uninstalls finishing close
 	// together each trigger a reload; without a generation guard an older,
@@ -237,12 +225,6 @@ type UserHome struct {
 	flatpakUpdatesRefresh actionstate.RefreshGate
 }
 
-type bundleRowWidgets struct {
-	row  *adw.ActionRow
-	btn  *gtk.Button
-	gate *bundleview.InstallGate
-}
-
 // New creates a new UserHome views manager
 func New(cfg *config.Config, toastAdder ToastAdder) *UserHome {
 	start := time.Now()
@@ -253,7 +235,7 @@ func New(cfg *config.Config, toastAdder ToastAdder) *UserHome {
 	}
 
 	// Create pages - createPage returns both ToolbarView and PreferencesPage
-	uh.systemPage, uh.systemPrefsPage = uh.createPage()
+	uh.agentsPage, uh.agentsPrefsPage = uh.createPage()
 	uh.updatesPage, uh.updatesPrefsPage = uh.createPage()
 	uh.applicationsPage, uh.applicationsPrefsPage = uh.createPage()
 	uh.maintenancePage, uh.maintenancePrefsPage = uh.createPage()
@@ -263,7 +245,7 @@ func New(cfg *config.Config, toastAdder ToastAdder) *UserHome {
 	uh.recoveryPage, uh.recoveryPrefsPage = uh.createRecoveryPage()
 
 	// Build page content
-	uh.buildSystemPage()
+	uh.buildAgentsPage()
 	uh.buildUpdatesPage()
 	uh.buildApplicationsPage()
 	uh.buildMaintenancePage()
@@ -273,8 +255,47 @@ func New(cfg *config.Config, toastAdder ToastAdder) *UserHome {
 	uh.buildRecoveryPage()
 
 	log.Printf("views: all pages built in %s", time.Since(start))
-
 	return uh
+}
+
+// OnUpdateFinished refreshes inventories and changelog state after a non-preview update run.
+func (uh *UserHome) OnUpdateFinished(final updateflow.Snapshot) {
+	if final.Preview {
+		return
+	}
+	uh.loadFlatpakUpdates()
+	uh.loadOutdatedPackages()
+	for _, source := range final.CompletedSources {
+		if source == updateflow.OperatingSystem {
+			go func() {
+				if sysupdate.IsNativeABCached() {
+					status, err := sysupdate.GetStatus()
+					count := 0
+					if status.IsStaged() {
+						count = 1
+					}
+					uh.updateCounts.SetObserved(badgestate.Sysupdate, count, err == nil)
+					uh.updateBadgeCount()
+					return
+				}
+				ctx, cancel := bootc.DefaultContext()
+				defer cancel()
+				status, err := bootc.GetStatus(ctx)
+				if err == nil {
+					sgtk.RunOnMainThread(func() {
+						uh.refreshChangelogAvailability(status)
+					})
+				}
+				count := 0
+				if status != nil && status.Status.Staged != nil {
+					count = 1
+				}
+				uh.updateCounts.SetObserved(badgestate.Bootc, count, err == nil)
+				uh.updateBadgeCount()
+			}()
+			break
+		}
+	}
 }
 
 // updateBadgeCount updates the total update count and notifies the window
@@ -289,8 +310,8 @@ func (uh *UserHome) updateBadgeCount() {
 // GetPage returns a page by name
 func (uh *UserHome) GetPage(name string) *adw.ToolbarView {
 	switch name {
-	case "system":
-		return uh.systemPage
+	case "agents":
+		return uh.agentsPage
 	case "updates":
 		return uh.updatesPage
 	case "applications":
