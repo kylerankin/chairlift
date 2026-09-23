@@ -2,6 +2,7 @@
 package window
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"time"
@@ -9,6 +10,8 @@ import (
 
 	"github.com/projectbluefin/chairlift/internal/branding"
 	"github.com/projectbluefin/chairlift/internal/config"
+	"github.com/projectbluefin/chairlift/internal/dryrun"
+	"github.com/projectbluefin/chairlift/internal/firstrun"
 	"github.com/projectbluefin/chairlift/internal/navigation"
 	"github.com/projectbluefin/chairlift/internal/settings"
 	"github.com/projectbluefin/chairlift/internal/updateflow"
@@ -17,6 +20,7 @@ import (
 	"github.com/projectbluefin/chairlift/internal/views"
 
 	"github.com/frostyard/snowkit/gobj"
+	sgtk "github.com/frostyard/snowkit/gtk"
 
 	"codeberg.org/puregotk/puregotk/v4/adw"
 	"codeberg.org/puregotk/puregotk/v4/gio"
@@ -52,6 +56,7 @@ type Window struct {
 	configError *config.LoadError
 	views       *views.UserHome
 	updateShell *views.UpdateShell
+	firstRun    *views.FirstRunAssistant
 	updateBadge *gtk.Label // Noninteractive badge for the updates count
 	navItems    []navigation.Item
 }
@@ -315,6 +320,7 @@ func (w *Window) buildMenuButton() *gtk.MenuButton {
 
 	// Add menu items
 	menu.Append("Preferences", "win.show-preferences")
+	menu.Append("Setup Assistant…", "win.show-setup")
 	menu.Append("Keyboard Shortcuts", "win.show-shortcuts")
 	menu.Append("About "+branding.AppName, "win.show-about")
 	// Create menu button
@@ -364,6 +370,14 @@ func (w *Window) setupActions() {
 	}
 	helpAction.ConnectActivate(&helpActivateCb)
 	w.AddAction(helpAction)
+	// Setup assistant action
+	setupAction := gio.NewSimpleAction("show-setup", nil)
+	setupActivateCb := func(action gio.SimpleAction, param uintptr) {
+		w.PresentFirstRun()
+	}
+	setupAction.ConnectActivate(&setupActivateCb)
+	w.AddAction(setupAction)
+
 	// Show shortcuts action
 	shortcutsAction := gio.NewSimpleAction("show-shortcuts", nil)
 	shortcutsActivateCb := func(action gio.SimpleAction, param uintptr) {
@@ -616,4 +630,39 @@ func (w *Window) SetUpdateBadge(count int) {
 	} else {
 		w.updateBadge.SetVisible(false)
 	}
+}
+
+// PresentFirstRun opens the first-run onboarding assistant dialog.
+func (w *Window) PresentFirstRun() {
+	if w.firstRun == nil {
+		w.firstRun = views.NewFirstRunAssistant(w.config.IsGroupEnabled, w)
+	}
+	w.firstRun.Present(&w.Widget)
+}
+
+// CheckFirstRun presents the onboarding assistant if required on startup.
+//
+// The disposition probe spawns `gsettings`, so it must not run inline here:
+// onActivate is the GTK startup path, and internal/livery documents why
+// subprocess probes were moved off it. An explicit request needs no probe at
+// all, and under --dry-run automated presentation is suppressed outright
+// (ADR-0014), so neither shape pays for a spawn.
+func (w *Window) CheckFirstRun(explicitSetup bool) {
+	if explicitSetup {
+		w.PresentFirstRun()
+		return
+	}
+	if dryrun.Enabled() {
+		return
+	}
+
+	go func() {
+		store := firstrun.NewGSettingsStore()
+		if !firstrun.ShouldPresent(context.Background(), false, false, store) {
+			return
+		}
+		sgtk.RunOnMainThread(func() {
+			w.PresentFirstRun()
+		})
+	}()
 }
