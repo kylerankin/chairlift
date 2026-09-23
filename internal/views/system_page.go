@@ -94,6 +94,32 @@ func (uh *UserHome) buildSystemPage() {
 		group.Add(&perfRow.Widget)
 		page.Add(group)
 	}
+
+	// Recovery entry: opens the single named Recovery detail view, reached
+	// deliberately from System. Shown only when there is something to
+	// recover — a reset enabled, or a rollback provider group — so the
+	// routine System page never reaches a reset. The gate lives in
+	// recoveryProvidersAvailable so this page guards only its own groups.
+	// The detail itself is a content-stack sibling of System, not a sidebar
+	// page (see #241).
+	if uh.recoveryProvidersAvailable() {
+		recoveryGroup := adw.NewPreferencesGroup()
+		recoveryGroup.SetTitle("Recovery")
+		recoveryRow := adw.NewActionRow()
+		recoveryRow.SetTitle("Recovery")
+		recoveryRow.SetSubtitle(pageview.RecoveryEntrySubtitle())
+		recoveryRow.SetActivatable(true)
+		icon := gtk.NewImageFromIconName("pan-end-symbolic")
+		recoveryRow.AddSuffix(&icon.Widget)
+		recoveryActivatedCb := func(row adw.ActionRow) {
+			if uh.openRecoveryDetail != nil {
+				uh.openRecoveryDetail()
+			}
+		}
+		recoveryRow.ConnectActivated(&recoveryActivatedCb)
+		recoveryGroup.Add(&recoveryRow.Widget)
+		page.Add(recoveryGroup)
+	}
 }
 
 // loadOSRelease loads /etc/os-release into the expander

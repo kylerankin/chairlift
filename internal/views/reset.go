@@ -27,6 +27,12 @@ import (
 // response before anything runs, per the HIG's rule that destructive
 // dialogs are reserved for genuinely non-undoable actions — which these are.
 //
+// The reset rows are built on the Recovery detail page, so the dialogs are
+// parented to the Recovery page, never the Maintenance page. A reset is a
+// deliberate Recovery action, not a routine cleanup control. maintenance_page
+// guards reset_group and builds these rows on the recovery page; the rows are
+// gated by reset_group (disabled by shipped default), the same default
+// maintenance_cleanup_group uses.
 // Powerwash needs no privilege: both its steps (removing user Flatpaks,
 // removing Distrobox containers) run in the invoking account, the same
 // reasoning as gaming mode. Factory Reset replaces the OS image itself and
@@ -88,7 +94,7 @@ func (uh *UserHome) onPowerwashClicked(button *gtk.Button, row *adw.ActionRow) {
 		uh.runPowerwash(button, row)
 	}
 	dialog.ConnectResponse(&responseCb)
-	dialog.Present(&uh.maintenancePrefsPage.Widget)
+	dialog.Present(&uh.recoveryPrefsPage.Widget)
 }
 
 func (uh *UserHome) runPowerwash(button *gtk.Button, row *adw.ActionRow) {
@@ -150,7 +156,7 @@ func (uh *UserHome) onFactoryResetClicked(button *gtk.Button, row *adw.ActionRow
 		uh.runFactoryReset(button, row)
 	}
 	dialog.ConnectResponse(&responseCb)
-	dialog.Present(&uh.maintenancePrefsPage.Widget)
+	dialog.Present(&uh.recoveryPrefsPage.Widget)
 }
 
 func (uh *UserHome) runFactoryReset(button *gtk.Button, row *adw.ActionRow) {

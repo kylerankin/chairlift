@@ -61,7 +61,6 @@ func TestPageBuildersUsePurePresentations(t *testing.T) {
 				"pageview.BootcStageResultSubtitle(",
 				"pageview.SysupdateUpdateSubtitle(",
 				"pageview.SysupdateStageResultSubtitle(",
-				"pageview.SysupdateRollbackSubtitle(",
 				"pageview.StagingLogSubtitle(",
 			},
 			retired: []string{
@@ -106,6 +105,14 @@ func TestPageBuildersUsePurePresentations(t *testing.T) {
 				"pageview.ShortDigest(",
 			},
 			retired: []string{"bufio.NewScanner(", "cases.Title(", "digest[:19]"},
+		},
+		{
+			file: "recovery.go",
+			required: []string{
+				"pageview.BootcRollbackRow(",
+				"pageview.SysupdateRollbackSubtitle(",
+				"pageview.BootcRollbackResultSubtitle(",
+			},
 		},
 	}
 
