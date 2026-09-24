@@ -29,7 +29,7 @@ func (uh *UserHome) buildAgentsPage() {
 		return
 	}
 
-	if uh.config.IsGroupEnabled("agents_page", "agents_group") {
+	if uh.groupEnabled("agents_page", "agents_group") {
 		uh.buildAIStackGroup(page)
 	}
 }

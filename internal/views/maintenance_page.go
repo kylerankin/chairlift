@@ -46,11 +46,11 @@ func (uh *UserHome) buildMaintenancePage() {
 		return
 	}
 
-	if uh.config.IsGroupEnabled("maintenance_page", "maintenance_freespace_group") {
+	if uh.groupEnabled("maintenance_page", "maintenance_freespace_group") {
 		uh.buildFreeSpaceGroup(page)
 	}
 
-	if uh.config.IsGroupEnabled("maintenance_page", "maintenance_cleanup_group") {
+	if uh.groupEnabled("maintenance_page", "maintenance_cleanup_group") {
 		uh.buildConfiguredTasksGroup(page)
 	}
 
@@ -75,7 +75,7 @@ func (uh *UserHome) buildMaintenancePage() {
 	}
 
 	// Reset group (Powerwash / Factory Reset).
-	if uh.config.IsGroupEnabled("maintenance_page", "reset_group") {
+	if uh.groupEnabled("maintenance_page", "reset_group") {
 		uh.buildResetGroup(uh.recoveryPrefsPage)
 	}
 }

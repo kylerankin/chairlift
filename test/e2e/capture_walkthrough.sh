@@ -122,6 +122,8 @@ export CHAIRLIFT_IMAGE_INFO
 export CHAIRLIFT_GPU_VENDORS
 
 export CHAIRLIFT_AUTO_UPDATES
+: "${CHAIRLIFT_CAPABILITIES:=image-descriptor,flatpak,brew,podman,bootc-stage}"
+export CHAIRLIFT_CAPABILITIES
 
 
 dbus-run-session -- "$APP" --dry-run >>"$LOG" 2>&1 &

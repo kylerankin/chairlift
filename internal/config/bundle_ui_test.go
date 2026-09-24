@@ -28,7 +28,7 @@ func TestBrewBundleGroupConfigControlsRuntimeWiring(t *testing.T) {
 	}
 	text := string(source)
 	for _, required := range []string{
-		`if uh.config.IsGroupEnabled("applications_page", "brew_bundles_group") {`,
+		`if uh.groupEnabled("applications_page", "brew_bundles_group") {`,
 		`uh.config.GetGroupConfig("applications_page", "brew_bundles_group")`,
 		`groupCfg.BundlesPaths`,
 		`go uh.loadBrewBundles(bundlePaths)`,

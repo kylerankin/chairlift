@@ -28,12 +28,12 @@ func (uh *UserHome) buildHelpPage() {
 	// the Features-page behavior — same Homebrew/config gate and shared
 	// runner — but now answers "where do I get help?" directly. It is built
 	// before resources so the assistant is the first thing a user sees.
-	if uh.config.IsGroupEnabled("help_page", "troubleshooting_group") {
+	if uh.groupEnabled("help_page", "troubleshooting_group") {
 		uh.buildTroubleshootGroup(page)
 	}
 
 	// Help Resources group
-	if uh.config.IsGroupEnabled("help_page", "help_resources_group") {
+	if uh.groupEnabled("help_page", "help_resources_group") {
 		group := adw.NewPreferencesGroup()
 		group.SetTitle("Help &amp; Resources")
 		group.SetDescription("Get help and learn more about " + branding.AppName)

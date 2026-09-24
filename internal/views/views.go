@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/projectbluefin/chairlift/internal/bootc"
+	"github.com/projectbluefin/chairlift/internal/capability"
 	"github.com/projectbluefin/chairlift/internal/config"
 	"github.com/projectbluefin/chairlift/internal/livery"
 	"github.com/projectbluefin/chairlift/internal/sysupdate"
@@ -36,8 +37,9 @@ type ToastAdder interface {
 
 // UserHome manages all content pages
 type UserHome struct {
-	config     *config.Config
-	toastAdder ToastAdder
+	config       *config.Config
+	capabilities capability.Set
+	toastAdder   ToastAdder
 
 	// Pages (ToolbarViews)
 	agentsPage       *adw.ToolbarView
@@ -232,13 +234,20 @@ type UserHome struct {
 	flatpakUpdatesRefresh actionstate.RefreshGate
 }
 
-// New creates a new UserHome views manager
-func New(cfg *config.Config, toastAdder ToastAdder) *UserHome {
+// New creates a new UserHome views manager.
+//
+// caps is the capability set resolved once during window construction; every
+// view builder routes its group predicate through it, so a group renders only
+// when its configuration enables it and the host supports it. A nil caps is
+// treated as an empty set, which lets callers that cannot resolve capabilities
+// still construct views (they simply render nothing capability-gated).
+func New(cfg *config.Config, caps capability.Set, toastAdder ToastAdder) *UserHome {
 	start := time.Now()
 
 	uh := &UserHome{
-		config:     cfg,
-		toastAdder: toastAdder,
+		config:       cfg,
+		capabilities: caps,
+		toastAdder:   toastAdder,
 	}
 
 	// Create pages - createPage returns both ToolbarView and PreferencesPage
@@ -263,6 +272,17 @@ func New(cfg *config.Config, toastAdder ToastAdder) *UserHome {
 
 	log.Printf("views: all pages built in %s", time.Since(start))
 	return uh
+}
+
+// groupEnabled is the one policy floor every view builder shares: a page's
+// group renders only when its configuration enables it AND the host supports
+// it. It composes the administrator's configuration with the capability set
+// resolved once during window construction, so the views never derive their
+// own answer and the floor stays identical across every page. See
+// internal/capability. A nil capability set composes to false everywhere,
+// matching the repository's fail-closed rule.
+func (uh *UserHome) groupEnabled(page, group string) bool {
+	return capability.Compose(uh.config.IsGroupEnabled, uh.capabilities)(page, group)
 }
 
 // OnUpdateFinished refreshes inventories and changelog state after a non-preview update run.

@@ -42,7 +42,7 @@ func fakeHost(binaries, assets []string) Probe {
 		// presence, and nothing in this package inspects the FileInfo.
 		Stat: func(name string) (os.FileInfo, error) {
 			if present[name] {
-				return nil, nil
+				return statFileInfo{name: name}, nil
 			}
 			return nil, os.ErrNotExist
 		},
@@ -52,12 +52,13 @@ func fakeHost(binaries, assets []string) Probe {
 // allBinaries and allAssets are the complete probe answers for a host that has
 // everything.
 var (
-	allBinaries = []string{"flatpak", "brew", "podman", "distrobox"}
+	allBinaries = []string{"flatpak", "podman", "distrobox"}
 	allAssets   = []string{
 		bootc.StageScriptPath,
 		sysupdate.MarkerPath,
 		sysupdate.StageScriptPath,
 		imageinfo.DescriptorPath,
+		"/home/linuxbrew/.linuxbrew/bin/brew",
 	}
 )
 
@@ -132,6 +133,16 @@ func TestDetectWithResolvesEveryCapability(t *testing.T) {
 			want:  Set{ImageDescriptor: true},
 		},
 		{
+			name:  "homebrew on PATH",
+			probe: fakeHost([]string{"brew"}, nil),
+			want:  Set{Homebrew: true},
+		},
+		{
+			name:  "homebrew at fallback path without brew on PATH",
+			probe: fakeHost(nil, []string{"/home/linuxbrew/.linuxbrew/bin/brew"}),
+			want:  Set{Homebrew: true},
+		},
+		{
 			name:  "every capability present",
 			probe: fakeHost(allBinaries, allAssets),
 			want:  fullSet(),
@@ -162,6 +173,52 @@ func TestDetectWithResolvesEveryCapability(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestProbeFromPresentAndNamesIsTheE2EHostShapeSeam locks the deterministic
+// host-shape seam the screenshot walkthrough uses: ProbeFromPresent builds a
+// Probe from capability values, ProbeFromNames from their string form, and
+// both must resolve exactly the named capabilities through the same path and
+// asset tables DetectWith uses. ProbeFromNames also ignores unknown names,
+// so a typo in CHAIRLIFT_CAPABILITIES never resolves anything production
+// would not. This is the regression test that catches the two helpers
+// drifting apart from production resolution.
+func TestProbeFromPresentAndNamesIsTheE2EHostShapeSeam(t *testing.T) {
+	// A representative Bluefin host shape: flatpak, brew, podman, the bootc
+	// stage script, the sysupdate marker+script, and the image descriptor.
+	want := Set{
+		Flatpak:         true,
+		Homebrew:        true,
+		Podman:          true,
+		BootcStage:      true,
+		Sysupdate:       true,
+		ImageDescriptor: true,
+	}
+
+	present := ProbeFromPresent(Flatpak, Homebrew, Podman, BootcStage, Sysupdate, ImageDescriptor)
+	names := ProbeFromNames("flatpak", "brew", "podman", "bootc-stage", "sysupdate", "image-descriptor")
+
+	for _, probe := range []Probe{present, names} {
+		got := DetectWith(probe)
+		capabilities := providedCapabilities()
+		for _, c := range capabilities {
+			if got.Has(c) != want.Has(c) {
+				t.Errorf("ProbeFromPresent/Names Has(%q) = %v, want %v", c, got.Has(c), want.Has(c))
+			}
+		}
+	}
+
+	// ProbeFromNames ignores unknown and empty names rather than resolving
+	// anything production would not.
+	ignoring := DetectWith(ProbeFromNames("flatpak", "not-a-capability", ""))
+	if !ignoring.Has(Flatpak) {
+		t.Errorf("ProbeFromNames dropped flatpak despite unknown names: %#v", ignoring)
+	}
+	for _, c := range providedCapabilities() {
+		if c != Flatpak && ignoring.Has(c) {
+			t.Errorf("ProbeFromNames resolved unexpected %q: %#v", c, ignoring)
+		}
 	}
 }
 
