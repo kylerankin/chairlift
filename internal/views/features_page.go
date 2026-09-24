@@ -5,6 +5,7 @@ import (
 	"log"
 
 	"github.com/projectbluefin/chairlift/internal/developerfeeds"
+	"github.com/projectbluefin/chairlift/internal/devmenu"
 	"github.com/projectbluefin/chairlift/internal/dryrun"
 	"github.com/projectbluefin/chairlift/internal/gaming"
 	"github.com/projectbluefin/chairlift/internal/imageinfo"
@@ -472,6 +473,15 @@ func (uh *UserHome) onDeveloperToggled(enabled bool, toggle *guardedSwitch, row 
 		defer cancel()
 
 		err := ublue.SetDeveloperMode(ctx, enabled)
+		succeeded := err == nil
+
+		var menuErr error
+		if succeeded {
+			menuErr = devmenu.Apply(ctx, enabled)
+			if menuErr != nil {
+				log.Printf("views: updating custom command menu: %v", menuErr)
+			}
+		}
 
 		dispatched = true
 		sgtk.RunOnMainThread(func() {
@@ -483,8 +493,10 @@ func (uh *UserHome) onDeveloperToggled(enabled bool, toggle *guardedSwitch, row 
 				uh.toastAdder.ShowErrorToast(fmt.Sprintf("Could not change developer tools: %v", err))
 				return
 			}
+			if menuErr != nil {
+				uh.toastAdder.ShowErrorToast(fmt.Sprintf("Custom Command Menu update failed: %v", menuErr))
+			}
 
-			succeeded := err == nil
 			decision := actionmsg.DeveloperMode(dryrun.Enabled(), enabled)
 			toggle.set(decision.Confirm == enabled)
 			if decision.Confirm {
