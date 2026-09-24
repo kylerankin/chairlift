@@ -46,6 +46,7 @@ import (
 	"time"
 
 	"github.com/projectbluefin/chairlift/internal/bootc"
+	"github.com/projectbluefin/chairlift/internal/homebrew"
 	"github.com/projectbluefin/chairlift/internal/imageinfo"
 	"github.com/projectbluefin/chairlift/internal/sysupdate"
 )
@@ -90,7 +91,6 @@ var pathCapabilities = []struct {
 	binary     string
 }{
 	{Flatpak, "flatpak"},
-	{Homebrew, "brew"},
 	{Podman, "podman"},
 	{Distrobox, "distrobox"},
 }
@@ -107,6 +107,12 @@ var assetCapabilities = []struct {
 		return exists(p, sysupdate.MarkerPath) && exists(p, sysupdate.StageScriptPath)
 	}},
 	{ImageDescriptor, func(p Probe) bool { return exists(p, imageinfo.DescriptorPath) }},
+	{Homebrew, func(p Probe) bool {
+		if p.LookPath == nil || p.Stat == nil {
+			return false
+		}
+		return homebrew.ResolveExecutable(p.LookPath, p.Stat) != ""
+	}},
 }
 
 // providedCapabilities returns every capability either probe table can
@@ -334,6 +340,8 @@ func assetPaths(c Capability) []string {
 		return []string{sysupdate.MarkerPath, sysupdate.StageScriptPath}
 	case ImageDescriptor:
 		return []string{imageinfo.DescriptorPath}
+	case Homebrew:
+		return nil
 	default:
 		return nil
 	}
@@ -366,7 +374,8 @@ func ProbeFromPresent(present ...Capability) Probe {
 		presentSet[c] = true
 	}
 
-	paths := make(map[string]Capability, len(pathCapabilities))
+	paths := make(map[string]Capability, len(pathCapabilities)+1)
+	paths["brew"] = Homebrew
 	for _, entry := range pathCapabilities {
 		paths[entry.binary] = entry.capability
 	}

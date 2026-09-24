@@ -48,7 +48,7 @@ var (
 // divergence this function exists to remove. The session-stable answer the UI
 // needs is IsInstalledCached's, which caches the availability verdict rather
 // than the path.
-func ExecutablePath() string {
+func ResolveExecutable(lookPath func(string) (string, error), stat func(string) (os.FileInfo, error)) string {
 	if path, err := lookPath("brew"); err == nil && path != "" {
 		return path
 	}
@@ -56,11 +56,15 @@ func ExecutablePath() string {
 	// The wrapper tests the fallback with `[ -f "$BREW_PATH" ]`, and so does
 	// this: a regular file is what the wrapper would have put on $PATH, so
 	// presence here has to mean the same thing it means there.
-	if info, err := statFile(linuxbrewExecutable); err == nil && info.Mode().IsRegular() {
+	if info, err := stat(linuxbrewExecutable); err == nil && info.Mode().IsRegular() {
 		return linuxbrewExecutable
 	}
 
 	return ""
+}
+
+func ExecutablePath() string {
+	return ResolveExecutable(lookPath, statFile)
 }
 
 // brewExecutable is ExecutablePath with the not-found case kept as the bare
