@@ -53,7 +53,11 @@ so they cost nothing on Snow Linux or any other host.
   through `channels.yml`; see [`channels.example.yml`](channels.example.yml)
 - **Developer Mode**: Join the container, VM, and serial-device groups
   (`docker`, `incus-admin`, `libvirt`, `dialout`), effective at next login.
-  This is group membership, not a rebase to a `-dx` image
+  This is group membership, not a rebase to a `-dx` image. A distribution may
+  also configure it to install the Pulp feed reader and stage a curated list
+  of developer feeds in your home folder once you switch it on — both are off
+  by default, and turning Developer Mode back off never removes the reader, the
+  staged file, or anything you imported from it.
 - **Gaming Mode**: Install Steam, ProtonUp-Qt, Protontricks, MangoHud,
   GOverlay, and Flatseal as user Flatpaks — nothing is layered onto the system
   image, so a system update never has to reconcile it. MangoHud is a Vulkan
