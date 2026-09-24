@@ -80,7 +80,7 @@ func (uh *UserHome) buildFeaturesPage() {
 	// Enhanced Troubleshooting was moved to Help (issue #249), and Local AI
 	// moved to Agents (issue #244), so neither is built here.
 
-	if uh.config.IsGroupEnabled("features_page", "features_group") {
+	if uh.groupEnabled("features_page", "features_group") {
 		// Build the features group (shown if updex is available)
 		uh.featuresGroup = adw.NewPreferencesGroup()
 		uh.featuresGroup.SetTitle("Optional features")
@@ -314,8 +314,8 @@ func (uh *UserHome) onUpdateFeaturesClicked(button *gtk.Button) {
 // release channel and graphics driver live elsewhere: they describe which
 // system this machine runs, where these two are capabilities you switch on.
 func (uh *UserHome) buildBluefinGroups(page *adw.PreferencesPage) {
-	dxEnabled := uh.config.IsGroupEnabled("features_page", "dx_group")
-	gamingEnabled := uh.config.IsGroupEnabled("features_page", "gaming_group")
+	dxEnabled := uh.groupEnabled("features_page", "dx_group")
+	gamingEnabled := uh.groupEnabled("features_page", "gaming_group")
 
 	if !dxEnabled && !gamingEnabled {
 		return

@@ -1,6 +1,6 @@
 # 0013 — Capability-driven visibility as a floor
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-09-20
 
 ## Context

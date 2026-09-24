@@ -32,13 +32,13 @@ func (uh *UserHome) buildLiveryPage() {
 	}
 	page.SetDescription(pageview.LiveryPageDescription)
 
-	if uh.config.IsGroupEnabled("livery_page", "livery_app_grid_group") {
+	if uh.groupEnabled("livery_page", "livery_app_grid_group") {
 		uh.buildLiveryAppGridGroup(page)
 	}
-	if uh.config.IsGroupEnabled("livery_page", "livery_foundation_group") {
+	if uh.groupEnabled("livery_page", "livery_foundation_group") {
 		uh.buildLiveryPanelGroup(page)
 	}
-	if uh.config.IsGroupEnabled("livery_page", "livery_dock_group") {
+	if uh.groupEnabled("livery_page", "livery_dock_group") {
 		uh.buildLiveryDockGroup(page)
 	}
 

@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/projectbluefin/chairlift/internal/capability"
 )
 
 func TestResolveCoversEveryNavigationMutation(t *testing.T) {
@@ -206,7 +208,7 @@ func TestPageMetadataMatchesViewBuilders(t *testing.T) {
 	}
 	viewsDir := filepath.Join(filepath.Dir(filename), "..", "views")
 	groupCall := regexp.MustCompile(
-		`IsGroupEnabled\("([^"]+)",\s*"([^"]+)"\)`,
+		`uh.groupEnabled\("([^"]+)",\s*"([^"]+)"\)`,
 	)
 
 	for _, item := range Items() {
@@ -262,6 +264,39 @@ func TestVisiblePagesAlwaysKeepHelp(t *testing.T) {
 	if got[0].Accelerator != "<Alt>1" || got[0].Display != "Alt+1" {
 		t.Fatalf("Help shortcut = %q/%q, want compacted Alt+1", got[0].Accelerator, got[0].Display)
 	}
+}
+
+// The capability floor reaches the sidebar. VisibleItems is driven by the one
+// composed predicate the window builds from config plus the host shape, so a
+// page whose only group's backing tool is absent is hidden even when the
+// administrator's configuration enables it. Without the floor a podman-only
+// page would leak onto a host that cannot run it. See chairlift#205.
+func TestVisibleItemsAppliesTheCapabilityFloor(t *testing.T) {
+	alwaysEnabled := func(page, group string) bool { return true }
+
+	t.Run("agents hidden when Podman absent", func(t *testing.T) {
+		predicate := capability.Compose(alwaysEnabled, capability.Set{capability.Flatpak: true})
+		if got := VisibleItems(predicate); containsPage(got, "agents") {
+			t.Errorf("VisibleItems showed agents_page on a host without Podman: %#v", got)
+		}
+	})
+
+	t.Run("agents shown when Podman present", func(t *testing.T) {
+		predicate := capability.Compose(
+			alwaysEnabled,
+			capability.Set{capability.Flatpak: true, capability.Podman: true},
+		)
+		if got := VisibleItems(predicate); !containsPage(got, "agents") {
+			t.Errorf("VisibleItems omitted agents_page with Podman present: %#v", got)
+		}
+	})
+
+	t.Run("help stays visible regardless of capability", func(t *testing.T) {
+		got := VisibleItems(capability.Compose(alwaysEnabled, capability.Set{}))
+		if !containsPage(got, "help") {
+			t.Errorf("VisibleItems omitted help on an empty host: %#v", got)
+		}
+	})
 }
 
 func TestVisiblePagesCompactShortcutsAndTransitions(t *testing.T) {
@@ -333,7 +368,9 @@ func TestWindowAndAppUseCanonicalNavigation(t *testing.T) {
 	checks := map[string][]string{
 		filepath.Join(repoRoot, "internal", "window", "window.go"): {
 			`w.navigateToPage(name)`,
-			`w.navItems = navigation.VisibleItems(w.config.IsGroupEnabled)`,
+			`w.capabilities = capability.Detect()`,
+			`w.navItems = navigation.VisibleItems(w.effectiveEnabled)`,
+			`func (w *Window) effectiveEnabled(page, group string) bool {`,
 			`transition, ok := navigation.Resolve(pageName, w.navItems, func(name string) bool {`,
 			`w.sidebarList.GetRowAtIndex(int32(transition.SelectedIndex))`,
 			`w.contentStack.SetVisibleChildName(transition.VisibleChild)`,

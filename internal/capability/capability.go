@@ -39,9 +39,11 @@
 package capability
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"sort"
+	"time"
 
 	"github.com/projectbluefin/chairlift/internal/bootc"
 	"github.com/projectbluefin/chairlift/internal/imageinfo"
@@ -319,6 +321,93 @@ func Prerequisites() []Prerequisite {
 		return result[i].Group < result[j].Group
 	})
 	return result
+}
+
+// assetPaths returns the fixed paths one asset capability's presence test
+// reads. It mirrors assetCapabilities so an external host-shape stub can
+// answer os.Stat for the same paths production inspects.
+func assetPaths(c Capability) []string {
+	switch c {
+	case BootcStage:
+		return []string{bootc.StageScriptPath}
+	case Sysupdate:
+		return []string{sysupdate.MarkerPath, sysupdate.StageScriptPath}
+	case ImageDescriptor:
+		return []string{imageinfo.DescriptorPath}
+	default:
+		return nil
+	}
+}
+
+// statFileInfo is the os.FileInfo returned by a stubbed Stat. A capability
+// never inspects the file it reports, so the zero-valued metadata is all the
+// resolution needs.
+type statFileInfo struct{ name string }
+
+func (s statFileInfo) Name() string { return s.name }
+func (s statFileInfo) Size() int64  { return 0 }
+func (s statFileInfo) IsDir() bool  { return false }
+func (s statFileInfo) ModTime() time.Time {
+	return time.Time{}
+}
+func (s statFileInfo) Mode() os.FileMode { return 0 }
+func (s statFileInfo) Sys() any          { return nil }
+
+// ProbeFromPresent builds a Probe that reports exactly the named capabilities
+// as present. It is the deterministic host-shape seam the screenshot
+// walkthrough uses on a headless runner that ships none of these tools: the
+// chairlift_e2e build substitutes one before the window resolves its
+// capabilities, so the walkthrough renders a full Bluefin host rather than an
+// empty one. It walks the same path and asset tables DetectWith does, so the
+// stub can never resolve a capability that production would not.
+func ProbeFromPresent(present ...Capability) Probe {
+	presentSet := make(map[Capability]bool, len(present))
+	for _, c := range present {
+		presentSet[c] = true
+	}
+
+	paths := make(map[string]Capability, len(pathCapabilities))
+	for _, entry := range pathCapabilities {
+		paths[entry.binary] = entry.capability
+	}
+	for _, entry := range assetCapabilities {
+		for _, path := range assetPaths(entry.capability) {
+			paths[path] = entry.capability
+		}
+	}
+
+	return Probe{
+		LookPath: func(name string) (string, error) {
+			if cap, ok := paths[name]; ok && presentSet[cap] {
+				return name, nil
+			}
+			return "", fmt.Errorf("%q: not found", name)
+		},
+		Stat: func(name string) (os.FileInfo, error) {
+			if cap, ok := paths[name]; ok && presentSet[cap] {
+				return statFileInfo{name: name}, nil
+			}
+			return nil, fmt.Errorf("%q: no such file", name)
+		},
+	}
+}
+
+// ProbeFromNames builds a Probe from capability *names* — the string form of a
+// Capability constant, e.g. "flatpak", "brew", "podman", "bootc-stage",
+// "sysupdate", "image-descriptor". It is the env-driven host-shape seam the
+// screenshot walkthrough uses: the chairlift_e2e build splits a comma-separated
+// environment variable and passes the words here. Names that are not a
+// classified capability are ignored, so a typo or an unknown tool never
+// resolves anything.
+func ProbeFromNames(names ...string) Probe {
+	present := make([]Capability, 0, len(names))
+	for _, name := range names {
+		if name == "" {
+			continue
+		}
+		present = append(present, Capability(name))
+	}
+	return ProbeFromPresent(present...)
 }
 
 // Detect resolves this host's capability set through the package probe. Call

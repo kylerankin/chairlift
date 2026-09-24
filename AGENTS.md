@@ -232,11 +232,12 @@ An agent must not break these:
   The E2E workflows also pass `CHAIRLIFT_SCHEMA_DIR=build/schemas` to the
   capture script; without it, the real Livery page shows a missing-schema
   toast that obscures screenshots even though every page capture test passes.
-- **The `chairlift_e2e` stub surface is capped and centralized.** Three
+- **The `chairlift_e2e` stub surface is capped and centralized.** Four
   behaviors are stubbed so the screenshot walkthrough can render features a CI
   runner cannot have: the image descriptor (`CHAIRLIFT_IMAGE_INFO`), the
-  unattended-update timer state (`CHAIRLIFT_AUTO_UPDATES`), and the graphics
-  hardware (`CHAIRLIFT_GPU_VENDORS`). Every stub must be
+  unattended-update timer state (`CHAIRLIFT_AUTO_UPDATES`), the graphics
+  hardware (`CHAIRLIFT_GPU_VENDORS`), and the host capability set that floors
+  visibility (`CHAIRLIFT_CAPABILITIES`). Every stub must be
   read in `internal/app/imageinfo_override_e2e.go` and nowhere else, behind
   the `chairlift_e2e` tag that only `make e2e` sets, with a no-op counterpart
   in `imageinfo_override.go`.

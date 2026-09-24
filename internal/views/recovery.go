@@ -91,8 +91,8 @@ func (uh *UserHome) buildRecoveryPage() {
 	// Roll Back / Previous Version: gated by the OS provider group, built
 	// hidden, revealed asynchronously once a previous deployment is
 	// confirmed to exist.
-	if uh.config.IsGroupEnabled("updates_page", "bootc_updates_group") ||
-		uh.config.IsGroupEnabled("updates_page", "sysupdate_updates_group") {
+	if uh.groupEnabled("updates_page", "bootc_updates_group") ||
+		uh.groupEnabled("updates_page", "sysupdate_updates_group") {
 		uh.buildRecoveryRollbackGroup(page)
 	}
 
@@ -201,9 +201,9 @@ func (uh *UserHome) loadSysupdateRollbackStatus() {
 // whether to show its Recovery entry, so the entry's gate lives in one place
 // and does not reach across pages from system_page.go.
 func (uh *UserHome) recoveryProvidersAvailable() bool {
-	return uh.config.IsGroupEnabled("maintenance_page", "reset_group") ||
-		uh.config.IsGroupEnabled("updates_page", "bootc_updates_group") ||
-		uh.config.IsGroupEnabled("updates_page", "sysupdate_updates_group")
+	return uh.groupEnabled("maintenance_page", "reset_group") ||
+		uh.groupEnabled("updates_page", "bootc_updates_group") ||
+		uh.groupEnabled("updates_page", "sysupdate_updates_group")
 }
 
 // onBootcRollbackClicked stages a rollback to the previous deployment. It

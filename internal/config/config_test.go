@@ -526,19 +526,22 @@ func groupKeys(page PageConfig) []string {
 	return keys
 }
 
-// isGroupEnabledCallPattern matches config.IsGroupEnabled("updates_page",
-// "<name>") calls in Go source text, capturing the group-name argument.
-var isGroupEnabledCallPattern = regexp.MustCompile(`IsGroupEnabled\(\s*"updates_page"\s*,\s*"([^"]+)"\s*\)`)
+// groupEnabledCallPattern matches groupEnabled("updates_page", "<name>")
+// calls in Go source text, capturing the group-name argument. The view now
+// routes through the composed capability floor (uh.groupEnabled) rather than
+// config.IsGroupEnabled directly, so the lock matches that canonical
+// predicate instead of the old config call.
+var groupEnabledCallPattern = regexp.MustCompile(`groupEnabled\(\s*"updates_page"\s*,\s*"([^"]+)"\s*\)`)
 
 // TestUpdatesPageDefaultGroupsHaveBuilders reads internal/views/updates_page.go
 // as plain text (internal/config must never import internal/views or the
 // GTK bindings package, directly or transitively, per
 // docs/agents/skills/gtk-headless-tests.md) and asserts every group
 // defaultConfig() defines for updates_page is gated by a real
-// config.IsGroupEnabled("updates_page", ...) call in that view file. This is
-// the regression test that would have caught a group being
+// groupEnabled("updates_page", ...) call in that view file. This is the
+// regression test that would have caught a group being
 // declared/defaulted/shipped/documented with no view ever checking it: a
-// group with no matching IsGroupEnabled call fails this test.
+// group with no matching groupEnabled call fails this test.
 func TestUpdatesPageDefaultGroupsHaveBuilders(t *testing.T) {
 	path := filepath.Join(repoRoot(), "internal", "views", "updates_page.go")
 	src, err := os.ReadFile(path)
@@ -546,9 +549,9 @@ func TestUpdatesPageDefaultGroupsHaveBuilders(t *testing.T) {
 		t.Fatalf("reading %s: %v", path, err)
 	}
 
-	matches := isGroupEnabledCallPattern.FindAllStringSubmatch(string(src), -1)
+	matches := groupEnabledCallPattern.FindAllStringSubmatch(string(src), -1)
 	if len(matches) == 0 {
-		t.Fatalf("found zero IsGroupEnabled(\"updates_page\", ...) calls in %s; regex may no longer match the source", path)
+		t.Fatalf("found zero groupEnabled(\"updates_page\", ...) calls in %s; regex may no longer match the source", path)
 	}
 
 	gated := make(map[string]bool, len(matches))
@@ -558,7 +561,7 @@ func TestUpdatesPageDefaultGroupsHaveBuilders(t *testing.T) {
 
 	for name := range defaultConfig().UpdatesPage {
 		if !gated[name] {
-			t.Errorf("defaultConfig().UpdatesPage group %q has no matching config.IsGroupEnabled(\"updates_page\", ...) call in %s", name, path)
+			t.Errorf("defaultConfig().UpdatesPage group %q has no matching groupEnabled(\"updates_page\", ...) call in %s", name, path)
 		}
 	}
 }

@@ -97,7 +97,8 @@ func TestDescriptorOverrideStaysBehindTheE2EBuildTag(t *testing.T) {
 	const envVar = "CHAIRLIFT_IMAGE_INFO"
 	const autoUpdatesEnvVar = "CHAIRLIFT_AUTO_UPDATES"
 	const gpuEnvVar = "CHAIRLIFT_GPU_VENDORS"
-	stubbed := []string{envVar, autoUpdatesEnvVar, gpuEnvVar}
+	const capabilitiesEnvVar = "CHAIRLIFT_CAPABILITIES"
+	stubbed := []string{envVar, autoUpdatesEnvVar, gpuEnvVar, capabilitiesEnvVar}
 
 	taggedOverrideRel := filepath.Join("internal", "app", "imageinfo_override_e2e.go")
 	overrideSource := readRepoFile(t, taggedOverrideRel)
@@ -256,7 +257,7 @@ func TestDescriptorOverrideStaysBehindTheE2EBuildTag(t *testing.T) {
 			t.Errorf("AGENTS.md's stub-surface rule does not name %s", name)
 		}
 	}
-	for _, count := range []string{"Two\n  behaviors", "Four\n  behaviors"} {
+	for _, count := range []string{"Two\n  behaviors", "Three\n  behaviors"} {
 		if strings.Contains(agents, count) {
 			t.Errorf("AGENTS.md's stub-surface rule says %q but %d behaviors are stubbed", count, len(stubbed))
 		}

@@ -9,6 +9,7 @@ import (
 	"unsafe"
 
 	"github.com/projectbluefin/chairlift/internal/branding"
+	"github.com/projectbluefin/chairlift/internal/capability"
 	"github.com/projectbluefin/chairlift/internal/config"
 	"github.com/projectbluefin/chairlift/internal/dryrun"
 	"github.com/projectbluefin/chairlift/internal/firstrun"
@@ -50,15 +51,16 @@ type Window struct {
 	contentPage  *adw.NavigationPage // Content navigation page for dynamic title
 	toasts       *adw.ToastOverlay
 
-	pages       map[string]*adw.ToolbarView
-	navRows     map[string]*adw.ActionRow // Store references to nav rows for badges
-	config      *config.Config
-	configError *config.LoadError
-	views       *views.UserHome
-	updateShell *views.UpdateShell
-	firstRun    *views.FirstRunAssistant
-	updateBadge *gtk.Label // Noninteractive badge for the updates count
-	navItems    []navigation.Item
+	pages        map[string]*adw.ToolbarView
+	navRows      map[string]*adw.ActionRow // Store references to nav rows for badges
+	config       *config.Config
+	capabilities capability.Set // Resolved once; the policy floor for every entry path
+	configError  *config.LoadError
+	views        *views.UserHome
+	updateShell  *views.UpdateShell
+	firstRun     *views.FirstRunAssistant
+	updateBadge  *gtk.Label // Noninteractive badge for the updates count
+	navItems     []navigation.Item
 }
 
 func init() {
@@ -116,14 +118,32 @@ func New(app adw.Application) *Window {
 	return (*Window)(windowRegistry.Get(obj.GoPointer()))
 }
 
+// effectiveEnabled is the one policy floor shared by every entry path: the
+// navigation sidebar, the view builders, the updateflow source map, and the
+// first-run assistant all route their group predicate through it. A group is
+// enabled only when its configuration enables it AND the host supports it;
+// the capability set was resolved once during window construction and is
+// immutable for the session. A nil capability set composes to false
+// everywhere, matching the repository's fail-closed rule. See internal/
+// capability.
+func (w *Window) effectiveEnabled(page, group string) bool {
+	return capability.Compose(w.config.IsGroupEnabled, w.capabilities)(page, group)
+}
+
 // buildUI constructs the window UI
 func (w *Window) buildUI() {
 	start := time.Now()
 
-	w.navItems = navigation.VisibleItems(w.config.IsGroupEnabled)
+	// Resolve the capability set once, before any surface reads it. Detection
+	// is cheap (LookPath/Stat/env) and safe on the main thread; the result is
+	// immutable for the session and is the single policy floor every entry
+	// path routes through. See internal/capability.
+	w.capabilities = capability.Detect()
+
+	w.navItems = navigation.VisibleItems(w.effectiveEnabled)
 
 	// Create views manager
-	w.views = views.New(w.config, w)
+	w.views = views.New(w.config, w.capabilities, w)
 	// Wire the Recovery detail navigation before any page can open it. The
 	// Maintenance page opens Recovery; Recovery's back button returns to Maintenance.
 	w.views.SetOpenRecoveryDetail(w.showRecoveryDetail)
@@ -144,10 +164,10 @@ func (w *Window) buildUI() {
 		store.Values,
 		func() map[updateflow.SourceID]bool {
 			return map[updateflow.SourceID]bool{
-				updateflow.OperatingSystem:  w.config.IsGroupEnabled("updates_page", "bootc_updates_group") || w.config.IsGroupEnabled("updates_page", "sysupdate_updates_group"),
-				updateflow.Applications:     w.config.IsGroupEnabled("updates_page", "flatpak_updates_group"),
-				updateflow.DeveloperTools:   w.config.IsGroupEnabled("updates_page", "brew_updates_group"),
-				updateflow.SystemComponents: w.config.IsGroupEnabled("features_page", "features_group"),
+				updateflow.OperatingSystem:  w.effectiveEnabled("updates_page", "bootc_updates_group") || w.effectiveEnabled("updates_page", "sysupdate_updates_group"),
+				updateflow.Applications:     w.effectiveEnabled("updates_page", "flatpak_updates_group"),
+				updateflow.DeveloperTools:   w.effectiveEnabled("updates_page", "brew_updates_group"),
+				updateflow.SystemComponents: w.effectiveEnabled("features_page", "features_group"),
 			}
 		},
 		w,
@@ -635,7 +655,7 @@ func (w *Window) SetUpdateBadge(count int) {
 // PresentFirstRun opens the first-run onboarding assistant dialog.
 func (w *Window) PresentFirstRun() {
 	if w.firstRun == nil {
-		w.firstRun = views.NewFirstRunAssistant(w.config.IsGroupEnabled, w)
+		w.firstRun = views.NewFirstRunAssistant(w.effectiveEnabled, w)
 	}
 	w.firstRun.Present(&w.Widget)
 }

@@ -43,19 +43,19 @@ func (uh *UserHome) buildUpdatesPage() {
 	// Whether this machine updates itself on a schedule. The act of
 	// updating now belongs to the status-first shell above this page
 	// (internal/updateflow); this is the preference about the future.
-	if uh.config.IsGroupEnabled("updates_page", "automatic_updates_group") {
+	if uh.groupEnabled("updates_page", "automatic_updates_group") {
 		uh.buildAutomaticUpdatesGroup(page)
 	}
 
 	// What this machine is running, in words. Built hidden and revealed
 	// asynchronously, because reading it requires an exec.
-	if uh.config.IsGroupEnabled("updates_page", "bootc_status_group") {
+	if uh.groupEnabled("updates_page", "bootc_status_group") {
 		uh.buildSystemVersionGroup(page)
 	}
 
 	// bootc system updates group - built hidden, shown asynchronously on
 	// bootc hosts that ship the update-stage script.
-	if uh.config.IsGroupEnabled("updates_page", "bootc_updates_group") {
+	if uh.groupEnabled("updates_page", "bootc_updates_group") {
 		group := adw.NewPreferencesGroup()
 		group.SetTitle("Operating system")
 		group.SetDescription("New versions download in the background and install when you restart.")
@@ -89,7 +89,7 @@ func (uh *UserHome) buildUpdatesPage() {
 	// requires the bootc binary (absent on native A/B images) and this gate
 	// requires the native-ab marker (absent on bootc images), so at most one
 	// operating-system group ever becomes visible.
-	if uh.config.IsGroupEnabled("updates_page", "sysupdate_updates_group") {
+	if uh.groupEnabled("updates_page", "sysupdate_updates_group") {
 		group := adw.NewPreferencesGroup()
 		group.SetTitle("Operating system")
 		group.SetDescription("New versions download in the background and install when you restart.")
@@ -115,7 +115,7 @@ func (uh *UserHome) buildUpdatesPage() {
 	}
 
 	// Apps
-	if uh.config.IsGroupEnabled("updates_page", "flatpak_updates_group") {
+	if uh.groupEnabled("updates_page", "flatpak_updates_group") {
 		group := adw.NewPreferencesGroup()
 		group.SetTitle("Apps")
 		group.SetDescription("Updates for the apps installed on this computer.")
@@ -132,7 +132,7 @@ func (uh *UserHome) buildUpdatesPage() {
 	}
 
 	// Developer tools
-	if uh.config.IsGroupEnabled("updates_page", "brew_updates_group") {
+	if uh.groupEnabled("updates_page", "brew_updates_group") {
 		group := adw.NewPreferencesGroup()
 		group.SetTitle("Developer tools")
 		group.SetDescription("Command-line tools you installed with Homebrew.")
@@ -173,7 +173,7 @@ func (uh *UserHome) buildUpdatesPage() {
 
 	// Sources whose updates Homebrew has paused - hidden unless there is
 	// something a person can act on (Homebrew 6 tap trust).
-	if uh.config.IsGroupEnabled("updates_page", "brew_trust_group") {
+	if uh.groupEnabled("updates_page", "brew_trust_group") {
 		uh.brewTrustGroup = adw.NewPreferencesGroup()
 		uh.brewTrustGroup.SetTitle("Unverified sources")
 		uh.brewTrustGroup.SetDescription("Some software came from a source you have not said you trust, so it stays at the version you have. Trusting a source lets its software update again.")
@@ -187,7 +187,7 @@ func (uh *UserHome) buildUpdatesPage() {
 	// reaches them deliberately, never on the way to something else. Hidden
 	// entirely on a host with no image descriptor, like every other
 	// Bluefin-family group.
-	if uh.config.IsGroupEnabled("updates_page", "channel_group") {
+	if uh.groupEnabled("updates_page", "channel_group") {
 		uh.buildImageIdentityGroup(page)
 	}
 }

@@ -34,7 +34,7 @@ func (uh *UserHome) buildApplicationsPage() {
 	// App collections group — the page's primary primitive: a collection
 	// installs a curated set in one action, so it leads the page ahead of the
 	// individual-package and launcher groups below.
-	if uh.config.IsGroupEnabled("applications_page", "brew_bundles_group") {
+	if uh.groupEnabled("applications_page", "brew_bundles_group") {
 		group := adw.NewPreferencesGroup()
 		group.SetTitle("App collections")
 		group.SetDescription("Looking for app collections…")
@@ -50,7 +50,7 @@ func (uh *UserHome) buildApplicationsPage() {
 	}
 
 	// Installed Applications group
-	if uh.config.IsGroupEnabled("applications_page", "applications_installed_group") {
+	if uh.groupEnabled("applications_page", "applications_installed_group") {
 		group := adw.NewPreferencesGroup()
 		group.SetTitle("Your apps")
 		group.SetDescription("Browse, install, and remove applications.")
@@ -79,7 +79,7 @@ func (uh *UserHome) buildApplicationsPage() {
 	}
 
 	// Flatpak User Applications group
-	if uh.config.IsGroupEnabled("applications_page", "flatpak_user_group") {
+	if uh.groupEnabled("applications_page", "flatpak_user_group") {
 		group := adw.NewPreferencesGroup()
 		group.SetTitle("Apps installed for you")
 		group.SetDescription("Available only to your account.")
@@ -93,7 +93,7 @@ func (uh *UserHome) buildApplicationsPage() {
 	}
 
 	// Flatpak System Applications group
-	if uh.config.IsGroupEnabled("applications_page", "flatpak_system_group") {
+	if uh.groupEnabled("applications_page", "flatpak_system_group") {
 		group := adw.NewPreferencesGroup()
 		group.SetTitle("Apps installed for everyone")
 		group.SetDescription("Available to every account on this system.")
@@ -107,13 +107,13 @@ func (uh *UserHome) buildApplicationsPage() {
 	}
 
 	// Load flatpak applications if either group is enabled
-	if uh.config.IsGroupEnabled("applications_page", "flatpak_user_group") ||
-		uh.config.IsGroupEnabled("applications_page", "flatpak_system_group") {
+	if uh.groupEnabled("applications_page", "flatpak_user_group") ||
+		uh.groupEnabled("applications_page", "flatpak_system_group") {
 		go uh.loadFlatpakApplications()
 	}
 
 	// Homebrew group
-	if uh.config.IsGroupEnabled("applications_page", "brew_group") {
+	if uh.groupEnabled("applications_page", "brew_group") {
 		group := adw.NewPreferencesGroup()
 		group.SetTitle("Packages from Homebrew")
 		group.SetDescription("Apps and tools installed with Homebrew, a third-party source.")
@@ -153,7 +153,7 @@ func (uh *UserHome) buildApplicationsPage() {
 	}
 
 	// Homebrew search group
-	if uh.config.IsGroupEnabled("applications_page", "brew_search_group") {
+	if uh.groupEnabled("applications_page", "brew_search_group") {
 		group := adw.NewPreferencesGroup()
 		group.SetTitle("Find more apps and tools")
 		group.SetDescription("Searches Homebrew, a third-party source. Anything you install from here comes from its publisher, not from this system.")
