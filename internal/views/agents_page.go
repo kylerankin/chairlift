@@ -2,14 +2,14 @@ package views
 
 import (
 	"context"
-	"log"
-	"runtime"
-	"time"
-
+	"fmt"
 	"github.com/projectbluefin/chairlift/internal/aistack"
 	"github.com/projectbluefin/chairlift/internal/dryrun"
 	"github.com/projectbluefin/chairlift/internal/views/actionmsg"
 	"github.com/projectbluefin/chairlift/internal/views/pageview"
+	"log"
+	"runtime"
+	"time"
 
 	sgtk "github.com/frostyard/snowkit/gtk"
 
@@ -74,6 +74,26 @@ func (uh *UserHome) buildAgentModeGroup(page *adw.PreferencesPage) {
 	row.SetActivatableWidget(&toggle.widget.Widget)
 	group.Add(&row.Widget)
 
+	modelRow := adw.NewActionRow()
+	modelRow.SetTitle(pageview.AgentModeActiveModelTitle())
+	modelRow.SetSubtitle(pageview.AgentModeActiveModelSubtitle(""))
+	uh.agentModelRow = modelRow
+	group.Add(&modelRow.Widget)
+
+	presetRow := adw.NewActionRow()
+	presetRow.SetTitle(pageview.AgentModePresetsTitle())
+	presetRow.SetSubtitle(pageview.AgentModePresetsSubtitle())
+	switchBtn := gtk.NewButtonWithLabel(pageview.AgentModeSwitchPresetLabel())
+	switchBtn.SetValign(gtk.AlignCenterValue)
+	switchBtn.AddCssClass("suggested-action")
+	switchClicked := func(_ gtk.Button) {
+		uh.presentModelPresetChooser()
+	}
+	switchBtn.ConnectClicked(&switchClicked)
+	presetRow.AddSuffix(&switchBtn.Widget)
+	uh.agentPresetRow = presetRow
+	group.Add(&presetRow.Widget)
+
 	details := adw.NewExpanderRow()
 	details.SetTitle(pageview.AgentModeDetailsTitle())
 	for _, detail := range pageview.AgentModeDetails(jan) {
@@ -103,13 +123,141 @@ func (uh *UserHome) buildAgentModeGroup(page *adw.PreferencesPage) {
 	}
 }
 
-// showAgentModeState records the last known state and renders it. Main
-// thread only.
 func (uh *UserHome) showAgentModeState(state aistack.State) {
 	uh.agentModeState = state
 	if uh.agentModeRow != nil {
 		uh.agentModeRow.SetSubtitle(pageview.AgentModeSubtitle(state))
 	}
+	running := state == aistack.StateReady
+	if uh.agentModelRow != nil {
+		uh.agentModelRow.SetVisible(running)
+		// The row shows the model the server is actually serving, read from
+		// the configured alias, not the catalog default. Read off the main
+		// thread: it shells out to llmman.
+		if running {
+			go func() {
+				ctx, cancel := aistack.DefaultContext()
+				defer cancel()
+				modelRef, err := aistack.ReadActiveModel(ctx)
+				if err != nil {
+					return
+				}
+				sgtk.RunOnMainThread(func() {
+					if uh.agentModelRow != nil {
+						uh.agentModelRow.SetSubtitle(pageview.AgentModeActiveModelSubtitle(modelRef))
+					}
+				})
+			}()
+		}
+	}
+	if uh.agentPresetRow != nil {
+		uh.agentPresetRow.SetVisible(running)
+	}
+}
+
+func (uh *UserHome) presentModelPresetChooser() {
+	if !uh.agentPresetGate.TryStart() {
+		return
+	}
+
+	dialog := adw.NewAlertDialog(
+		"Switch Model Preset",
+		"Select a recommended model family. The model will be verified against system memory and downloaded via llmman.",
+	)
+	dialog.AddResponse("cancel", "Cancel")
+	for _, fam := range aistack.Families() {
+		dialog.AddResponse(string(fam), fam.DisplayName())
+	}
+
+	responseCb := func(_ adw.AlertDialog, response string) {
+		// Reset only for the non-worker path: cancel, or any response that is
+		// not a family. A family response hands the gate to the worker, whose
+		// defer owns the reset once a pull actually starts, so a second preset
+		// cannot begin while the first is still pulling.
+		if response == "cancel" {
+			uh.agentPresetGate.Reset()
+			return
+		}
+		fam := aistack.Family(response)
+		go uh.applyModelFamilyPreset(fam)
+	}
+	dialog.ConnectResponse(&responseCb)
+	if uh.agentsPrefsPage != nil {
+		dialog.Present(&uh.agentsPrefsPage.Widget)
+	}
+}
+
+func (uh *UserHome) applyModelFamilyPreset(fam aistack.Family) {
+	// The worker owns the preset gate from here until it returns, so a
+	// second preset cannot start while this one is still pulling.
+	defer uh.agentPresetGate.Reset()
+
+	ctx, cancel := aistack.DefaultContext()
+	defer cancel()
+
+	sgtk.RunOnMainThread(func() {
+		if uh.agentModelRow != nil {
+			uh.agentModelRow.SetSubtitle(fmt.Sprintf("Switching to %s…", fam.DisplayName()))
+		}
+	})
+
+	// Get node status for memory fitting. Without the memory we cannot fit a
+	// model to the machine, so a failure to reach the server aborts rather
+	// than silently picking the largest model.
+	status, err := aistack.FetchNodeStatus(ctx)
+	if err != nil {
+		log.Printf("views: fetch node status failed: %v", err)
+		sgtk.RunOnMainThread(func() {
+			uh.toastAdder.ShowErrorToast("Could not reach the model server to check memory")
+		})
+		return
+	}
+	candidate, err := aistack.ResolveCandidate(ctx, fam, status.Memory, aistack.DefaultFetch)
+	if err != nil {
+		log.Printf("views: resolve candidate failed: %v", err)
+		sgtk.RunOnMainThread(func() {
+			uh.toastAdder.ShowErrorToast(fmt.Sprintf("Could not find a matching model for %s", fam.DisplayName()))
+		})
+		return
+	}
+	modelRef := candidate.ModelRef()
+	dryRun := dryrun.Enabled()
+	if dryRun {
+		log.Printf("[DRY-RUN] would configure alias %s to %s and pull", aistack.ActiveModelAlias, modelRef)
+		sgtk.RunOnMainThread(func() {
+			if uh.agentModelRow != nil {
+				uh.agentModelRow.SetSubtitle(pageview.AgentModeActiveModelSubtitle(modelRef))
+			}
+			uh.toastAdder.ShowToast(fmt.Sprintf("[DRY-RUN] Would switch to %s", modelRef))
+		})
+		return
+	}
+
+	// Pull first, then set the alias. If the pull fails the alias is left
+	// untouched, so Agent Mode keeps serving the previously working model
+	// instead of pointing at something that is not there.
+	if err := aistack.PullModel(ctx, modelRef); err != nil {
+		log.Printf("views: pull model failed: %v", err)
+		sgtk.RunOnMainThread(func() {
+			uh.toastAdder.ShowErrorToast(fmt.Sprintf("Failed to pull model %s", modelRef))
+		})
+		return
+	}
+
+	if err := aistack.ConfigureActiveModel(ctx, modelRef); err != nil {
+		log.Printf("views: configure alias failed: %v", err)
+		sgtk.RunOnMainThread(func() {
+			uh.toastAdder.ShowErrorToast("Could not configure active model alias")
+		})
+		return
+	}
+
+	sgtk.RunOnMainThread(func() {
+		if uh.agentModelRow != nil {
+			uh.agentModelRow.SetSubtitle(pageview.AgentModeActiveModelSubtitle(modelRef))
+		}
+		uh.toastAdder.ShowToast(fmt.Sprintf("Active model switched to %s", fam.DisplayName()))
+	})
 }
 
 // onAgentModeToggled sets Agent Mode up or tears it down off the main thread.
