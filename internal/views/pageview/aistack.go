@@ -72,6 +72,126 @@ func AgentModeDetailsTitle() string {
 	return "Details"
 }
 
+// PeersGroupTitle is the peer-offload section's heading. It is deliberately
+// not "Cluster" or "Nodes": this machine only ever asks another one for
+// help, and is never made reachable itself.
+func PeersGroupTitle() string {
+	return "Use another machine"
+}
+
+// PeersGroupDescription states the one-way nature of the feature up front,
+// including that the remote side needs its own separate setup.
+func PeersGroupDescription() string {
+	return "Send some requests, and their responses, to an llmman service on another machine you already set up. " +
+		"This computer is never made reachable by anyone else, and that other machine must " +
+		"separately turn on a non-loopback, authenticated llmman service and open its own firewall. " +
+		"A plain http:// address sends prompts, responses, and the peer key to that machine unencrypted; " +
+		"use https:// if the other machine supports it."
+}
+
+// PeersAddRowTitle is the action row that opens the add-peer dialog.
+func PeersAddRowTitle() string {
+	return "Add a peer…"
+}
+
+// PeersEmptyRowTitle is shown when no peer is configured yet.
+func PeersEmptyRowTitle() string {
+	return "No peers configured"
+}
+
+// PeersAPIKeyRowTitle labels the shared credential field, sent to every
+// authenticated peer. It is never displayed once entered.
+func PeersAPIKeyRowTitle() string {
+	return "Peer key (if the other machine requires one)"
+}
+
+// PeerAddDialogTitle is the add-peer dialog's heading.
+func PeerAddDialogTitle() string {
+	return "Add a peer"
+}
+
+// PeerAddDialogBody explains the address grammar accepted.
+func PeerAddDialogBody() string {
+	return "Enter the other machine's address, such as 10.0.0.5, spark.local:17434, or https://spark.local."
+}
+
+// PeerAddDialogPlaceholder is the entry's placeholder text.
+func PeerAddDialogPlaceholder() string {
+	return "host or host:port"
+}
+
+// PeerRemoveConfirmTitle confirms removing a configured peer.
+func PeerRemoveConfirmTitle(address string) string {
+	return "Remove " + address + "?"
+}
+
+// PeerRemoveConfirmBody explains that removal only stops offload, never
+// touches the remote machine.
+func PeerRemoveConfirmBody() string {
+	return "This computer stops sending it requests. Nothing changes on the other machine."
+}
+
+// PeerDisabledSubtitle is shown for a disabled peer, which is never probed:
+// llmman does not currently route requests to it, so a status check would
+// only send its address and the shared key over the network for nothing.
+func PeerDisabledSubtitle() string {
+	return "Disabled — not checked"
+}
+
+// PeerStatusSubtitle renders one peer's probed status line. A peer that has
+// never been probed yet reads as checking, never as unreachable.
+func PeerStatusSubtitle(probed bool, status aistack.PeerStatus) string {
+	if !probed {
+		return "Checking…"
+	}
+	if status.Unauthorized {
+		return "Rejected the configured key"
+	}
+	if !status.Reachable {
+		return "Not reachable"
+	}
+	return "Reachable"
+}
+
+// PeerAddFailedToast is the toast for a rejected add.
+func PeerAddFailedToast(reason string) string {
+	return "Could not add that peer: " + reason
+}
+
+// PeerRemoveFailedToast is the toast for a failed remove.
+func PeerRemoveFailedToast(reason string) string {
+	return "Could not remove that peer: " + reason
+}
+
+// PeerEnableFailedToast is the toast for a failed enable.
+func PeerEnableFailedToast(reason string) string {
+	return "Could not enable that peer: " + reason
+}
+
+// PeerDisableFailedToast is the toast for a failed disable, worded
+// separately from PeerEnableFailedToast rather than reusing
+// PeerAddFailedToast's "add" wording for a disable.
+func PeerDisableFailedToast(reason string) string {
+	return "Could not disable that peer: " + reason
+}
+
+// PeerBusyToast is shown when a peer add, remove, or enable/disable is
+// requested while another one is already in flight.
+func PeerBusyToast() string {
+	return "Another peer change is still in progress. Try again in a moment."
+}
+
+// PeerKeySavedToast confirms the shared key was sent to llmman's own
+// configuration. The key itself is never echoed back.
+func PeerKeySavedToast() string {
+	return "Peer key saved."
+}
+
+// PeerKeyFailedToast is the toast for a failed key save.
+func PeerKeyFailedToast(reason string) string {
+	return "Could not save the peer key: " + reason
+}
+
 // AgentModeDetails returns the rows behind the Details expander. jan reports
 // whether this processor gets the Jan chat app, whose Flathub build is
 // x86_64-only.
