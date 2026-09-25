@@ -137,6 +137,14 @@ func TestApplicationStartsInDryRun(t *testing.T) {
 				continue
 			}
 			if time.Since(readyAt) >= stabilityWindow {
+				// SIGTERM must quit the application rather than kill it:
+				// only a normal return from main flushes GOCOVERDIR, and
+				// without it the e2e coverage flag read 0% for every GTK
+				// package (issue #306).
+				stopProcessSession(t, cmd, done)
+				if !strings.Contains(output.String(), "main: application exited") {
+					t.Errorf("ChairLift did not exit normally on SIGTERM\noutput:\n%s", output.String())
+				}
 				return
 			}
 		case <-timer.C:
@@ -316,9 +324,29 @@ func stopProcessSession(t *testing.T, cmd *exec.Cmd, done <-chan error) {
 	t.Helper()
 
 	group := cmd.Process.Pid
-	// Once the leader has been reaped its process-group ID may be reused;
-	// group-wide signals are safe only while it is alive. The later session
-	// scan signals remaining workers individually, including other groups.
+	// Find chairlift within the private session and send SIGTERM directly to it
+	// first. If we signal the whole process group at once, Xvfb and dbus-daemon
+	// die immediately, killing the X connection and aborting chairlift via
+	// fatal-criticals before it can perform a normal exit and flush GOCOVERDIR.
+	if !hasExited(done) {
+		if members, err := liveSessionMembers(defaultProcTable, group); err == nil {
+			for _, member := range members {
+				if member.name == "chairlift" {
+					_ = syscall.Kill(member.pid, syscall.SIGTERM)
+					break
+				}
+			}
+		}
+	}
+
+	// Wait briefly for chairlift to complete its graceful exit.
+	select {
+	case <-done:
+	case <-time.After(shutdownTimeout):
+	}
+
+	// Once chairlift has had a chance to exit normally, terminate any remaining
+	// processes in the private session.
 	if !hasExited(done) {
 		if err := syscall.Kill(-group, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
 			t.Errorf("terminate ChairLift smoke process group: %v", err)
