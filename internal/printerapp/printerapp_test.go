@@ -57,7 +57,9 @@ func TestEveryAppRendersAStartableUnit(t *testing.T) {
 			"ContainerName=" + app.ContainerName(),
 			"WantedBy=default.target",
 			"PublishPort=127.0.0.1:" + strconv.Itoa(app.Port()) + ":" + strconv.Itoa(app.Port()),
-			"Volume=%h/printer-workspaces/" + app.Family.ID + "/" + app.Name + ":z",
+			"Volume=%h/printer-workspaces/" + app.Family.ID + "/" + app.Name + ":/var/lib/" + app.Family.ID + "-printer-app:z",
+			"Environment=PORT=" + strconv.Itoa(app.Port()),
+			"UserNS=keep-id:uid=65532,gid=65532",
 		} {
 			if !strings.Contains(unit, required) {
 				t.Errorf("%s unit is missing %q:\n%s", app.UnitName(), required, unit)
@@ -141,21 +143,29 @@ func stubUnitDir(t *testing.T) (dir string, calls *[]string) {
 
 	tmp := t.TempDir()
 	previousDir := unitDir
+	previousHomeDir := userHomeDir
 	previousSystemctl := runSystemctl
+	previousSystemctlOutput := runSystemctlOutput
 	t.Cleanup(func() {
 		unitDir = previousDir
+		userHomeDir = previousHomeDir
 		runSystemctl = previousSystemctl
+		runSystemctlOutput = previousSystemctlOutput
 		dryrun.Set(false)
 	})
 
 	unitDir = func() (string, error) { return tmp, nil }
+	userHomeDir = func() (string, error) { return tmp, nil }
 
 	recorded := []string{}
 	runSystemctl = func(_ context.Context, args ...string) error {
 		recorded = append(recorded, strings.Join(args, " "))
 		return nil
 	}
-
+	runSystemctlOutput = func(_ context.Context, args ...string) (string, error) {
+		recorded = append(recorded, strings.Join(args, " "))
+		return "", nil
+	}
 	return tmp, &recorded
 }
 
@@ -212,6 +222,31 @@ func TestEnableRemovesTheUnitWhenTheServiceWillNotStart(t *testing.T) {
 	}
 }
 
+func TestEnableKeepsAPreexistingUnitWhenStartFails(t *testing.T) {
+	dir, _ := stubUnitDir(t)
+	app := Select(Families()[0])
+
+	unitPath := filepath.Join(dir, app.UnitName())
+	if err := os.WriteFile(unitPath, []byte("preexisting"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	runSystemctl = func(_ context.Context, args ...string) error {
+		if args[0] == "start" {
+			return errors.New("unit not found")
+		}
+		return nil
+	}
+
+	if err := Enable(context.Background(), app); err == nil {
+		t.Fatal("Enable returned no error when the service failed to start")
+	}
+
+	if _, err := os.Stat(unitPath); os.IsNotExist(err) {
+		t.Error("Enable removed a preexisting unit when start failed")
+	}
+}
+
 func TestDisableRemovesTheUnit(t *testing.T) {
 	dir, calls := stubUnitDir(t)
 	app := Select(Families()[0])
@@ -264,12 +299,48 @@ func TestDisableSucceedsWhenTheServiceIsAlreadyDown(t *testing.T) {
 		}
 		return nil
 	}
+	runSystemctlOutput = func(_ context.Context, args ...string) (string, error) {
+		if args[0] == "is-active" {
+			return "inactive", nil
+		}
+		return "", nil
+	}
 
 	if err := Disable(context.Background(), app); err != nil {
 		t.Fatalf("Disable: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, app.UnitName())); !os.IsNotExist(err) {
 		t.Error("Disable left the quadlet on disk after a failed stop")
+	}
+}
+
+func TestDisablePreservesTheUnitWhenStopFailsAndServiceRemainsActive(t *testing.T) {
+	dir, _ := stubUnitDir(t)
+	app := Select(Families()[0])
+
+	if err := Enable(context.Background(), app); err != nil {
+		t.Fatalf("Enable: %v", err)
+	}
+
+	stopErr := errors.New("refused to stop")
+	runSystemctl = func(_ context.Context, args ...string) error {
+		if args[0] == "stop" {
+			return stopErr
+		}
+		return nil
+	}
+	runSystemctlOutput = func(_ context.Context, args ...string) (string, error) {
+		if args[0] == "is-active" {
+			return "active", nil
+		}
+		return "", nil
+	}
+
+	if err := Disable(context.Background(), app); err == nil {
+		t.Fatal("Disable succeeded when stop failed and service was active")
+	}
+	if _, err := os.Stat(filepath.Join(dir, app.UnitName())); os.IsNotExist(err) {
+		t.Error("Disable removed the quadlet while service was still active")
 	}
 }
 

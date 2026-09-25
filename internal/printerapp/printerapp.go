@@ -34,10 +34,10 @@ import (
 
 const commandTimeout = 5 * time.Minute
 
+const unitPrefix = "chairlift-printer-"
+
 // portBase and portRange scope the ports a printer application may publish
-// into. They are chosen well above the privileged range and well clear of the
-// ephemeral range, so a published printer port never collides with a system
-// service or a browser's temporary connections.
+// into when allocating dynamically.
 const (
 	portBase  = 18000
 	portRange = 1000
@@ -57,10 +57,17 @@ type Family struct {
 	Repo string
 	// Version is the immutable application-version tag pinned for this family.
 	Version string
+	// Digest is the immutable multi-architecture manifest index digest.
+	Digest string
+	// DefaultPort is the contracted host port for this family (ADR-0016).
+	DefaultPort int
 }
 
 // Image returns the pinned immutable signed index for this family.
 func (f Family) Image() string {
+	if f.Digest != "" {
+		return f.Repo + "@" + f.Digest
+	}
 	return f.Repo + ":" + f.Version
 }
 
@@ -78,7 +85,7 @@ type App struct {
 // carries the `chairlift-` prefix so it never overwrites a unit from another
 // tool.
 func (a App) UnitName() string {
-	return "chairlift-" + sanitize(a.Family.ID) + "-" + sanitize(a.Name) + ".container"
+	return unitPrefix + sanitize(a.Family.ID) + "-" + sanitize(a.Name) + ".container"
 }
 
 // ServiceName is the systemd unit quadlet generates from UnitName.
@@ -89,7 +96,7 @@ func (a App) ServiceName() string {
 // ContainerName is the running container's name, matched to the unit so
 // `podman ps` output is recognizable.
 func (a App) ContainerName() string {
-	return "chairlift-" + sanitize(a.Family.ID) + "-" + sanitize(a.Name)
+	return unitPrefix + sanitize(a.Family.ID) + "-" + sanitize(a.Name)
 }
 
 // Port is the host port the printer's IPP service is published on. It is
@@ -102,17 +109,28 @@ func (a App) ContainerName() string {
 // of printers at most; if that ever changes, replace the hash with a persistent
 // port allocation keyed by unit name.
 func (a App) Port() int {
+	if a.Name == a.Family.ID && a.Family.DefaultPort > 0 {
+		return a.Family.DefaultPort
+	}
 	h := fnv.New32a()
 	_, _ = h.Write([]byte(a.Family.ID + "\x00" + a.Name))
 	return portBase + int(h.Sum32()%portRange)
 }
 
 // Volume is the per-app state volume, using the systemd home escape `%h`
-// that quadlet expands. It lives under the user's home so the printer's cached
-// PPD/driver state and print jobs survive enable/disable, exactly as aistack's
-// ai-workspaces volume survives the AI switch.
+// that quadlet expands. It mounts to the container's state directory
+// /var/lib/<family>-printer-app.
 func (a App) Volume() string {
-	return fmt.Sprintf("%%h/printer-workspaces/%s/%s:z", a.Family.ID, a.Name)
+	return fmt.Sprintf("%%h/printer-workspaces/%s/%s:/var/lib/%s-printer-app:z", a.Family.ID, a.Name, a.Family.ID)
+}
+
+// HostVolumeDir returns the absolute host path for the app's state volume.
+func (a App) HostVolumeDir() (string, error) {
+	home, err := userHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, "printer-workspaces", a.Family.ID, a.Name), nil
 }
 
 // families is the set of Printer Application families ChairLift can drive.
@@ -124,24 +142,31 @@ var families = []Family{
 		DisplayName: "Ghostscript",
 		Repo:        "ghcr.io/projectbluefin/ghostscript-printer-app",
 		Version:     "10.07.1-1",
+		Digest:      "sha256:ac51eddead62b0567d14c78d2a65267403b2ff3ab1942f25efaf80e8261f7929",
+		DefaultPort: 18010,
 	},
 	{
 		ID:          "hplip",
 		DisplayName: "HPLIP",
 		Repo:        "ghcr.io/projectbluefin/hplip-printer-app",
-		Version:     "0.1.0-1",
+		Version:     "3.26.4",
+		Digest:      "sha256:1f81f507ce603f19eebb83fdcdc5b7de7bc7f52f728e9626c2c1224ea7477de8",
+		DefaultPort: 18030,
 	},
 	{
 		ID:          "gutenprint",
 		DisplayName: "Gutenprint",
 		Repo:        "ghcr.io/projectbluefin/gutenprint-printer-app",
-		Version:     "0.1.0-1",
+		Version:     "5.3.6-4.1",
+		Digest:      "sha256:3ca46b65bba16e258d7f93582beb9ccdf71a8b4e450b9d01f8cb545a945b93a1",
+		DefaultPort: 18050,
 	},
 	{
 		ID:          "ps",
 		DisplayName: "PostScript",
 		Repo:        "ghcr.io/projectbluefin/ps-printer-app",
 		Version:     "0.1.0-1",
+		DefaultPort: 18020,
 	},
 }
 
@@ -196,7 +221,13 @@ func ApplyOverrides(images map[string]string) error {
 		for i := range families {
 			if families[i].ID == id {
 				families[i].Repo = repoPart(image)
-				families[i].Version = versionPart(image)
+				if strings.Contains(image, "@sha256:") {
+					families[i].Digest = digestPart(image)
+					families[i].Version = ""
+				} else {
+					families[i].Digest = ""
+					families[i].Version = versionPart(image)
+				}
 				found = true
 				break
 			}
@@ -208,8 +239,18 @@ func ApplyOverrides(images map[string]string) error {
 	return nil
 }
 
+func digestPart(image string) string {
+	if i := strings.Index(image, "@"); i >= 0 {
+		return image[i+1:]
+	}
+	return ""
+}
+
 // repoPart splits an image reference into its repository path.
 func repoPart(image string) string {
+	if i := strings.Index(image, "@"); i >= 0 {
+		return image[:i]
+	}
 	if i := strings.LastIndex(image, ":"); i >= 0 {
 		return image[:i]
 	}
@@ -218,6 +259,9 @@ func repoPart(image string) string {
 
 // versionPart splits an image reference into its tag.
 func versionPart(image string) string {
+	if i := strings.Index(image, "@"); i >= 0 {
+		return ""
+	}
 	if i := strings.LastIndex(image, ":"); i >= 0 {
 		return image[i+1:]
 	}
@@ -240,14 +284,8 @@ func RenderUnit(app App) string {
 	b.WriteString("[Container]\n")
 	fmt.Fprintf(&b, "ContainerName=%s\n", app.ContainerName())
 	fmt.Fprintf(&b, "Image=%s\n", app.Family.Image())
-	// No Exec=: each family appliance ships its own entrypoint that starts the
-	// PAPPL/CUPS service. Pinning a command here would duplicate, and could
-	// drift from, the image's real one. USB passthrough is deliberately not
-	// wired here either: reaching a USB printer is hardware-dependent and
-	// cannot be verified without a physical device, so the unit stays rootless
-	// rather than guessing at a flag or requesting --privileged. A host with a
-	// USB printer supplies the correct --device= path through the appliance's
-	// own entrypoint.
+	fmt.Fprintf(&b, "Environment=PORT=%d\n", app.Port())
+	b.WriteString("UserNS=keep-id:uid=65532,gid=65532\n")
 	fmt.Fprintf(&b, "PublishPort=127.0.0.1:%d:%d\n", app.Port(), app.Port())
 	fmt.Fprintf(&b, "Volume=%s\n\n", app.Volume())
 
@@ -277,6 +315,7 @@ func RenderUnits(apps []App) string {
 // unitDir is an injection seam for the quadlet directory, so the install and
 // remove paths are testable without writing into a real home directory.
 var unitDir = defaultUnitDir
+var userHomeDir = os.UserHomeDir
 
 func defaultUnitDir() (string, error) {
 	config, err := os.UserConfigDir()
@@ -286,20 +325,50 @@ func defaultUnitDir() (string, error) {
 	return filepath.Join(config, "containers", "systemd"), nil
 }
 
-// runSystemctl is an injection seam for the `systemctl --user` calls.
 var runSystemctl = execSystemctl
+var runSystemctlOutput = execSystemctlOutput
 
 func execSystemctl(ctx context.Context, args ...string) error {
+	_, err := execSystemctlOutput(ctx, args...)
+	return err
+}
+
+func execSystemctlOutput(ctx context.Context, args ...string) (string, error) {
 	runCtx, cancel := context.WithTimeout(ctx, commandTimeout)
 	defer cancel()
 
 	full := append([]string{"--user"}, args...)
 	cmd := exec.CommandContext(runCtx, "systemctl", full...)
 	output, err := cmd.CombinedOutput()
+	trimmed := strings.TrimSpace(string(output))
 	if err != nil {
-		return fmt.Errorf("systemctl %s: %s", strings.Join(full, " "), strings.TrimSpace(string(output)))
+		return trimmed, fmt.Errorf("systemctl %s: %s", strings.Join(full, " "), trimmed)
 	}
-	return nil
+	return trimmed, nil
+}
+
+func writeAtomic(dest string, content []byte) error {
+	dir := filepath.Dir(dest)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, filepath.Base(dest)+".tmp.*")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.Remove(tmp.Name()) }()
+	if _, err := tmp.Write(content); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(0o644); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), dest)
 }
 
 // IsAvailable reports whether this host can run the applications at all.
@@ -346,23 +415,34 @@ func Enable(ctx context.Context, app App) error {
 		return nil
 	}
 
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	volDir, err := app.HostVolumeDir()
+	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(path, []byte(RenderUnit(app)), 0o644); err != nil {
+	if err := os.MkdirAll(volDir, 0o755); err != nil {
+		return err
+	}
+
+	_, statErr := os.Stat(path)
+	existed := statErr == nil
+	rollback := func() {
+		if existed {
+			return
+		}
+		_ = os.Remove(path)
+		_ = runSystemctl(ctx, "daemon-reload")
+	}
+
+	if err := writeAtomic(path, []byte(RenderUnit(app))); err != nil {
 		return err
 	}
 
 	if err := runSystemctl(ctx, "daemon-reload"); err != nil {
-		// The unit is on disk but systemd has not seen it. Take it back off
-		// rather than leaving a host whose switch reads "on" and whose
-		// service does not exist.
-		_ = os.Remove(path)
+		rollback()
 		return err
 	}
 	if err := runSystemctl(ctx, "start", app.ServiceName()); err != nil {
-		_ = os.Remove(path)
-		_ = runSystemctl(ctx, "daemon-reload")
+		rollback()
 		return err
 	}
 	return nil
@@ -383,13 +463,25 @@ func Disable(ctx context.Context, app App) error {
 		return nil
 	}
 
-	// A stop failure is not fatal: the service may already be down, and the
-	// unit still has to come off disk for the switch to mean anything.
 	if err := runSystemctl(ctx, "stop", app.ServiceName()); err != nil {
-		log.Printf("printerapp: stopping %s: %v", app.ServiceName(), err)
+		if verifyErr := verifyStopped(ctx, app.ServiceName(), err); verifyErr != nil {
+			return verifyErr
+		}
 	}
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return err
 	}
 	return runSystemctl(ctx, "daemon-reload")
+}
+
+func verifyStopped(ctx context.Context, service string, stopErr error) error {
+	state, err := runSystemctlOutput(ctx, "is-active", service)
+	switch state = strings.TrimSpace(state); state {
+	case "inactive", "failed", "unknown":
+		return nil
+	case "":
+		return fmt.Errorf("%w; could not verify %s stopped: %v", stopErr, service, err)
+	default:
+		return fmt.Errorf("%w; %s is %s", stopErr, service, state)
+	}
 }
