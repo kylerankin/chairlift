@@ -196,6 +196,10 @@ list to read, not a control: nothing in it changes your system.
 Three links, each shown only when it is configured: **Website**, **Report a
 problem** (the `issues` URL, where bug reports go), and **Documentation**.
 
+A **Diagnostics** group offers a *Copy system diagnostics* row that places
+scrubbed system information — OS, image, kernel, desktop, and GPU — onto the
+clipboard to include when asking for help.
+
 When the configuration turns on something this computer cannot run — Flatpak
 or Homebrew is absent, or the machine is not a native A/B install — **Feature
 availability** appears with one collapsed row, **Why is something missing?**,
