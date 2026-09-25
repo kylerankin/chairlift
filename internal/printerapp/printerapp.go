@@ -19,6 +19,7 @@ package printerapp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"log"
@@ -43,11 +44,11 @@ const (
 	portRange = 1000
 )
 
-// Family identifies one Printer Application family. Each publishes an
-// immutable, signed, multi-architecture index at GHCR (the projectbluefin
+// Family identifies one Printer Application family. Each publishes a
+// digest-pinned, multi-architecture index at GHCR (the projectbluefin
 // *-printer-app repositories). The index, pinned by an immutable
-// application-version tag, is what we run — not a mutable `:latest` or `:build`
-// tag, which a re-pull could change under us.
+// application-version tag or manifest digest, is what we run — not a mutable
+// `:latest` or `:build` tag, which a re-pull could change under us.
 type Family struct {
 	// ID is the lowercase identifier used in unit names and volume paths.
 	ID string
@@ -63,7 +64,7 @@ type Family struct {
 	DefaultPort int
 }
 
-// Image returns the pinned immutable signed index for this family.
+// Image returns the digest-pinned index for this family.
 func (f Family) Image() string {
 	if f.Digest != "" {
 		return f.Repo + "@" + f.Digest
@@ -85,6 +86,9 @@ type App struct {
 // carries the `chairlift-` prefix so it never overwrites a unit from another
 // tool.
 func (a App) UnitName() string {
+	if a.Name == a.Family.ID {
+		return unitPrefix + sanitize(a.Family.ID) + ".container"
+	}
 	return unitPrefix + sanitize(a.Family.ID) + "-" + sanitize(a.Name) + ".container"
 }
 
@@ -96,6 +100,9 @@ func (a App) ServiceName() string {
 // ContainerName is the running container's name, matched to the unit so
 // `podman ps` output is recognizable.
 func (a App) ContainerName() string {
+	if a.Name == a.Family.ID {
+		return unitPrefix + sanitize(a.Family.ID)
+	}
 	return unitPrefix + sanitize(a.Family.ID) + "-" + sanitize(a.Name)
 }
 
@@ -135,7 +142,7 @@ func (a App) HostVolumeDir() (string, error) {
 
 // families is the set of Printer Application families ChairLift can drive.
 // Every reference was taken from the projectbluefin *-printer-app repositories,
-// which publish immutable, signed, multi-architecture indexes.
+// which publish digest-pinned, multi-architecture indexes.
 var families = []Family{
 	{
 		ID:          "ghostscript",
@@ -160,13 +167,6 @@ var families = []Family{
 		Version:     "5.3.6-4.1",
 		Digest:      "sha256:3ca46b65bba16e258d7f93582beb9ccdf71a8b4e450b9d01f8cb545a945b93a1",
 		DefaultPort: 18050,
-	},
-	{
-		ID:          "ps",
-		DisplayName: "PostScript",
-		Repo:        "ghcr.io/projectbluefin/ps-printer-app",
-		Version:     "0.1.0-1",
-		DefaultPort: 18020,
 	},
 }
 
@@ -205,11 +205,10 @@ func sanitize(name string) string {
 
 // ApplyOverrides replaces a family's pinned image from configuration. A site
 // that mirrors the indexes points its families at the mirror; the mirror must
-// serve the same immutable, signed index. This lives in the ordinary config
+// serve the same digest-pinned index. This lives in the ordinary config
 // file rather than the root-only channels.yml because the container runs
 // rootless in the invoking account, so pointing it at another image grants
 // nothing a user could not get by running podman themselves.
-//
 // An unknown family ID is an error rather than a silent no-op, since a typo'd
 // key would otherwise leave the site believing its mirror was in use.
 func ApplyOverrides(images map[string]string) error {
@@ -270,9 +269,8 @@ func versionPart(image string) string {
 
 // RenderUnit returns the quadlet .container file for one printer application.
 //
-// The unit publishes IPP on loopback only, exactly as aistack publishes the AI
-// API on loopback: an unauthenticated printer service exposed to the LAN would
-// let anyone on the network drive the physical device. The state volume is
+// The unit runs on host networking per ADR-0016 so IPP is LAN-reachable and
+// DNS-SD advertisements carry a routable host address. The state volume is
 // bind-mounted read-write so the printer's cached driver state persists across
 // enable/disable.
 func RenderUnit(app App) string {
@@ -286,7 +284,7 @@ func RenderUnit(app App) string {
 	fmt.Fprintf(&b, "Image=%s\n", app.Family.Image())
 	fmt.Fprintf(&b, "Environment=PORT=%d\n", app.Port())
 	b.WriteString("UserNS=keep-id:uid=65532,gid=65532\n")
-	fmt.Fprintf(&b, "PublishPort=127.0.0.1:%d:%d\n", app.Port(), app.Port())
+	b.WriteString("Network=host\n")
 	fmt.Fprintf(&b, "Volume=%s\n\n", app.Volume())
 
 	b.WriteString("[Service]\nRestart=on-failure\nRestartSec=10\n\n")
@@ -401,10 +399,24 @@ func IsEnabled(app App) bool {
 	return err == nil
 }
 
+// ErrAdminUnauthenticated reports that the printer application image cannot be
+// safely enabled on host networking because its web administration interface is
+// reachable without authentication (ADR-0016).
+var ErrAdminUnauthenticated = errors.New("printer application web administration is unauthenticated; refused on host network (ADR-0016)")
+
 // Enable writes the quadlet for the printer application and starts it. Enabling
 // only writes the unit and starts the service: the image pull happens inside
 // the container runtime afterwards, so the switch must not wait on it.
 func Enable(ctx context.Context, app App) error {
+	// ADR-0016 enable condition: an application may only be enabled when its web
+	// administration is authenticated or absent. Published images today forward
+	// only PORT/log options and cannot be given admin credentials or
+	// server-options=no-web-interface, so enabling on host networking is refused.
+	return ErrAdminUnauthenticated
+}
+
+// enableInternal writes the quadlet and starts the service once prerequisites are met.
+func enableInternal(ctx context.Context, app App) error {
 	path, err := UnitPath(app)
 	if err != nil {
 		return err

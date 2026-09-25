@@ -13,7 +13,7 @@ import (
 )
 
 func TestFamiliesCoversEveryDriverFamily(t *testing.T) {
-	wantIDs := []string{"ghostscript", "hplip", "gutenprint", "ps"}
+	wantIDs := []string{"ghostscript", "hplip", "gutenprint"}
 	got := Families()
 	if len(got) != len(wantIDs) {
 		t.Fatalf("Families() returned %d families, want %d", len(got), len(wantIDs))
@@ -45,7 +45,6 @@ func TestEveryAppRendersAStartableUnit(t *testing.T) {
 		Select(Families()[0]),
 		{Family: Families()[1], Name: "office-printer"},
 		{Family: Families()[2], Name: "photo-printer"},
-		{Family: Families()[3], Name: "label-printer"},
 	}
 
 	for _, app := range apps {
@@ -56,7 +55,7 @@ func TestEveryAppRendersAStartableUnit(t *testing.T) {
 			"Image=" + app.Family.Image(),
 			"ContainerName=" + app.ContainerName(),
 			"WantedBy=default.target",
-			"PublishPort=127.0.0.1:" + strconv.Itoa(app.Port()) + ":" + strconv.Itoa(app.Port()),
+			"Network=host",
 			"Volume=%h/printer-workspaces/" + app.Family.ID + "/" + app.Name + ":/var/lib/" + app.Family.ID + "-printer-app:z",
 			"Environment=PORT=" + strconv.Itoa(app.Port()),
 			"UserNS=keep-id:uid=65532,gid=65532",
@@ -66,10 +65,9 @@ func TestEveryAppRendersAStartableUnit(t *testing.T) {
 			}
 		}
 
-		// The service publishes on loopback only: an unauthenticated printer
-		// exposed to the LAN would let anyone on the network drive the device.
-		if !strings.Contains(unit, "PublishPort=127.0.0.1") {
-			t.Errorf("%s unit does not publish on loopback:\n%s", app.UnitName(), unit)
+		// ADR-0016: RenderUnit must not publish ports (Network=host is used instead).
+		if strings.Contains(unit, "PublishPort=") {
+			t.Errorf("%s unit renders PublishPort under host networking:\n%s", app.UnitName(), unit)
 		}
 	}
 }
@@ -82,7 +80,7 @@ func TestUniqueNamePortAndVolumePerApp(t *testing.T) {
 		{Family: Families()[0], Name: "back-office"},
 		{Family: Families()[1], Name: "office-printer"},
 		{Family: Families()[2], Name: "photo-printer"},
-		{Family: Families()[3], Name: "label-printer"},
+		{Family: Families()[2], Name: "label-printer"},
 	}
 
 	names, ports, volumes := map[string]bool{}, map[int]bool{}, map[string]bool{}
@@ -117,6 +115,11 @@ func TestUnitNameDoesNotCollideAndServiceMatches(t *testing.T) {
 
 	if !strings.HasPrefix(app.UnitName(), "chairlift-") {
 		t.Errorf("UnitName = %q, want a chairlift- prefix", app.UnitName())
+	}
+	// Select(f) produces default unit matching design doc: chairlift-printer-<family>.container
+	wantDefaultUnit := "chairlift-printer-" + app.Family.ID + ".container"
+	if app.UnitName() != wantDefaultUnit {
+		t.Errorf("UnitName = %q, want %q", app.UnitName(), wantDefaultUnit)
 	}
 	if app.ServiceName() != strings.TrimSuffix(app.UnitName(), ".container")+".service" {
 		t.Errorf("ServiceName = %q does not match UnitName %q", app.ServiceName(), app.UnitName())
@@ -169,16 +172,29 @@ func stubUnitDir(t *testing.T) (dir string, calls *[]string) {
 	return tmp, &recorded
 }
 
-func TestEnableWritesTheUnitAndStartsIt(t *testing.T) {
+func TestEnableRefusesWhenWebAdminIsUnauthenticated(t *testing.T) {
+	_, calls := stubUnitDir(t)
+	app := Select(Families()[0])
+
+	err := Enable(context.Background(), app)
+	if !errors.Is(err, ErrAdminUnauthenticated) {
+		t.Fatalf("Enable error = %v, want %v", err, ErrAdminUnauthenticated)
+	}
+	if len(*calls) != 0 {
+		t.Errorf("refused Enable called systemctl: %v", *calls)
+	}
+}
+
+func TestEnableInternalWritesTheUnitAndStartsIt(t *testing.T) {
 	dir, calls := stubUnitDir(t)
 	app := Select(Families()[0])
 
 	if IsEnabled(app) {
-		t.Fatal("IsEnabled reported true before Enable")
+		t.Fatal("IsEnabled reported true before enableInternal")
 	}
 
-	if err := Enable(context.Background(), app); err != nil {
-		t.Fatalf("Enable: %v", err)
+	if err := enableInternal(context.Background(), app); err != nil {
+		t.Fatalf("enableInternal: %v", err)
 	}
 
 	data, err := os.ReadFile(filepath.Join(dir, app.UnitName()))
@@ -195,11 +211,11 @@ func TestEnableWritesTheUnitAndStartsIt(t *testing.T) {
 	}
 
 	if !IsEnabled(app) {
-		t.Error("IsEnabled reported false after Enable")
+		t.Error("IsEnabled reported false after enableInternal")
 	}
 }
 
-func TestEnableRemovesTheUnitWhenTheServiceWillNotStart(t *testing.T) {
+func TestEnableInternalRemovesTheUnitWhenTheServiceWillNotStart(t *testing.T) {
 	dir, _ := stubUnitDir(t)
 
 	runSystemctl = func(_ context.Context, args ...string) error {
@@ -210,19 +226,19 @@ func TestEnableRemovesTheUnitWhenTheServiceWillNotStart(t *testing.T) {
 	}
 
 	app := Select(Families()[0])
-	if err := Enable(context.Background(), app); err == nil {
-		t.Fatal("Enable returned no error when the service failed to start")
+	if err := enableInternal(context.Background(), app); err == nil {
+		t.Fatal("enableInternal returned no error when the service failed to start")
 	}
 
 	if _, err := os.Stat(filepath.Join(dir, app.UnitName())); !os.IsNotExist(err) {
-		t.Error("a failed Enable left its quadlet on disk")
+		t.Error("a failed enableInternal left its quadlet on disk")
 	}
 	if IsEnabled(app) {
-		t.Error("IsEnabled reported true after a failed Enable")
+		t.Error("IsEnabled reported true after a failed enableInternal")
 	}
 }
 
-func TestEnableKeepsAPreexistingUnitWhenStartFails(t *testing.T) {
+func TestEnableInternalKeepsAPreexistingUnitWhenStartFails(t *testing.T) {
 	dir, _ := stubUnitDir(t)
 	app := Select(Families()[0])
 
@@ -238,12 +254,12 @@ func TestEnableKeepsAPreexistingUnitWhenStartFails(t *testing.T) {
 		return nil
 	}
 
-	if err := Enable(context.Background(), app); err == nil {
-		t.Fatal("Enable returned no error when the service failed to start")
+	if err := enableInternal(context.Background(), app); err == nil {
+		t.Fatal("enableInternal returned no error when the service failed to start")
 	}
 
 	if _, err := os.Stat(unitPath); os.IsNotExist(err) {
-		t.Error("Enable removed a preexisting unit when start failed")
+		t.Error("enableInternal removed a preexisting unit when start failed")
 	}
 }
 
@@ -251,8 +267,8 @@ func TestDisableRemovesTheUnit(t *testing.T) {
 	dir, calls := stubUnitDir(t)
 	app := Select(Families()[0])
 
-	if err := Enable(context.Background(), app); err != nil {
-		t.Fatalf("Enable: %v", err)
+	if err := enableInternal(context.Background(), app); err != nil {
+		t.Fatalf("enableInternal: %v", err)
 	}
 	*calls = nil
 
@@ -273,10 +289,9 @@ func TestDisableLeavesTheStateVolumeUntouched(t *testing.T) {
 	_, _ = stubUnitDir(t)
 	app := Select(Families()[0])
 
-	if err := Enable(context.Background(), app); err != nil {
-		t.Fatalf("Enable: %v", err)
+	if err := enableInternal(context.Background(), app); err != nil {
+		t.Fatalf("enableInternal: %v", err)
 	}
-
 	// The state volume is under the user's home, which stubUnitDir does not
 	// point at a temp dir, so assert Disable does not try to remove anything
 	// outside the quadlet unit. The only removal Disable performs is the unit.
@@ -289,10 +304,9 @@ func TestDisableSucceedsWhenTheServiceIsAlreadyDown(t *testing.T) {
 	dir, _ := stubUnitDir(t)
 	app := Select(Families()[0])
 
-	if err := Enable(context.Background(), app); err != nil {
-		t.Fatalf("Enable: %v", err)
+	if err := enableInternal(context.Background(), app); err != nil {
+		t.Fatalf("enableInternal: %v", err)
 	}
-
 	runSystemctl = func(_ context.Context, args ...string) error {
 		if args[0] == "stop" {
 			return errors.New("unit is not loaded")
@@ -318,10 +332,9 @@ func TestDisablePreservesTheUnitWhenStopFailsAndServiceRemainsActive(t *testing.
 	dir, _ := stubUnitDir(t)
 	app := Select(Families()[0])
 
-	if err := Enable(context.Background(), app); err != nil {
-		t.Fatalf("Enable: %v", err)
+	if err := enableInternal(context.Background(), app); err != nil {
+		t.Fatalf("enableInternal: %v", err)
 	}
-
 	stopErr := errors.New("refused to stop")
 	runSystemctl = func(_ context.Context, args ...string) error {
 		if args[0] == "stop" {
@@ -349,8 +362,8 @@ func TestDryRunTouchesNothing(t *testing.T) {
 	dryrun.Set(true)
 	app := Select(Families()[0])
 
-	if err := Enable(context.Background(), app); err != nil {
-		t.Fatalf("Enable: %v", err)
+	if err := enableInternal(context.Background(), app); err != nil {
+		t.Fatalf("enableInternal: %v", err)
 	}
 	if err := Disable(context.Background(), app); err != nil {
 		t.Fatalf("Disable: %v", err)
