@@ -81,6 +81,10 @@ are listed in [org-adrs.md](org-adrs.md).
   x86_64) as the ChairLift-owned user unit `chairlift-llmman.service` on
   loopback with the web shell and prompt history off; defines the six Agent
   Mode states, the Ask Bluefin readiness predicate, and artifact ownership
+- [adr/0016-printer-app-admin-denied-until-authenticated.md](adr/0016-printer-app-admin-denied-until-authenticated.md)
+  — printer application administration is denied until authenticated: PAPPL
+  serves web admin and IPP on one listener, so the boundary is authorization
+  (authenticated or absent web admin), not loopback binding
 
 ### Design
 
@@ -91,6 +95,9 @@ are listed in [org-adrs.md](org-adrs.md).
   Flatpak, bootc, updex, and ublue wrappers, the registry tag
   catalog, and their view-layer leaf packages (formerly
   `yeti/package-managers.md`)
+- [design/printer-applications.md](design/printer-applications.md) — the
+  rootless printer-application quadlets: host-networking surface,
+  authenticated-admin boundary, family inventory, and verified image state
 
 ### Specs
 
