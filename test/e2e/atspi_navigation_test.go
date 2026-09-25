@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -226,9 +227,25 @@ func TestATSPINavigationTree(t *testing.T) {
 
 	cmd := exec.Command(script, args...)
 	cmd.Dir = repoRoot(t)
+	// A private session, as the smoke test uses: startup reads the Homebrew
+	// inventory, and brew workers outlive the script and keep writing into
+	// the temporary HOME, which makes t.TempDir's cleanup fail.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	output := &lockedBuffer{}
 	cmd.Stdout = output
 	cmd.Stderr = output
+
+	// Cleanups run last-registered-first, so this drain runs before Go
+	// removes the TempDir registered above, on every exit path including
+	// t.Fatal and the timeout below.
+	t.Cleanup(func() {
+		if cmd.Process == nil {
+			return
+		}
+		if err := awaitSessionExit(hostDrain(), cmd.Process.Pid, shutdownTimeout, drainTimeout); err != nil {
+			t.Errorf("AT-SPI probe session %d: %v", cmd.Process.Pid, err)
+		}
+	})
 
 	if err := runWithTimeout(cmd, atspiTimeout); err != nil {
 		t.Fatalf("AT-SPI navigation probe failed: %v\n%s\n%s", err, output.String(), atspiLogs(outDir))
@@ -345,7 +362,15 @@ func atspiLogs(outDir string) string {
 	return builder.String()
 }
 
+// runWithTimeout runs cmd to completion or kills it after timeout. For a
+// command started in its own session (Setsid), the kill covers the whole
+// process group, not just the leader. WaitDelay bounds Wait even if a
+// descendant outside that group still holds the captured output pipes;
+// callers drain the session with awaitSessionExit afterwards.
 func runWithTimeout(cmd *exec.Cmd, timeout time.Duration) error {
+	if cmd.WaitDelay == 0 {
+		cmd.WaitDelay = shutdownTimeout
+	}
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start %s: %w", cmd.Path, err)
 	}
@@ -356,7 +381,11 @@ func runWithTimeout(cmd *exec.Cmd, timeout time.Duration) error {
 	case err := <-done:
 		return err
 	case <-time.After(timeout):
-		_ = cmd.Process.Kill()
+		if cmd.SysProcAttr != nil && cmd.SysProcAttr.Setsid {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		} else {
+			_ = cmd.Process.Kill()
+		}
 		<-done
 		return fmt.Errorf("%s did not finish within %s", cmd.Path, timeout)
 	}
@@ -366,12 +395,10 @@ func runWithTimeout(cmd *exec.Cmd, timeout time.Duration) error {
 // absent, which is the opposite of how the rest of this package treats a
 // missing dependency.
 //
-// The reason is a deliberate ordering: the E2E CI job does not install
-// at-spi2-core or python3-dogtail yet, and a hard failure here would turn
-// every run red for a dependency the test itself cannot add. The skip message
-// names exactly what is missing, so a run that quietly proves nothing says so.
-// Once the job installs the stack, this skip stops firing and the test's
-// assertions bind; it never weakens them.
+// The E2E CI job installs at-spi2-core, gir1.2-atspi-2.0 and python3-dogtail,
+// so there the assertions bind. A developer machine without them gets a skip
+// naming exactly what is missing, so a run that quietly proves nothing says
+// so; it never weakens the assertions where the stack is present.
 func requireATSPIStack(t *testing.T) {
 	t.Helper()
 
