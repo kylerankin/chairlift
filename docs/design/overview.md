@@ -1035,16 +1035,19 @@ and the toast call both occur on the GTK main thread.
 
 `internal/deskenv` is a pure, standard-library-only leaf package that answers
 which desktop environment the current session is running. It exists because
-the livery marks are GNOME surfaces — the app-grid icon is written into the
-Adwaita theme and the panel mark into an `org.gnome.shell.extensions` schema —
-so on a Plasma session every write succeeds and nothing changes, which is
-worse than a visible failure because the UI reports success. Knowing the
-environment is what lets a desktop-specific group be omitted instead of
-silently no-op'ing. It is the detection half of the KDE support work in
+some livery marks are GNOME surfaces — the GNOME app-grid icon is written into
+the Adwaita theme and the panel mark into an `org.gnome.shell.extensions`
+schema — so on an unsupported desktop every write can succeed while nothing
+changes. The desktop-specific surface table prevents that silent no-op. It is
+the detection half of the KDE support work in
 [Epic #211](https://github.com/projectbluefin/chairlift/issues/211): the
-livery surface table consumes it to parameterize surface overrides by desktop
-environment (#214), selecting `org.kde.dolphin` in `hicolor` for KDE Plasma
-sessions (#216) and `org.gnome.Nautilus` in `hicolor` for GNOME sessions.
+livery surface table selects KDE's configured Kickoff applets for the app-grid
+mark (#215) and `org.kde.dolphin` in `hicolor` for Files (#216), while GNOME
+continues to use `view-app-grid-symbolic`, its panel extension and
+`org.gnome.Nautilus`. Kickoff customization is available only when the user's
+Plasma applet file contains a `plugin=org.kde.plasma.kickoff` section; the
+`AppGridAvailable` probe keeps the group insensitive and explains the missing
+target when no matching applet can be found.
 
 `Classify(env)` is the pure decision and owns all three outcomes. It returns
 `GNOME` when `XDG_CURRENT_DESKTOP` or `DESKTOP_SESSION` names GNOME or one of

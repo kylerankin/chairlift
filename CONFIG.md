@@ -134,8 +134,8 @@ face-file fallback in `$HOME`), nothing is written outside `$XDG_DATA_HOME` and
 `$XDG_CONFIG_HOME`.
 
 - `account_group`: Profile Picture; the account's picture, chosen from Project Bluefin's dinosaur artwork. Nothing is downloaded until a picture is picked, and it is set only on Apply, through AccountsService (`busctl`, unprivileged) with a `~/.face.icon`/`~/.face` fallback that takes effect at the next sign-in
-- `livery_app_grid_group`: App Grid Livery; the Show Applications mark, fetched from simpleicons.org by brand name. Set once — there is no rotation
-- `livery_foundation_group`: Foundational Livery; the top-bar menu mark, optionally advancing at each login (requires the Custom Command Menu GNOME extension)
+- `livery_app_grid_group`: App Grid Livery; the Show Applications mark on GNOME or the configured Kickoff applets on KDE Plasma, fetched from simpleicons.org by brand name. Set once — there is no rotation; unavailable on Plasma if no Kickoff applet is configured
+- `livery_foundation_group`: Foundational Livery; the GNOME top-bar menu mark, optionally advancing at each login (requires the Custom Command Menu GNOME extension; omitted on Plasma)
 - `livery_dock_group`: Dock Livery; the Files application icon, set to a CNCF project's own color mark from cncf/artwork and chosen with a searchable picker, optionally advancing at each login. GNOME stores one icon per application, so this changes Files everywhere it is drawn, not only on the dock
 
 ### Help Page (`help_page`)

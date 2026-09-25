@@ -26,6 +26,7 @@ func TestPageBuildersUsePurePresentations(t *testing.T) {
 				"pageview.LiveryPageDescription",
 				"pageview.LiveryChoices(",
 				"pageview.LiveryAppGridRow(",
+				"pageview.LiveryAppGridGroupDescription(",
 				"pageview.LiveryPanelRow(",
 				"pageview.LiveryDockRow(",
 				"pageview.LiveryRotationRow(",

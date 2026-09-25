@@ -591,18 +591,29 @@ An agent must not break these:
   for the life of that one short-lived process; switching to stdin needs
   llmman support first.
 - **Livery shadows icon-theme names, and the theme it writes into is not
-  always hicolor.** `internal/livery` sets three marks — the app-grid button
-  (`view-app-grid-symbolic`), the panel menu button
-  (`PanelIconName(id)`, i.e. `chairlift-livery-<id>-symbolic`, via the Custom
-  Command Menu extension's `menuicon-setting`), and the Files application
-  (`org.gnome.Nautilus`) — by
-  installing an SVG into the user's icon theme and referencing it by bare
-  name. A GNOME panel icon is a themed *name*, never a path: the extension
-  builds `new St.Icon({icon_name: …})`, so an absolute path there renders
-  nothing. Which theme directory receives the override is per surface and is
-  load-bearing, because XDG resolves the current theme and its parents before
-  falling back to hicolor: a name Adwaita already ships can only be shadowed
-  inside `~/.local/share/icons/Adwaita`, while a name it does not ship
+  always hicolor.** GNOME's app-grid button (`view-app-grid-symbolic`), panel
+  menu (`PanelIconName(id)`, i.e. `chairlift-livery-<id>-symbolic`, via the
+  Custom Command Menu extension's `menuicon-setting`), and Files application
+  (`org.gnome.Nautilus`) are icon-theme overrides. KDE Plasma's app grid is
+  the Kickoff applet: `internal/livery` scans the user's
+  `plasma-org.kde.plasma.desktop-appletsrc` for every
+  `plugin=org.kde.plasma.kickoff` section, installs the mark as
+  `chairlift-livery-app-grid` in hicolor, then writes that icon name to each
+  applet's nested `Configuration/General/icon` with `kwriteconfig6`. Its repeated
+  `--group` arguments are required for KConfig's nested group semantics, and
+  `kwriteconfig6` must remain in `allowedCommands`. When clearing the mark, it
+  deletes the `icon` key across Kickoff applets that still point at
+  `chairlift-livery-app-grid`, falling back to Kickoff's default icon. If no
+  Kickoff applet is
+  present/readable, the app-grid section reports unavailable and stays
+  insensitive rather than claiming a write succeeded. KDE's Files name is
+  `org.kde.dolphin`; KDE has no panel mark. A GNOME panel icon is a themed
+  *name*, never a path: the extension builds `new St.Icon({icon_name: …})`, so
+  an absolute path there renders nothing. Which theme directory receives the
+  override is per surface and is load-bearing, because XDG resolves the
+  current theme and its parents before falling back to hicolor: a name
+  Adwaita already ships can only be shadowed inside
+  `~/.local/share/icons/Adwaita`, while a name it does not ship
   (`org.gnome.Nautilus`) works from hicolor. Getting this backwards produces a
   write that succeeds and an icon that never changes;
   `TestAppGridOverrideTargetsTheAdwaitaTheme` holds both cases.

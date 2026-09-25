@@ -89,9 +89,10 @@ never asks for a reboot.
 
 ### 🎨 Livery
 
-- **App Grid Livery**: your own mark on the Show Applications button —
-  searchable across all 3,461 brands [Simple Icons](https://simpleicons.org/)
-  publishes, fetched on demand
+- **App Grid Livery**: your own mark on GNOME's Show Applications button or
+  the configured KDE Plasma Kickoff applet — searchable across all
+  3,461 brands [Simple Icons](https://simpleicons.org/) publishes, fetched on
+  demand
 - **Foundational Livery**: a mark in the top bar — CNCF, Linux Foundation,
   GNOME, freedesktop.org, Apache, Rust, Universal Blue, Bazzite, Aurora, or
   the Open Gaming Collective, which is the default on a gaming image

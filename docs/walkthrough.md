@@ -131,22 +131,28 @@ AccountsService is unavailable the picture is saved to your home folder
 instead and appears after you next sign in, and the confirmation says which of
 the two happened.
 
-**App Grid Livery** is your own mark on the Show Applications button. Search
-all 3,461 brands [Simple Icons](https://simpleicons.org/) publishes — your
-project, your employer, whatever you answer to — and Control Center fetches it
-and rebuilds the dock so it appears straight away. You set it once; it never changes on its own, because a personal mark that
-rotated would stop being personal.
+**App Grid Livery** is your own mark on the Show Applications button on
+GNOME. On KDE Plasma, the same chooser updates each configured Kickoff applet;
+if no Kickoff applet is present, the group reports unavailable instead of
+pretending the setting can be applied. Search all 3,461 brands
+[Simple Icons](https://simpleicons.org/) publishes — your project, your
+employer, whatever you answer to — and Control Center fetches the one you pick.
+You set it once; it never changes on its own, because a personal mark that
+rotated would stop being personal. Turning the mark off resets the Kickoff applet
+to Plasma's default icon.
 
-**Foundational Livery** puts a foundation's mark in the top bar: CNCF, the
-Linux Foundation, GNOME, freedesktop.org, Apache, Rust, Universal Blue,
-Bazzite, Aurora, or the Open Gaming Collective. On a gaming image the
+On GNOME, **Foundational Livery** puts a foundation's mark in the top bar:
+CNCF, the Linux Foundation, GNOME, freedesktop.org, Apache, Rust, Universal
+Blue, Bazzite, Aurora, or the Open Gaming Collective. This section is omitted
+on Plasma, which has no corresponding top-bar surface. On a gaming image the
 collective's mark is the one you start with, since that is whose work the
 image ships — pick any other and it stays picked.
 
-**Dock Livery** is the project you actually work on. Every CNCF project that
-publishes artwork is in the list — 214 of them, Kubernetes through bootc — so
-the picker searches rather than scrolls, and each one arrives as the project's
-own colour icon straight from
+**Dock Livery** marks the Files icon on GNOME or Dolphin on KDE Plasma with
+the project you actually work on. Every CNCF project that publishes artwork
+is in the list — 214 of them, Kubernetes through bootc — so the picker searches
+rather than scrolls, and each one arrives as the project's own colour icon
+straight from
 [cncf/artwork](https://github.com/cncf/artwork).
 
 Both can **Rotate at Login**, which moves one step down the list each time you
@@ -158,15 +164,15 @@ anything not on the list.
 
 Three things worth knowing. The top-bar section needs the Custom Command Menu
 GNOME extension; without it the section is not shown at all rather than
-offering a control that does nothing. The Files mark is the Files mark
+offering a control that does nothing. On GNOME, the Files mark is shared
 everywhere — the dock, the app grid, the window switcher — because GNOME keeps
-one icon per app, not one per place, and the app-grid glyph is shared the same
-way. And only the Files icon is in colour: the top bar and the app grid draw
-single-colour silhouettes, recoloured to match your theme, which is how every
-other icon up there behaves.
+one icon per app, not one per place; Plasma's Dolphin is a separate surface.
+Only the Files icon is in colour: GNOME's top bar and app-grid glyph draw
+single-colour silhouettes, recoloured to match your theme.
 
-Turning a section off puts back exactly what was there before, including a
-mark your distribution set rather than one you chose.
+On GNOME, turning a section off puts back exactly what was there before,
+including a mark your distribution set rather than one you chose. KDE Plasma
+app-grid reset behavior is being completed separately.
 
 ---
 

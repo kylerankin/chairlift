@@ -316,14 +316,10 @@ func TestKDESurfaceAppliesAndRemovesDolphinIcon(t *testing.T) {
 	}
 }
 
-// TestKDEUnsupportedSurfaces asserts that Apply fails closed for surfaces
-// unsupported on KDE (AppGrid and Panel) and reports an explanatory error.
-//
-// Clear is deliberately excluded: it must keep working for every surface on
-// every desktop, or a mark applied under GNOME could never be removed from a
-// Plasma session. TestClearRemovesGNOMEMarkFromKDESession covers that.
-func TestKDEUnsupportedSurfaces(t *testing.T) {
-	for name, surface := range map[string]Surface{"app-grid": AppGrid, "panel": Panel} {
+// TestKDEUnsupportedPanelSurface asserts that Apply fails closed for the
+// GNOME-only panel surface on KDE Plasma. AppGrid and Dock have KDE targets.
+func TestKDEUnsupportedPanelSurface(t *testing.T) {
+	for name, surface := range map[string]Surface{"panel": Panel} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := IconPathFor(deskenv.KDE, surface, ""); err == nil {
 				t.Errorf("IconPathFor(KDE, %s) succeeded, want error", name)

@@ -190,8 +190,17 @@ func LiveryIDForIndex(index uint) string {
 func LiveryAppGridRow() Row {
 	return Row{
 		Title:    "Customize the App Grid Icon",
-		Subtitle: "Replaces the Show Applications glyph wherever GNOME draws it",
+		Subtitle: "Replaces the Show Applications glyph on GNOME or the Kickoff icon on KDE Plasma",
 	}
+}
+
+// LiveryAppGridGroupDescription explains when Plasma has no Kickoff applet
+// configuration ChairLift can update.
+func LiveryAppGridGroupDescription(available bool) string {
+	if !available {
+		return "App-grid customization is unavailable: no KDE Kickoff applet was found in this session."
+	}
+	return LiveryAppGridFragment
 }
 
 // LiveryPanelRow is the panel section's switch row text. A host without the

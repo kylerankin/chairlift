@@ -224,8 +224,13 @@ func (uh *UserHome) refreshLiveryState() {
 
 	state, err := livery.Load(ctx)
 	panelAvailable := livery.PanelAvailable(ctx)
+	appGridAvailable, appGridErr := livery.AppGridAvailable()
+	if appGridErr != nil {
+		log.Printf("livery: checking app-grid availability: %v", appGridErr)
+	}
 
 	sgtk.RunOnMainThread(func() {
+		uh.setLiveryAppGridAvailability(appGridAvailable)
 		if err != nil {
 			// The page keeps its controls insensitive and says why. The
 			// gate is still armed: without it, every later notify would be
@@ -235,15 +240,23 @@ func (uh *UserHome) refreshLiveryState() {
 			uh.toastAdder.ShowErrorToast(pageview.LiverySchemaMissingMessage)
 			return
 		}
-		uh.applyLiveryState(state, panelAvailable)
+		uh.applyLiveryState(state, panelAvailable, appGridAvailable)
 	})
+}
+
+// setLiveryAppGridAvailability updates the app-grid section's status without
+// assuming the config-enabled group was constructed.
+func (uh *UserHome) setLiveryAppGridAvailability(available bool) {
+	if uh.liveryAppGridGroup != nil {
+		uh.liveryAppGridGroup.SetDescription(pageview.LiveryAppGridGroupDescription(available))
+	}
 }
 
 // applyLiveryState populates every control. It runs on the main thread.
 //
 // Each group is nil-guarded: any of the three can be disabled in config, in
 // which case its widgets were never constructed.
-func (uh *UserHome) applyLiveryState(state livery.State, panelAvailable bool) {
+func (uh *UserHome) applyLiveryState(state livery.State, panelAvailable, appGridAvailable bool) {
 	// Two guards, because one is not enough on its own.
 	//
 	// liveryState is the value every handler compares against, so assigning
@@ -279,11 +292,11 @@ func (uh *UserHome) applyLiveryState(state livery.State, panelAvailable bool) {
 	uh.liveryState.PanelID = pageview.LiveryIDForIndex(panelChoice.Selected)
 
 	if uh.liveryAppGridSwitch != nil {
-		uh.liveryAppGridSwitch.SetSensitive(true)
+		uh.liveryAppGridSwitch.SetSensitive(appGridAvailable)
 		uh.liveryAppGridSwitch.SetActive(state.AppGridEnabled)
 	}
 	if uh.liveryAppGridRow != nil {
-		uh.liveryAppGridRow.SetSensitive(state.AppGridEnabled)
+		uh.liveryAppGridRow.SetSensitive(appGridAvailable && state.AppGridEnabled)
 		uh.liveryAppGridRow.SetSubtitle(pageview.LiverySelectedBrandRow(state.AppGridSlug).Subtitle)
 	}
 

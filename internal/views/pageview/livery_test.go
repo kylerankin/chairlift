@@ -62,6 +62,21 @@ func TestUnknownSelectionFallsBackToTheDefault(t *testing.T) {
 // TestDockRowNamesItsFullReach is a wording regression test with teeth: the
 // Files mark is shared by every surface GNOME draws that application on, and
 // a subtitle mentioning only the dock would understate what the switch does.
+func TestAppGridTextCoversGNOMEAndPlasmaAvailability(t *testing.T) {
+	subtitle := strings.ToLower(LiveryAppGridRow().Subtitle)
+	for _, desktop := range []string{"gnome", "kickoff", "kde plasma"} {
+		if !strings.Contains(subtitle, desktop) {
+			t.Errorf("app-grid subtitle %q does not mention %q", subtitle, desktop)
+		}
+	}
+	if got := LiveryAppGridGroupDescription(true); got != LiveryAppGridFragment {
+		t.Errorf("available app-grid description = %q, want %q", got, LiveryAppGridFragment)
+	}
+	if got := LiveryAppGridGroupDescription(false); !strings.Contains(strings.ToLower(got), "unavailable") || !strings.Contains(strings.ToLower(got), "kickoff") {
+		t.Errorf("unavailable app-grid description = %q, want it to explain the missing Kickoff target", got)
+	}
+}
+
 func TestDockRowNamesItsFullReach(t *testing.T) {
 	subtitle := strings.ToLower(LiveryDockRow().Subtitle)
 	for _, surface := range []string{"dock", "app grid", "window switcher"} {
