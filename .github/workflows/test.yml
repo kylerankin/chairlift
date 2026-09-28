@@ -17,6 +17,15 @@ on:
   merge_group:
     types: [checks_requested]
 
+# Only pull_request runs are cancellable. A merge_group run builds a queue
+# candidate and a push run builds main; cancelling either would leave the
+# required "Tests Passed" check failed on a head that is actually being
+# merged. github.ref is unique per queue ref and per branch, so those runs
+# never share a group with a pull request's.
+concurrency:
+  group: tests-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions: {}
 
 jobs:
