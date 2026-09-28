@@ -17,6 +17,12 @@ const (
 // VisibleItems always has it.
 const helpRouteName = "help"
 
+// AgentModeRoute is the canonical sidebar route the --agent-mode launch
+// intent opens. internal/app resolves the launch decision through this
+// constant, so the launch intent and the sidebar row navigate the same
+// surface, and a rename can never drift the two apart.
+const AgentModeRoute = "agents"
+
 // Kind classifies a route by the way a user enters it.
 type Kind string
 

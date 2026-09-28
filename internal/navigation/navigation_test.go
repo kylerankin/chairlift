@@ -528,6 +528,31 @@ func TestHiddenPrimariesFallBackToHelp(t *testing.T) {
 	}
 }
 
+func TestLaunchIntentTargetsACanonicalEnterableRoute(t *testing.T) {
+	// The --agent-mode launch intent reaches the Agents page the same way the
+	// sidebar row does. The route the launch intent names must be a canonical
+	// primary that resolves to an enterable page with everything enabled, so a
+	// refactor that renames or drops the Agents page fails this test before the
+	// GTK dispatch in internal/app ever runs. See chairlift#256.
+	route := routeByName(t, AgentModeRoute)
+	if !isPrimary(route) {
+		t.Fatalf("AgentModeRoute %q is not a canonical primary", AgentModeRoute)
+	}
+
+	routes := VisibleRoutes(everythingEnabled)
+	if !containsPage(routes, AgentModeRoute) {
+		t.Fatalf("VisibleRoutes with everything enabled did not offer %q", AgentModeRoute)
+	}
+
+	transition, ok := Resolve(AgentModeRoute, routes, alwaysConstructed)
+	if !ok {
+		t.Fatalf("Resolve(%q) rejected the launch route", AgentModeRoute)
+	}
+	if transition.Name != AgentModeRoute || transition.VisibleChild != AgentModeRoute {
+		t.Fatalf("Resolve(%q) = %#v, want it entered as a primary", AgentModeRoute, transition)
+	}
+}
+
 func TestWindowAndAppUseCanonicalNavigation(t *testing.T) {
 	_, filename, _, ok := runtime.Caller(0)
 	if !ok {

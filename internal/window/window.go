@@ -720,6 +720,15 @@ func (w *Window) PresentFirstRun() {
 	w.firstRun.Present(&w.Widget)
 }
 
+// NavigateToAgentsPage opens the Agent Mode page. It is the GTK half of the
+// --agent-mode launch intent: internal/app resolves the decision and calls
+// this from either the running-instance (onCommandLine) or cold-start
+// (onActivate) path, and the route is the canonical Agents page, so the
+// launch intent and the sidebar row navigate the same surface.
+func (w *Window) NavigateToAgentsPage() {
+	w.navigateToPage(navigation.AgentModeRoute)
+}
+
 // CheckFirstRun presents the onboarding assistant if required on startup.
 //
 // The disposition probe spawns `gsettings`, so it must not run inline here:

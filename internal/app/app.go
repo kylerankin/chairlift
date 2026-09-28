@@ -27,6 +27,11 @@ const appID = "io.projectbluefin.chairlift"
 // primary instance.
 const optionSetup = "setup"
 
+// optionAgentMode is the long name of the --agent-mode option, and with it the
+// key GLib uses for the option in the command-line dictionary it forwards to
+// the primary instance.
+const optionAgentMode = "agent-mode"
+
 var (
 	gTypeApplication gobject.Type
 	appRegistry      *gobj.InstanceRegistry
@@ -35,8 +40,9 @@ var (
 // Application wraps the Adwaita Application as a proper GObject subtype
 type Application struct {
 	adw.Application
-	window         *window.Window
-	setupRequested bool
+	window             *window.Window
+	setupRequested     bool
+	agentModeRequested bool
 }
 
 func init() {
@@ -127,7 +133,7 @@ func New() *Application {
 }
 
 // onCommandLine runs on the primary instance for every invocation, local or
-// remote, and owns the --setup decision.
+// remote, and owns the --setup and --agent-mode launch decisions.
 //
 // A remote invocation reaches here with the option dictionary GLib forwarded
 // from the other process; the primary's own os.Args says nothing about it.
@@ -136,17 +142,25 @@ func New() *Application {
 // check.
 func (a *Application) onCommandLine(cl *gio.ApplicationCommandLine) int32 {
 	setup := commandLineRequestsSetup(cl)
+	agentMode := commandLineRequestsAgentMode(cl)
 	running := a.window != nil
 
-	// Consumed by onActivate's first-run check when this invocation is the
-	// one that creates the window, so the explicit request skips the
-	// disposition probe instead of racing it to Present.
+	// Consumed by onActivate when this invocation is the one that creates the
+	// window, so an explicit request skips the disposition probe instead of
+	// racing it to Present.
 	a.setupRequested = setup
+	a.agentModeRequested = agentMode
 
 	a.Activate()
 
 	if setup && running && a.window != nil {
 		a.window.PresentFirstRun()
+	}
+	// A running instance opens the Agents page directly: activation reuses the
+	// window and deliberately does not re-run the first-run check, so the
+	// launch intent is handled here, mirroring --setup.
+	if agentMode && running && a.window != nil {
+		a.window.NavigateToAgentsPage()
 	}
 	return 0
 }
@@ -164,6 +178,21 @@ func commandLineRequestsSetup(cl *gio.ApplicationCommandLine) bool {
 		return false
 	}
 	return opts.Contains(optionSetup)
+}
+
+// commandLineRequestsAgentMode reports whether the invocation carried
+// --agent-mode. GLib keys the dictionary on the long option name, so the short
+// form needs no separate lookup, exactly as commandLineRequestsSetup does for
+// --setup.
+func commandLineRequestsAgentMode(cl *gio.ApplicationCommandLine) bool {
+	if cl == nil {
+		return false
+	}
+	opts := cl.GetOptionsDict()
+	if opts == nil {
+		return false
+	}
+	return opts.Contains(optionAgentMode)
 }
 
 // onActivate is called when the application is activated
@@ -188,6 +217,9 @@ func (a *Application) onActivate() {
 	a.setupKeyboardShortcuts(win.NavigationItems())
 	win.Present()
 	win.CheckFirstRun(a.setupRequested)
+	if a.agentModeRequested {
+		win.NavigateToAgentsPage()
+	}
 	log.Printf("app: window presented in %s (since activate)", time.Since(activateStart))
 }
 
@@ -228,6 +260,14 @@ func (a *Application) registerOptions() {
 		glib.GOptionFlagNoneValue,
 		glib.GOptionArgNoneValue,
 		"Display the first-run onboarding assistant.",
+		"",
+	)
+	a.AddMainOption(
+		optionAgentMode,
+		0,
+		glib.GOptionFlagNoneValue,
+		glib.GOptionArgNoneValue,
+		"Open the Agent Mode page.",
 		"",
 	)
 }
