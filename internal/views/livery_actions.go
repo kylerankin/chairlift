@@ -4,6 +4,7 @@ import (
 	"errors"
 	"log"
 
+	"github.com/projectbluefin/chairlift/internal/dryrun"
 	"github.com/projectbluefin/chairlift/internal/livery"
 	"github.com/projectbluefin/chairlift/internal/views/actionstate"
 	"github.com/projectbluefin/chairlift/internal/views/pageview"
@@ -216,15 +217,18 @@ func (uh *UserHome) onLiverySurfaceToggled(surface livery.Surface, enabled bool)
 				uh.reportLiveryFailure("restoring the previous panel icon", err)
 				return
 			}
-			// The capture is only taken when both saved values are empty, and
-			// ClearPanelSettings has just emptied the stored keys, so the
-			// in-memory copy has to follow or the next enable would keep
-			// reusing the first capture instead of reading what the user has
-			// now.
-			sgtk.RunOnMainThread(func() {
-				uh.liveryState.SavedPanelIcon = ""
-				uh.liveryState.SavedPanelMode = ""
-			})
+			// Under --dry-run ClearPanelSettings is a log-only no-op (apply.go),
+			// so the stored dconf keys are not emptied and the in-memory copy must
+			// keep the genuine saved values. Clearing here under dry-run would make
+			// the next live enable treat the panel as never having had overrides;
+			// CapturePanelOverrides would then return "","" and SetString would
+			// overwrite the real saved values in dconf with empty.
+			if !dryrun.Enabled() {
+				sgtk.RunOnMainThread(func() {
+					uh.liveryState.SavedPanelIcon = ""
+					uh.liveryState.SavedPanelMode = ""
+				})
+			}
 		}
 	}()
 }
