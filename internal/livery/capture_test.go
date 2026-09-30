@@ -82,3 +82,35 @@ func TestCapturePanelOverridesReady(t *testing.T) {
 		})
 	}
 }
+
+// TestClearPanelOverridesConfirmed covers the mirror decision on the disable
+// path: the confirmed in-memory copy may only be emptied when
+// ClearPanelSettings actually reached ForgetPanelOverrides.
+func TestClearPanelOverridesConfirmed(t *testing.T) {
+	tests := []struct {
+		name        string
+		dryRun      bool
+		wantCleared bool
+	}{
+		{
+			name:        "live disable really forgets the capture",
+			dryRun:      false,
+			wantCleared: true,
+		},
+		{
+			// ClearPanelSettings is log-only under --dry-run, so the stored
+			// keys keep the genuine saved values and the copy must too.
+			name:        "dry-run disable leaves the stored capture alone",
+			dryRun:      true,
+			wantCleared: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ClearPanelOverridesConfirmed(tc.dryRun); got != tc.wantCleared {
+				t.Fatalf("ClearPanelOverridesConfirmed(%v) = %v, want %v", tc.dryRun, got, tc.wantCleared)
+			}
+		})
+	}
+}

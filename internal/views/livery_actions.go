@@ -221,11 +221,13 @@ func (uh *UserHome) onLiverySurfaceToggled(surface livery.Surface, enabled bool)
 			// ClearPanelSettings has just emptied the stored keys, so the
 			// in-memory copy has to follow or the next enable would keep
 			// reusing the first capture instead of reading what the user has
-			// now.
-			sgtk.RunOnMainThread(func() {
-				uh.liveryState.SavedPanelIcon = ""
-				uh.liveryState.SavedPanelMode = ""
-			})
+			// now. Under --dry-run nothing was emptied, so the copy stays.
+			if livery.ClearPanelOverridesConfirmed(dryrun.Enabled()) {
+				sgtk.RunOnMainThread(func() {
+					uh.liveryState.SavedPanelIcon = ""
+					uh.liveryState.SavedPanelMode = ""
+				})
+			}
 		}
 	}()
 }

@@ -1143,6 +1143,19 @@ func CapturePanelOverridesReady(enabled bool, surface Surface, dryRun bool, save
 	return enabled && surface == Panel && !dryRun && savedIcon == "" && savedMode == ""
 }
 
+// ClearPanelOverridesConfirmed reports whether a panel disable actually
+// emptied the stored capture, so the confirmed in-memory copy must follow.
+//
+// This is the mirror of CapturePanelOverridesReady. Under --dry-run
+// ClearPanelSettings only logs and never reaches ForgetPanelOverrides, so the
+// stored keys keep the genuine saved values. Clearing the in-memory copy
+// anyway would make the next live enable look like a first enable, capture the
+// mark ChairLift had itself installed, and write those empty results over the
+// real saved values.
+func ClearPanelOverridesConfirmed(dryRun bool) bool {
+	return !dryRun
+}
+
 // PanelAvailable reports whether the panel mark can be set on this host.
 // On desktops that do not support the panel surface (such as KDE Plasma),
 // customization is omitted. On desktops supporting it (e.g. GNOME),
