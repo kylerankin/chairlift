@@ -1130,6 +1130,19 @@ func CapturePanelOverrides(ctx context.Context) (icon, mode string, ok bool) {
 	return icon, mode, true
 }
 
+// CapturePanelOverridesReady reports whether a first-enable panel capture
+// should run and advance the confirmed in-memory state.
+//
+// The capture only makes sense when the write will actually persist. Under
+// --dry-run nothing is written, so recording the previous icon and mode would
+// move confirmed state that no real write backs up; the next live enable would
+// then skip its own capture because the saved values already look populated.
+// enabled and surface select the panel first-enable case, and the saved values
+// being empty is the "first time" guard.
+func CapturePanelOverridesReady(enabled bool, surface Surface, dryRun bool, savedIcon, savedMode string) bool {
+	return enabled && surface == Panel && !dryRun && savedIcon == "" && savedMode == ""
+}
+
 // PanelAvailable reports whether the panel mark can be set on this host.
 // On desktops that do not support the panel surface (such as KDE Plasma),
 // customization is omitted. On desktops supporting it (e.g. GNOME),

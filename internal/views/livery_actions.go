@@ -4,6 +4,7 @@ import (
 	"errors"
 	"log"
 
+	"github.com/projectbluefin/chairlift/internal/dryrun"
 	"github.com/projectbluefin/chairlift/internal/livery"
 	"github.com/projectbluefin/chairlift/internal/views/actionstate"
 	"github.com/projectbluefin/chairlift/internal/views/pageview"
@@ -157,7 +158,7 @@ func (uh *UserHome) onLiverySurfaceToggled(surface livery.Surface, enabled bool)
 		ctx, cancel := livery.DefaultContext()
 		defer cancel()
 
-		if enabled && surface == livery.Panel && savedIcon == "" && savedMode == "" {
+		if livery.CapturePanelOverridesReady(enabled, surface, dryrun.Enabled(), savedIcon, savedMode) {
 			icon, mode, ok := livery.CapturePanelOverrides(ctx)
 			if !ok {
 				// The user layer could not be read, so there is nothing
