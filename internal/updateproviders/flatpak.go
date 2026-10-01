@@ -12,7 +12,7 @@ import (
 // FlatpakDeps contains the Flatpak operations used by the update provider.
 type FlatpakDeps struct {
 	Installed   func() bool
-	ListUpdates func(user bool) ([]flatpak.UpdateInfo, error)
+	ListUpdates func(ctx context.Context, user bool) ([]flatpak.UpdateInfo, error)
 	Update      func(ctx context.Context, appID string, user bool) error
 	DryRun      func() bool
 }
@@ -42,9 +42,9 @@ func (p *flatpakProvider) Available() bool {
 	return p.deps.Installed != nil && p.deps.Installed()
 }
 
-func (p *flatpakProvider) Check(context.Context) (updateflow.CheckResult, error) {
-	userUpdates, userErr := p.deps.ListUpdates(true)
-	systemUpdates, systemErr := p.deps.ListUpdates(false)
+func (p *flatpakProvider) Check(ctx context.Context) (updateflow.CheckResult, error) {
+	userUpdates, userErr := p.deps.ListUpdates(ctx, true)
+	systemUpdates, systemErr := p.deps.ListUpdates(ctx, false)
 
 	var items []updateflow.Item
 	items = append(items, flatpakItems(userUpdates)...)

@@ -426,7 +426,7 @@ func (uh *UserHome) loadFlatpakUpdatesGeneration(generation uint64) {
 
 	// Load user updates. The error is kept as a value, not just logged: the
 	// expander subtitle has to say that half the picture is missing.
-	userUpdates, userErr := flatpak.ListUpdates(true)
+	userUpdates, userErr := flatpak.ListUpdates(context.Background(), true)
 	if userErr != nil {
 		log.Printf("Error loading user flatpak updates: %v", userErr)
 	} else {
@@ -434,7 +434,7 @@ func (uh *UserHome) loadFlatpakUpdatesGeneration(generation uint64) {
 	}
 
 	// Load system updates
-	systemUpdates, systemErr := flatpak.ListUpdates(false)
+	systemUpdates, systemErr := flatpak.ListUpdates(context.Background(), false)
 	if systemErr != nil {
 		log.Printf("Error loading system flatpak updates: %v", systemErr)
 	} else {

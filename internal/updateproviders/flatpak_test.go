@@ -28,7 +28,7 @@ func TestFlatpakCheckMapsUserAndSystemUpdatesInScopeOrder(t *testing.T) {
 	var calls []bool
 	provider := newFlatpak(FlatpakDeps{
 		Installed: func() bool { return true },
-		ListUpdates: func(user bool) ([]flatpak.UpdateInfo, error) {
+		ListUpdates: func(ctx context.Context, user bool) ([]flatpak.UpdateInfo, error) {
 			calls = append(calls, user)
 			if user {
 				return []flatpak.UpdateInfo{{
@@ -99,7 +99,7 @@ func TestFlatpakCheckPreservesSuccessfulScopeWhenOtherScopeFails(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			provider := newFlatpak(FlatpakDeps{
 				Installed: func() bool { return true },
-				ListUpdates: func(user bool) ([]flatpak.UpdateInfo, error) {
+				ListUpdates: func(ctx context.Context, user bool) ([]flatpak.UpdateInfo, error) {
 					if user {
 						return test.user, test.userError
 					}
@@ -161,7 +161,7 @@ func TestFlatpakApplyUpdatesOnlyScopesInCheckedSnapshot(t *testing.T) {
 			var calls []bool
 			provider := newFlatpak(FlatpakDeps{
 				Installed: func() bool { return true },
-				ListUpdates: func(user bool) ([]flatpak.UpdateInfo, error) {
+				ListUpdates: func(ctx context.Context, user bool) ([]flatpak.UpdateInfo, error) {
 					if user {
 						return test.userItems, nil
 					}
@@ -196,7 +196,7 @@ func TestFlatpakApplyUsesSuccessfulScopeAfterPartialCheck(t *testing.T) {
 	var calls []bool
 	provider := newFlatpak(FlatpakDeps{
 		Installed: func() bool { return true },
-		ListUpdates: func(user bool) ([]flatpak.UpdateInfo, error) {
+		ListUpdates: func(ctx context.Context, user bool) ([]flatpak.UpdateInfo, error) {
 			if user {
 				return nil, userErr
 			}
@@ -229,7 +229,7 @@ func TestFlatpakApplyUsesSystemScopeFromNewerCheckAfterOlderCheckCompletes(t *te
 
 	provider := newFlatpak(FlatpakDeps{
 		Installed: func() bool { return true },
-		ListUpdates: func(user bool) ([]flatpak.UpdateInfo, error) {
+		ListUpdates: func(ctx context.Context, user bool) ([]flatpak.UpdateInfo, error) {
 			if user {
 				if userCalls.Add(1) == 1 {
 					return []flatpak.UpdateInfo{{Name: "Older User App", Installation: "user"}}, nil
