@@ -68,3 +68,35 @@ func TestStagingHandlersRenderThroughTheBoundedSink(t *testing.T) {
 		t.Errorf("updates_page.go mentions newStageProgressSink %d times, want 2 (one definition, one bootc staging call)", got)
 	}
 }
+
+// TestStagingTitlesAreNotPangoMarkup is the CI-enforced half of the fix for
+// issue #435. internal/views cannot host a test binary (puregotk panics
+// resolving GTK and graphene at package init —
+// docs/skills/gtk-headless-testing/SKILL.md), so the behavior a reviewer would
+// otherwise re-check by eye is asserted here against the flush handler's
+// source: every streamed line becomes a row title, and that title is command
+// output, so the row must render it literally rather than let AdwActionRow
+// parse it as Pango markup.
+func TestStagingTitlesAreNotPangoMarkup(t *testing.T) {
+	_, filename, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller could not locate wiring_test.go")
+	}
+	path := filepath.Join(filepath.Clean(filepath.Join(filepath.Dir(filename), "..")), "updates_page.go")
+
+	source, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	text := string(source)
+
+	// The streamed line reaches the row title, and the row disables Pango
+	// parsing before that title is set. Both must sit in the flush handler
+	// that renders the batch, not merely appear somewhere in the file.
+	if !strings.Contains(text, "msgRow.SetTitle(line.Text)") {
+		t.Error("updates_page.go renders a streamed line as a row title")
+	}
+	if !strings.Contains(text, "msgRow.SetUseMarkup(false)") {
+		t.Error("updates_page.go renders streamed command output as a row title without SetUseMarkup(false): it is parsed as Pango markup (issue #435)")
+	}
+}
