@@ -147,9 +147,9 @@ authorization rule.
 | Group | Key | Description |
 |-------|-----|-------------|
 | Profile Picture | `account_group` | The account's picture, chosen from Project Bluefin's dinosaur artwork; downloaded only when picked and set only on Apply, through AccountsService with a face-file fallback |
-| App Grid Livery | `livery_app_grid_group` | The Show Applications mark on GNOME, or the configured Kickoff applets on KDE Plasma; fetched from simpleicons.org by brand name and set once, never rotated. On Plasma, the group is unavailable when no Kickoff applet is configured |
-| Foundational Livery | `livery_foundation_group` | The GNOME top-bar menu mark, optionally advancing at each login; needs a GNOME session with the Custom Command Menu extension (omitted on Plasma) |
-| Dock Livery | `livery_dock_group` | The Files icon on GNOME or Dolphin on KDE Plasma, set to a CNCF project's color mark fetched from cncf/artwork via a searchable picker; on GNOME it changes Files everywhere GNOME draws it |
+| App Grid | `livery_app_grid_group` | The Show Applications mark on GNOME, or the configured Kickoff applets on KDE Plasma; fetched from simpleicons.org by brand name and set once, never rotated. On Plasma, the group is unavailable when no Kickoff applet is configured |
+| Top Bar | `livery_foundation_group` | The GNOME top-bar menu mark, optionally advancing at each login; needs a GNOME session with the Custom Command Menu extension (omitted on Plasma) |
+| Files | `livery_dock_group` | The Files icon on GNOME or Dolphin on KDE Plasma, set to a CNCF project's color mark fetched from cncf/artwork via a searchable picker; on GNOME it changes Files everywhere GNOME draws it |
 
 Selections persist in the `io.projectbluefin.chairlift.livery` GSettings
 schema, one of the three ChairLift ships (the others,

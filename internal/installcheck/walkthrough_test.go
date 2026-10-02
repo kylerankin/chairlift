@@ -205,9 +205,9 @@ func TestWalkthroughCoversEveryConfigurableGroup(t *testing.T) {
 		"troubleshooting_group": "Enhanced Troubleshooting",
 		// livery_page
 		"account_group":           "Profile Picture",
-		"livery_app_grid_group":   "App Grid Livery",
-		"livery_foundation_group": "Foundational Livery",
-		"livery_dock_group":       "Dock Livery",
+		"livery_app_grid_group":   "App Grid",
+		"livery_foundation_group": "Top Bar",
+		"livery_dock_group":       "Files",
 		// help_page
 		"help_resources_group": "issues",
 	}

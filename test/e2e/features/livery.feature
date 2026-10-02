@@ -12,14 +12,14 @@ Feature: Livery
   Scenario: Restoring a saved configuration on load writes nothing
     Given ChairLift is running
     When I open the "Livery" page
-    Then the "Customize the App Grid Icon" switch in the Livery "App Grid Livery" section is on
-    And the "Brand" row in the Livery "App Grid Livery" section says "GitLab"
-    And the "Customize the Panel Icon" switch in the Livery "Foundational Livery" section is on
-    And the "Mark" row in the Livery "Foundational Livery" section says "GNOME Foundation"
-    And the "Rotate at Login" switch in the Livery "Foundational Livery" section is on
-    And the "Customize the Files Icon" switch in the Livery "Dock Livery" section is on
-    And the "Project" row in the Livery "Dock Livery" section says "Prometheus"
-    And the "Rotate at Login" switch in the Livery "Dock Livery" section is on
+    Then the "Customize the App Grid Icon" switch in the Livery "App Grid" section is on
+    And the "Brand" row in the Livery "App Grid" section says "GitLab"
+    And the "Customize the Panel Icon" switch in the Livery "Top Bar" section is on
+    And the "Mark" row in the Livery "Top Bar" section says "GNOME Foundation"
+    And the "Rotate at Login" switch in the Livery "Top Bar" section is on
+    And the "Customize the Files Icon" switch in the Livery "Files" section is on
+    And the "Project" row in the Livery "Files" section says "Prometheus"
+    And the "Rotate at Login" switch in the Livery "Files" section is on
     And the Livery page announced no dry-run change
     And no Livery fetch was attempted
     And no Livery command changed any setting
@@ -31,13 +31,13 @@ Feature: Livery
     Given ChairLift is running
     When I open the "Livery" page
     Then the Livery page has finished loading
-    And the "Customize the Panel Icon" switch in the Livery "Foundational Livery" section is off
-    And the "Mark" row in the Livery "Foundational Livery" section says "Cloud Native Computing Foundation"
-    And the "Mark" row in the Livery "Foundational Livery" section is insensitive
-    And the "Rotate at Login" switch in the Livery "Foundational Livery" section is insensitive
-    And the "Brand" row in the Livery "App Grid Livery" section is insensitive
-    And the "Project" row in the Livery "Dock Livery" section is insensitive
-    And the "Rotate at Login" switch in the Livery "Dock Livery" section is insensitive
+    And the "Customize the Panel Icon" switch in the Livery "Top Bar" section is off
+    And the "Mark" row in the Livery "Top Bar" section says "Cloud Native Computing Foundation"
+    And the "Mark" row in the Livery "Top Bar" section is insensitive
+    And the "Rotate at Login" switch in the Livery "Top Bar" section is insensitive
+    And the "Brand" row in the Livery "App Grid" section is insensitive
+    And the "Project" row in the Livery "Files" section is insensitive
+    And the "Rotate at Login" switch in the Livery "Files" section is insensitive
     And the Livery page announced no dry-run change
 
   @stub.livery-no-extension
@@ -45,23 +45,23 @@ Feature: Livery
     Given ChairLift is running
     When I open the "Livery" page
     Then the Livery page has finished loading
-    And the Livery "Foundational Livery" section is not shown
-    And the Livery "App Grid Livery" section is shown
-    And the Livery "Dock Livery" section is shown
+    And the Livery "Top Bar" section is not shown
+    And the Livery "App Grid" section is shown
+    And the Livery "Files" section is shown
 
   @stub.livery-tools
   Scenario: Turning the panel mark on installs the default mark as a dry run
     Given ChairLift is running
     When I open the "Livery" page
-    And I toggle the "Customize the Panel Icon" switch in the Livery "Foundational Livery" section
+    And I toggle the "Customize the Panel Icon" switch in the Livery "Top Bar" section
     Then the Livery dry run would set saved-panel-icon to ""
     And the Livery dry run would set panel-enabled to true
     And the Livery dry run would install the "chairlift-livery-cncf-symbolic" icon in the "hicolor" theme
     And the Livery dry run would point the panel at "chairlift-livery-cncf-symbolic"
-    And the "Customize the Panel Icon" switch in the Livery "Foundational Livery" section is on
-    And the "Customize the Panel Icon" switch in the Livery "Foundational Livery" section is sensitive
-    And the "Mark" row in the Livery "Foundational Livery" section is sensitive
-    And the "Rotate at Login" switch in the Livery "Foundational Livery" section is sensitive
+    And the "Customize the Panel Icon" switch in the Livery "Top Bar" section is on
+    And the "Customize the Panel Icon" switch in the Livery "Top Bar" section is sensitive
+    And the "Mark" row in the Livery "Top Bar" section is sensitive
+    And the "Rotate at Login" switch in the Livery "Top Bar" section is sensitive
     And no Livery command changed any setting
     And no icon was written under the home directory
     And the action journal is empty
@@ -70,7 +70,7 @@ Feature: Livery
   Scenario: A panel icon the user set themselves is kept for revert
     Given ChairLift is running
     When I open the "Livery" page
-    And I toggle the "Customize the Panel Icon" switch in the Livery "Foundational Livery" section
+    And I toggle the "Customize the Panel Icon" switch in the Livery "Top Bar" section
     Then the Livery dry run would set saved-panel-icon to "starred-symbolic"
     And the Livery page ran "dconf read -d /org/gnome/shell/extensions/custom-command-list/menuicon-setting"
     And the Livery dry run would point the panel at "chairlift-livery-cncf-symbolic"
@@ -79,7 +79,7 @@ Feature: Livery
   Scenario: Picking a foundation mark from the searchable chooser
     Given ChairLift is running
     When I open the "Livery" page
-    And I activate the "Mark" row in the Livery "Foundational Livery" section
+    And I activate the "Mark" row in the Livery "Top Bar" section
     Then the Livery chooser titled "Choose a Mark" is shown
     And the Livery chooser offers "Cloud Native Computing Foundation"
     And the Livery chooser offers "Custom SVG…"
@@ -88,7 +88,7 @@ Feature: Livery
     And the Livery chooser does not offer "Cloud Native Computing Foundation"
     When I pick "GNOME Foundation" in the Livery chooser
     Then the Livery chooser is closed
-    And the "Mark" row in the Livery "Foundational Livery" section says "GNOME Foundation"
+    And the "Mark" row in the Livery "Top Bar" section says "GNOME Foundation"
     And the Livery dry run would set panel-foundation to "gnome"
     And the Livery dry run would install the "chairlift-livery-gnome-symbolic" icon in the "hicolor" theme
     And the Livery dry run would point the panel at "chairlift-livery-gnome-symbolic"
@@ -98,7 +98,7 @@ Feature: Livery
   Scenario: A search that matches nothing offers nothing to pick
     Given ChairLift is running
     When I open the "Livery" page
-    And I activate the "Project" row in the Livery "Dock Livery" section
+    And I activate the "Project" row in the Livery "Files" section
     Then the Livery chooser titled "Choose a Project" is shown
     When I search the Livery chooser for "zzqxnothing"
     Then the Livery chooser offers only "No matching project"
@@ -106,14 +106,14 @@ Feature: Livery
     When I pick "No matching project" in the Livery chooser
     Then the Livery chooser is still open
     And the Livery dry run would not set dock-foundation
-    And the "Project" row in the Livery "Dock Livery" section says "Certified Kubernetes"
+    And the "Project" row in the Livery "Files" section says "Certified Kubernetes"
 
   @stub.livery-tools
   Scenario: The brand chooser's empty result does not blame cncf/artwork
     Given ChairLift is running
     When I open the "Livery" page
-    And I toggle the "Customize the App Grid Icon" switch in the Livery "App Grid Livery" section
-    And I activate the "Brand" row in the Livery "App Grid Livery" section
+    And I toggle the "Customize the App Grid Icon" switch in the Livery "App Grid" section
+    And I activate the "Brand" row in the Livery "App Grid" section
     Then the Livery chooser titled "Choose a Brand" is shown
     When I search the Livery chooser for "zzqxnothing"
     Then the Livery chooser offers only "No matching brand"
@@ -123,15 +123,15 @@ Feature: Livery
   Scenario: Picking a brand when simpleicons.org is unreachable fails closed
     Given ChairLift is running
     When I open the "Livery" page
-    And I toggle the "Customize the App Grid Icon" switch in the Livery "App Grid Livery" section
+    And I toggle the "Customize the App Grid Icon" switch in the Livery "App Grid" section
     Then the Livery dry run would set app-grid-enabled to true
-    And the "Customize the App Grid Icon" switch in the Livery "App Grid Livery" section is sensitive
-    When I activate the "Brand" row in the Livery "App Grid Livery" section
+    And the "Customize the App Grid Icon" switch in the Livery "App Grid" section is sensitive
+    When I activate the "Brand" row in the Livery "App Grid" section
     Then the Livery chooser titled "Choose a Brand" is shown
     When I search the Livery chooser for "gitlab"
     And I pick "GitLab" in the Livery chooser
     Then the Livery chooser is closed
-    And the "Brand" row in the Livery "App Grid Livery" section says "GitLab"
+    And the "Brand" row in the Livery "App Grid" section says "GitLab"
     And the Livery dry run would set app-grid-slug to "gitlab"
     And a Livery error toast says "Livery: fetching that brand mark failed"
     And the Livery dry run would install no icon
@@ -141,12 +141,12 @@ Feature: Livery
   Scenario: Picking a CNCF project when cncf/artwork is unreachable fails closed
     Given ChairLift is running
     When I open the "Livery" page
-    And I activate the "Project" row in the Livery "Dock Livery" section
+    And I activate the "Project" row in the Livery "Files" section
     Then the Livery chooser titled "Choose a Project" is shown
     When I search the Livery chooser for "prometheus"
     And I pick "Prometheus" in the Livery chooser
     Then the Livery chooser is closed
-    And the "Project" row in the Livery "Dock Livery" section says "Prometheus"
+    And the "Project" row in the Livery "Files" section says "Prometheus"
     And the Livery dry run would set dock-foundation to "prometheus"
     And a Livery error toast says "Livery: fetching that project's icon failed"
     And the Livery dry run would install no icon
@@ -156,14 +156,14 @@ Feature: Livery
   Scenario: Rotation at login is scheduled as a dry run and writes no unit
     Given ChairLift is running
     When I open the "Livery" page
-    And I toggle the "Rotate at Login" switch in the Livery "Foundational Livery" section
+    And I toggle the "Rotate at Login" switch in the Livery "Top Bar" section
     Then the Livery dry run would set panel-rotate to true
     And the Livery dry run would write and enable the rotation unit
-    And the "Rotate at Login" switch in the Livery "Foundational Livery" section is on
+    And the "Rotate at Login" switch in the Livery "Top Bar" section is on
     And no rotation unit was written under the home directory
-    When I toggle the "Rotate at Login" switch in the Livery "Foundational Livery" section
+    When I toggle the "Rotate at Login" switch in the Livery "Top Bar" section
     Then the Livery dry run would set panel-rotate to false
-    And the "Rotate at Login" switch in the Livery "Foundational Livery" section is off
+    And the "Rotate at Login" switch in the Livery "Top Bar" section is off
     And no Livery command changed any setting
     And no rotation unit was written under the home directory
 
@@ -193,7 +193,7 @@ Feature: Livery
     When I open the "Livery" page
     Then the Livery page has finished loading
     And the Livery "Profile Picture" section is not shown
-    And the Livery "App Grid Livery" section is not shown
-    And the Livery "Foundational Livery" section is shown
-    And the Livery "Dock Livery" section is shown
+    And the Livery "App Grid" section is not shown
+    And the Livery "Top Bar" section is shown
+    And the Livery "Files" section is shown
     And the Livery page announced no dry-run change

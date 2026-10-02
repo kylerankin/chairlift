@@ -174,7 +174,7 @@ AccountsService is unavailable the picture is saved to your home folder
 instead and appears after you next sign in, and the confirmation says which of
 the two happened.
 
-**App Grid Livery** is your own mark on the Show Applications button on
+**App Grid** is your own mark on the Show Applications button on
 GNOME. On KDE Plasma, the same chooser updates each configured Kickoff applet;
 if no Kickoff applet is present, the group reports unavailable instead of
 pretending the setting can be applied. Search all 3,461 brands
@@ -184,14 +184,14 @@ You set it once; it never changes on its own, because a personal mark that
 rotated would stop being personal. Turning the mark off resets the Kickoff applet
 to Plasma's default icon.
 
-On GNOME, **Foundational Livery** puts a foundation's mark in the top bar:
+On GNOME, **Top Bar** puts a foundation's mark in the menu button at the top of the screen:
 CNCF, the Linux Foundation, GNOME, freedesktop.org, Apache, Rust, Universal
 Blue, Bazzite, Aurora, or the Open Gaming Collective. This section is omitted
 on Plasma, which has no corresponding top-bar surface. On a gaming image the
 collective's mark is the one you start with, since that is whose work the
 image ships — pick any other and it stays picked.
 
-**Dock Livery** marks the Files icon on GNOME or Dolphin on KDE Plasma with
+**Files** marks your file manager on GNOME — or Dolphin on KDE Plasma — with
 the project you actually work on. Every CNCF project that publishes artwork
 is in the list — 214 of them, Kubernetes through bootc — so the picker searches
 rather than scrolls, and each one arrives as the project's own colour icon

@@ -25,11 +25,14 @@ const (
 	LiveryDockFragment    = "What you roll with"
 )
 
-// Section titles.
+// Section titles. These are plain surface names so a reader can read the
+// page as supported tasks — Profile Picture, then the three Desktop Icons —
+// rather than the internal App Grid / Foundational / Dock taxonomy. The group
+// identity is unchanged; only the label a reader sees is renamed.
 const (
-	LiveryAppGridTitle = "App Grid Livery"
-	LiveryPanelTitle   = "Foundational Livery"
-	LiveryDockTitle    = "Dock Livery"
+	LiveryAppGridTitle = "App Grid"
+	LiveryPanelTitle   = "Top Bar"
+	LiveryDockTitle    = "Files"
 )
 
 // LiveryChoice is the combo-row model for a foundation section: the labels in

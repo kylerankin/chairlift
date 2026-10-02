@@ -115,8 +115,8 @@ Feature: Setup assistant
     And the action journal is empty
     When I press "Escape"
     And I open the "Livery" page
-    Then the "Customize the Panel Icon" switch in the Livery "Foundational Livery" section is on
-    And the "Customize the Files Icon" switch in the Livery "Dock Livery" section is off
+    Then the "Customize the Panel Icon" switch in the Livery "Top Bar" section is on
+    And the "Customize the Files Icon" switch in the Livery "Files" section is off
 
   @args.--setup @stub.livery-no-extension
   Scenario: An Appearance choice this desktop cannot apply stays locked and says so
