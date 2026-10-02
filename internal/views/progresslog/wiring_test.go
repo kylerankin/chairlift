@@ -94,9 +94,19 @@ func TestStagingTitlesAreNotPangoMarkup(t *testing.T) {
 	// parsing before that title is set. Both must sit in the flush handler
 	// that renders the batch, not merely appear somewhere in the file.
 	if !strings.Contains(text, "msgRow.SetTitle(line.Text)") {
-		t.Error("updates_page.go renders a streamed line as a row title")
+		t.Error("updates_page.go does not render a streamed line as a row title: the markup assertions below no longer cover the streamed text (issue #435)")
 	}
 	if !strings.Contains(text, "msgRow.SetUseMarkup(false)") {
 		t.Error("updates_page.go renders streamed command output as a row title without SetUseMarkup(false): it is parsed as Pango markup (issue #435)")
+	}
+
+	// The same batch's last line also reaches the activity row's subtitle, and
+	// AdwActionRow parses subtitles as Pango markup too, so that row must
+	// disable markup where it is constructed.
+	if !strings.Contains(text, "s.activityRow.SetSubtitle(batch.Lines[len(batch.Lines)-1].Text)") {
+		t.Error("updates_page.go does not render the last streamed line as the activity row subtitle: the markup assertion below no longer covers the streamed text (issue #435)")
+	}
+	if !strings.Contains(text, "activityRow.SetUseMarkup(false)") {
+		t.Error("updates_page.go renders streamed command output as the activity row subtitle without SetUseMarkup(false): it is parsed as Pango markup (issue #435)")
 	}
 }

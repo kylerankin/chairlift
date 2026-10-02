@@ -349,6 +349,11 @@ func (uh *UserHome) onBootcStageClicked() {
 	// Activity row with a spinner (the stage script emits no percentages,
 	// so progress is indeterminate).
 	activityRow := adw.NewActionRow()
+	// flush() sets this row's subtitle from the last streamed stage/llmman
+	// line, i.e. untrusted command output; AdwActionRow parses a subtitle as
+	// Pango markup unless use-markup is FALSE, so a '<' or '&' would garble
+	// the row with a GTK warning (issue #435).
+	activityRow.SetUseMarkup(false)
 	activityRow.SetTitle("Progress")
 	activityRow.SetSubtitle("Working…")
 	spinner := gtk.NewSpinner()
