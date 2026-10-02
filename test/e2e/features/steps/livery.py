@@ -193,7 +193,7 @@ def step_section_hidden(context, section):
 def step_page_loaded(context):
     """refreshLiveryState has applied: the Files switch, which applyLiveryState
     always makes sensitive, is operable."""
-    ok = atspi.poll(lambda: atspi.sensitive(_switch(context, "Customize the Files Icon", "Dock Livery")))
+    ok = atspi.poll(lambda: atspi.sensitive(_switch(context, "Customize the Files Icon", "Files")))
     assert ok, "the Livery page never finished loading its saved state"
 
 
