@@ -49,6 +49,7 @@ type UpdateShell struct {
 	closed              atomic.Bool
 	operationMu         sync.Mutex
 	mutation            atomic.Bool
+	restartInFlight     atomic.Bool
 	sourcesReady        bool
 	closeBlocked        bool
 	toolbarView         *adw.ToolbarView
@@ -354,8 +355,10 @@ func (s *UpdateShell) StartRestart() {
 	if s == nil {
 		return
 	}
-	// On a live run this process is about to go away, and a second press
-	// would only queue a redundant PolicyKit prompt.
+	// Block a second press while the privileged restart is in flight. A later
+	// Render recomputes the button from shell state, so the flag — not just the
+	// widget call — is what keeps it disabled across snapshots (issue #447).
+	s.restartInFlight.Store(true)
 	if s.primary != nil {
 		s.primary.SetSensitive(false)
 	}
@@ -367,6 +370,7 @@ func (s *UpdateShell) StartRestart() {
 		// after authentication; ask for a restart instead.
 		if !ublue.StatusCached().Supports(ubluehelper.CommandRestart) {
 			sgtk.RunOnMainThread(func() {
+				s.restartInFlight.Store(false)
 				if s.primary != nil {
 					s.primary.SetSensitive(true)
 				}
@@ -380,6 +384,7 @@ func (s *UpdateShell) StartRestart() {
 		err := ublue.Restart(ctx)
 
 		sgtk.RunOnMainThread(func() {
+			s.restartInFlight.Store(false)
 			if s.primary != nil {
 				s.primary.SetSensitive(true)
 			}
@@ -673,8 +678,12 @@ func (s *UpdateShell) renderPrimaryAction(presentation updatepresent.Presentatio
 	if presentation.ActionStyle != "" {
 		s.primary.AddCssClass(presentation.ActionStyle)
 	}
-	s.primary.SetSensitive(presentation.ShowAction &&
-		updatepresent.CanStartOperation(s.Busy(), s.closed.Load()))
+	s.primary.SetSensitive(updatepresent.PrimaryActionEnabled(
+		presentation.ShowAction,
+		s.Busy(),
+		s.closed.Load(),
+		s.restartInFlight.Load(),
+	))
 }
 
 func (s *UpdateShell) renderProgress(snapshot updateflow.Snapshot) {

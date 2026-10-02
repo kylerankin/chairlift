@@ -398,6 +398,33 @@ func TestCanStartOperationRejectsBusyOrClosedShell(t *testing.T) {
 	}
 }
 
+func TestPrimaryActionEnabled(t *testing.T) {
+	tests := []struct {
+		name            string
+		showAction      bool
+		busy            bool
+		closed          bool
+		restartInFlight bool
+		want            bool
+	}{
+		{name: "ready to restart", showAction: true, want: true},
+		{name: "no action", showAction: false, want: false},
+		{name: "busy", busy: true, showAction: true, want: false},
+		{name: "closed", closed: true, showAction: true, want: false},
+		{name: "restart in flight", restartInFlight: true, showAction: true, want: false},
+		{name: "busy and restart in flight", busy: true, restartInFlight: true, showAction: true, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := PrimaryActionEnabled(tt.showAction, tt.busy, tt.closed, tt.restartInFlight); got != tt.want {
+				t.Fatalf("PrimaryActionEnabled(%t, %t, %t, %t) = %t, want %t",
+					tt.showAction, tt.busy, tt.closed, tt.restartInFlight, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestShouldPublishRejectsClosedShell(t *testing.T) {
 	if !ShouldPublish(false) {
 		t.Fatal("ShouldPublish(false) = false, want true")
