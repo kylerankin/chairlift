@@ -823,7 +823,10 @@ questions stay on this computer.
 half-done install resumes: `ublue-os/tap` (only when a package is missing),
 `linux-mcp-server`, then `cpio` before the `goose-linux` cask — the cask's
 preflight pipes its RPM through a `cpio` it does not declare and Bluefin
-does not ship. Goose Desktop is published for x86_64 only, so Setup returns
+does not ship. Each `ublue-os/tap` package is trusted by its qualified name
+(`brew trust --formula`/`--cask`) right before its install when brew reports
+the tap untrusted, because Homebrew refuses packages from an untrusted tap.
+Goose Desktop is published for x86_64 only, so Setup returns
 `ErrUnsupported` elsewhere. Homebrew's `stateChangingCommands` includes
 `tap`, so dry-run never changes package sources. Nothing crosses a privilege
 boundary.

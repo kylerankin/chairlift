@@ -147,11 +147,18 @@ func Detect() State {
 	}
 }
 
-// tapPackage and installPackage are injection seams for the Homebrew
-// operations, so the setup sequence is testable without shelling out.
+// tapPackage, trustPackage, and installPackage are injection seams for the
+// Homebrew operations, so the setup sequence is testable without shelling
+// out.
 var (
 	tapPackage     = homebrew.Tap
 	installPackage = homebrew.Install
+	trustPackage   = func(name string, cask bool) error {
+		if cask {
+			return homebrew.TrustCask(name)
+		}
+		return homebrew.TrustFormula(name)
+	}
 )
 
 // Step is one action in the setup sequence.
@@ -173,16 +180,28 @@ func Steps() []Step {
 			Needed: func(s State) bool { return !s.Installed() },
 			Run:    func() error { return tapPackage(Tap) },
 		},
+		// Homebrew refuses a formula or cask from a tap the user has not
+		// trusted, and ublue-os/tap is untrusted on a stock host, so each
+		// ublue-os/tap package is trusted by its qualified name — not the
+		// tap — right before it is installed (#482). cpio is homebrew/core.
 		{
 			Name:   "Installing the system inspection tools",
 			Needed: func(s State) bool { return s.ServerPath == "" },
-			Run:    func() error { return installPackage(ServerFormula, false) },
+			Run: func() error {
+				if err := trustPackage(ServerFormula, false); err != nil {
+					return err
+				}
+				return installPackage(ServerFormula, false)
+			},
 		},
 		{
 			Name:   "Installing the Goose app",
 			Needed: func(s State) bool { return s.DesktopPath == "" },
 			Run: func() error {
 				if err := installPackage(ExtractorFormula, false); err != nil {
+					return err
+				}
+				if err := trustPackage(DesktopCask, true); err != nil {
 					return err
 				}
 				return installPackage(DesktopCask, true)

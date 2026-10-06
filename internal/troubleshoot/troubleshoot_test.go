@@ -36,11 +36,19 @@ func fakeHost(t *testing.T, arch string, present ...string) string {
 // to do, in order.
 func recordBrew(t *testing.T, fail string) *[]string {
 	t.Helper()
-	prevTap, prevInstall := tapPackage, installPackage
-	t.Cleanup(func() { tapPackage, installPackage = prevTap, prevInstall })
+	prevTap, prevInstall, prevTrust := tapPackage, installPackage, trustPackage
+	t.Cleanup(func() { tapPackage, installPackage, trustPackage = prevTap, prevInstall, prevTrust })
 	var calls []string
 	tapPackage = func(name string) error {
 		calls = append(calls, "tap "+name)
+		return nil
+	}
+	trustPackage = func(name string, cask bool) error {
+		call := "trust --formula " + name
+		if cask {
+			call = "trust --cask " + name
+		}
+		calls = append(calls, call)
 		return nil
 	}
 	installPackage = func(name string, cask bool) error {
@@ -96,6 +104,8 @@ func TestReadyNeedsEveryPiece(t *testing.T) {
 
 // The desktop cask pipes its RPM into cpio, which it does not declare and
 // Bluefin does not ship: cpio must be installed first, every time the cask is.
+// Each ublue-os/tap package is trusted right before its install, or Homebrew
+// refuses it from the untrusted tap (#482).
 func TestSetupInstallsTheExtractorBeforeTheCask(t *testing.T) {
 	fakeHost(t, "amd64")
 	calls := recordBrew(t, "")
@@ -106,8 +116,10 @@ func TestSetupInstallsTheExtractorBeforeTheCask(t *testing.T) {
 
 	want := []string{
 		"tap " + Tap,
+		"trust --formula " + ServerFormula,
 		"install " + ServerFormula,
 		"install " + ExtractorFormula,
+		"trust --cask " + DesktopCask,
 		"install --cask " + DesktopCask,
 	}
 	if !reflect.DeepEqual(*calls, want) {

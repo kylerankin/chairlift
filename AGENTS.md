@@ -764,6 +764,9 @@ An agent must not break these:
   (tap `ublue-os/tap` only when something is missing, `linux-mcp-server`,
   then `cpio` before the `goose-linux` cask, whose preflight pipes the RPM
   through a `cpio` Bluefin does not ship; `ErrUnsupported` off x86_64).
+  Each `ublue-os/tap` package is trusted by its qualified name right before
+  its install (`homebrew.TrustFormula`/`TrustCask`, only when brew reports
+  the tap untrusted) — never the tap wholesale.
   When Goose is already running in the profile (its `SingletonLock` names a
   live process on this host and was written during this boot, so a reused
   pid after a reboot does not count), `agentmode.Launch` opens Goose the ordinary

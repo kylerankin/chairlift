@@ -242,3 +242,17 @@ func TestTrustFormulaTrustsOnlyAnUntrustedTap(t *testing.T) {
 		})
 	}
 }
+
+// TestTrustCaskTrustsTheCaskNamespace pins that a cask is trusted with
+// --cask: `brew trust --formula` on a cask name trusts nothing.
+func TestTrustCaskTrustsTheCaskNamespace(t *testing.T) {
+	argvLog := fakeBrewOnPath(t, "case \"$1\" in\n"+
+		"tap-info) printf '%s' '[{\"name\":\"ublue-os/tap\",\"trusted\":false}]' ;;\n"+
+		"trust) ;;\n"+
+		"*) echo \"unexpected: $*\" >&2; exit 1 ;;\n"+
+		"esac")
+	if err := TrustCask("ublue-os/tap/goose-linux"); err != nil {
+		t.Fatalf("TrustCask: %v", err)
+	}
+	assertArgv(t, argvLog, []string{"tap-info --json ublue-os/tap", "trust --cask ublue-os/tap/goose-linux"})
+}
