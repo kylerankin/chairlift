@@ -340,6 +340,17 @@ func logHint() string {
 	return gotext.Get("Details are in the log.")
 }
 
+// RestartFailedMessage is the fixed, non-technical message shown when a
+// restart cannot be started. Restart is the one privileged update action with
+// no "Details" expander to point the user at, so the raw error is logged by
+// the caller (update_shell.go) for diagnostics but never shown. Like the
+// other privileged actions it carries a fixed "Try again" prompt rather than
+// a FailureHint: a raw %v here would reintroduce the exact failure chairlift#554
+// was filed for, so the message is deliberately not built from err.
+func RestartFailedMessage() string {
+	return gotext.Get("Couldn't restart your computer. Try again.")
+}
+
 // networkPhrases are what the tools behind the update sources print when a
 // request never reached its server: libcurl through Flatpak/OSTree and
 // Homebrew, glibc's resolver, Go's net package, and bootc's HTTP client.

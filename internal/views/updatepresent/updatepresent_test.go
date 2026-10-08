@@ -756,3 +756,22 @@ func TestEveryPhaseShowsTheHeader(t *testing.T) {
 		}
 	}
 }
+
+// RestartFailedMessage is the toast shown when a restart cannot be started.
+// Restart is the one privileged update action with no "Details" expander, so
+// the raw error is logged, never shown. This guards chairlift#554: the message
+// must be a fixed, plain-words prompt with no format verb, so a raw error can
+// never be formatted into the toast again.
+func TestRestartFailedMessageHasNoRawError(t *testing.T) {
+	got := RestartFailedMessage()
+	if got == "" {
+		t.Fatal("RestartFailedMessage() must not be empty")
+	}
+	if strings.Contains(got, "%") {
+		t.Fatalf("RestartFailedMessage() = %q must not format a raw error", got)
+	}
+	want := "Couldn't restart your computer. Try again."
+	if got != want {
+		t.Fatalf("RestartFailedMessage() = %q, want %q", got, want)
+	}
+}

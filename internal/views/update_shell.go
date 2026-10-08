@@ -490,7 +490,8 @@ func (s *UpdateShell) StartRestart() {
 				return
 			}
 			if err != nil {
-				s.toasts.ShowErrorToast(fmt.Sprintf("Restart failed: %v", err))
+				log.Printf("updates: restart: %v", err)
+				s.toasts.ShowErrorToast(updatepresent.RestartFailedMessage())
 				return
 			}
 			if dryrun.Enabled() {
