@@ -9,6 +9,7 @@ import (
 	sgtk "github.com/frostyard/snowkit/gtk"
 	"github.com/projectbluefin/chairlift/internal/dryrun"
 	"github.com/projectbluefin/chairlift/internal/homebrew"
+	"github.com/projectbluefin/chairlift/internal/livery"
 	"github.com/projectbluefin/chairlift/internal/views/actionmsg"
 	"github.com/projectbluefin/chairlift/internal/views/actionstate"
 	"github.com/projectbluefin/chairlift/internal/views/bundleview"
@@ -16,8 +17,13 @@ import (
 )
 
 // buildWallpapersGroup discovers the external collection without constructing
-// an unavailable-tool card. Other Livery controls have independent lifetimes.
+// an unavailable-tool card. Damask is independent of Homebrew, so it is
+// detected synchronously and the group is built even when no wallpaper cask
+// is installed.
 func (uh *UserHome) buildWallpapersGroup(page *adw.PreferencesPage) {
+	ctx, cancel := livery.DefaultContext()
+	defer cancel()
+	damaskAvailable := livery.DamaskInstalled(ctx)
 	var paths []string
 	if cfg := uh.config.GetGroupConfig("applications_page", "brew_bundles_group"); cfg != nil {
 		paths = append(paths, cfg.BundlesPaths...)
@@ -37,13 +43,7 @@ func (uh *UserHome) buildWallpapersGroup(page *adw.PreferencesPage) {
 				continue
 			}
 			sgtk.RunOnMainThread(func() {
-				if uh.wallpapersGroup == nil {
-					uh.wallpapersGroup = adw.NewPreferencesGroup()
-					uh.wallpapersGroup.SetTitle("Wallpapers")
-					uh.wallpapersGroup.SetDescription("Curated wallpaper collections for your desktop.")
-					page.Add(uh.wallpapersGroup)
-				}
-				group := uh.wallpapersGroup
+				group := uh.publishWallpaperGroup(page, damaskAvailable)
 				row := adw.NewExpanderRow()
 				row.SetUseMarkup(false)
 				row.SetTitle("Wallpaper Collections")
@@ -126,5 +126,11 @@ func (uh *UserHome) buildWallpapersGroup(page *adw.PreferencesPage) {
 				refresh()
 			})
 		}
+		// Always publish once, even if brew found nothing, so a Damask-only
+		// group still gets built. publishWallpaperGroup is idempotent: the
+		// nil-guards build the group and its controls a single time.
+		sgtk.RunOnMainThread(func() {
+			uh.publishWallpaperGroup(page, damaskAvailable)
+		})
 	}()
 }

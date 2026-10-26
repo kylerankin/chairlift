@@ -1,0 +1,54 @@
+package livery
+
+import (
+	"context"
+	"log"
+	"strconv"
+
+	"github.com/projectbluefin/chairlift/internal/dryrun"
+)
+
+// NativeBackgroundSchema is the GNOME schema that owns the desktop picture.
+// ChairLift does not declare it — it is GNOME's — so writing it requires the
+// schema to be installed on the host. That is exactly why selection is
+// offered only where NativeBackgroundAvailable reports true: a schema that is
+// absent would turn a selection into a silent no-op.
+const NativeBackgroundSchema = "org.gnome.desktop.background"
+
+const (
+	// pictureURIKey and pictureURIDarkKey are GNOME's light/dark pairs of
+	// the same key. Both must move together, or a user whose session flips
+	// between colour schemes would see one state updated and the other not.
+	pictureURIKey     = "picture-uri"
+	pictureURIDarkKey = "picture-uri-dark"
+)
+
+// NativeBackgroundAvailable reports whether GNOME owns the desktop-background
+// schema on this host. A missing schema returns false, so the page offers
+// wallpaper selection only where it can actually apply the picture.
+func NativeBackgroundAvailable(ctx context.Context) bool {
+	_, err := gsettingsGet(ctx, NativeBackgroundSchema, pictureURIKey)
+	return err == nil
+}
+
+// ApplyNativeBackground writes file to GNOME's picture-uri and picture-uri-dark
+// so the selected collection image becomes the desktop picture in both colour
+// schemes. It writes neither key when dry-run is enabled, and reports the
+// missing-schema case as ErrExtensionMissing so the page can say so rather
+// than pretending the picture changed.
+//
+// gsettingsSet quotes the path as a GVariant string, which is the same form
+// SetString uses for ChairLift's own string keys.
+func ApplyNativeBackground(ctx context.Context, file string) error {
+	if dryrun.Enabled() {
+		log.Printf("[DRY-RUN] would set %s %s and %s %s to %q",
+			NativeBackgroundSchema, pictureURIKey,
+			NativeBackgroundSchema, pictureURIDarkKey, file)
+		return nil
+	}
+	quoted := strconv.Quote(file)
+	if err := gsettingsSet(ctx, NativeBackgroundSchema, pictureURIKey, quoted); err != nil {
+		return err
+	}
+	return gsettingsSet(ctx, NativeBackgroundSchema, pictureURIDarkKey, quoted)
+}

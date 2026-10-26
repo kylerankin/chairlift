@@ -308,6 +308,10 @@ func (uh *UserHome) applyLiveryState(state livery.State, panelAvailable, appGrid
 
 	uh.liveryState.PanelID = pageview.LiveryIDForIndex(panelChoice.Selected)
 	uh.syncLiveryFoundationGrid()
+	// The Wallpapers group may have been built before this load completed —
+	// its discovery runs in a goroutine — so re-sync the controls now that
+	// the persisted state is in place.
+	uh.syncWallpaperState()
 
 	if uh.liveryAppGridSwitch != nil {
 		uh.liveryAppGridSwitch.SetSensitive(appGridAvailable)

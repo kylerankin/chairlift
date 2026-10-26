@@ -47,6 +47,13 @@ const (
 	KeyDockRotate  = "dock-rotate"
 
 	KeyRotationToken = "last-rotation-token"
+
+	// Wallpaper — "what you sit behind". The active channel is stored here so
+	// the headless rotation pass knows which channel to advance; the selected
+	// image itself is written to GNOME's own background schema, not ChairLift's.
+	KeyWallpaperChannel = "wallpaper-channel"
+	KeyWallpaperImage   = "wallpaper-image"
+	KeyWallpaperRotate  = "wallpaper-rotate"
 )
 
 // Keys is the complete key inventory, in schema order.
@@ -56,6 +63,9 @@ var Keys = []string{
 	KeySavedPanelIcon, KeySavedPanelMode,
 	KeyDockEnabled, KeyDockID, KeyDockCustom, KeyDockRotate,
 	KeyRotationToken,
+	KeyWallpaperChannel,
+	KeyWallpaperImage,
+	KeyWallpaperRotate,
 }
 
 // ErrSchemaMissing reports that the Livery settings schema is not installed.
@@ -91,6 +101,18 @@ type State struct {
 	DockRotate  bool
 
 	RotationToken string
+
+	// WallpaperChannel is the id of the active wallpaper channel. Rotation
+	// advances the selected image within this channel; empty means no channel
+	// has been chosen yet.
+	WallpaperChannel string
+	// WallpaperImage is the id of the selected image within the active
+	// channel. It is persisted so the page highlights the right thumbnail on
+	// reload and rotation advances from it; the image's own path is written to
+	// GNOME's background schema, not ChairLift's.
+	WallpaperImage string
+	// WallpaperRotate advances the selected image at each login while true.
+	WallpaperRotate bool
 }
 
 // AppGridSource returns the artwork source for the app-grid surface.
@@ -212,6 +234,11 @@ func Load(ctx context.Context) (State, error) {
 		DockRotate:  parseBool(values[KeyDockRotate]),
 
 		RotationToken: values[KeyRotationToken],
+
+		WallpaperChannel: values[KeyWallpaperChannel],
+
+		WallpaperImage:  values[KeyWallpaperImage],
+		WallpaperRotate: parseBool(values[KeyWallpaperRotate]),
 	}
 	return s, nil
 }
