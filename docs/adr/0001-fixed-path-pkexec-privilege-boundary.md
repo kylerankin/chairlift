@@ -37,11 +37,10 @@ that is a Go constant, matching the policy's `exec.path` annotation exactly:
 The updex policy (`data/io.projectbluefin.chairlift.updex.policy`) declares one
 action per helper subcommand, each selecting its command through `exec.argv1`
 (`enable-feature`, `disable-feature`, `update`). The ublue policy
-(`data/io.projectbluefin.chairlift.ublue.policy`) does the same for its fourteen
+(`data/io.projectbluefin.chairlift.ublue.policy`) does the same for its twelve
 subcommands: `channel-switch`, `dx-enable`, `dx-disable`, `restart`,
 `rollback`, `auto-updates-enable`, `auto-updates-disable`, `driver-switch`,
-`factory-reset`, `pin`, `unpin`, `kvm-enable`, `docker-enable`, and
-`docker-disable`. Because PolicyKit does not validate the rest of argv, the
+`factory-reset`, `pin`, `unpin`, `kvm-enable`. Because PolicyKit does not validate the rest of argv, the
 helpers are a second boundary: `internal/updexhelper.ParseInvocation` and
 `internal/ubluehelper.ParseInvocation` reject extra, misplaced, and unknown
 arguments before any privileged call.

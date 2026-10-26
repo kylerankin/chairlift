@@ -134,16 +134,6 @@ func acceptedHelperCommands() []acceptedCommand {
 			wantStdout: []string{"[DRY-RUN] would execute: usermod [-aG kvm "},
 		},
 		{
-			name: "Docker enable", helper: ublue, command: ubluehelper.CommandDockerEnable,
-			args: []string{ubluehelper.CommandDockerEnable, "--dry-run"}, needsInvokingUser: true,
-			wantStdout: []string{"[DRY-RUN] would execute: usermod [-aG docker ", "[DRY-RUN] would execute: systemctl [enable --now docker.socket docker.service]"},
-		},
-		{
-			name: "Docker disable", helper: ublue, command: ubluehelper.CommandDockerDisable,
-			args:       []string{ubluehelper.CommandDockerDisable, "--dry-run"},
-			wantStdout: []string{"[DRY-RUN] would execute: systemctl [disable --now docker.socket docker.service]"},
-		},
-		{
 			name:       "restart",
 			helper:     ublue,
 			command:    ubluehelper.CommandRestart,

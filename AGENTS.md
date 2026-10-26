@@ -376,11 +376,10 @@ An agent must not break these:
   not run the script, whose `bootc upgrade` fails there instead of exiting 0),
   so a successful OS source is not by itself evidence anything changed.
 - **New privileged operations extend the ublue helper; they do not add a
-  binary.** `chairlift-helper` carries fourteen subcommands
+  binary.** `chairlift-helper` carries twelve subcommands
   (`channel-switch`, `dx-enable`, `dx-disable`, `restart`, `rollback`,
   `auto-updates-enable`, `auto-updates-disable`, `driver-switch`,
-  `factory-reset`, `pin`, `unpin`, `kvm-enable`, `docker-enable`,
-  `docker-disable`), each selected by exactly one PolicyKit
+  `factory-reset`, `pin`, `unpin`, `kvm-enable`), each selected by exactly one PolicyKit
   action. Every one takes a fixed argv or a word validated against a closed
   set: no image reference, no username, no systemd unit, no delay, and no
   rollback or reset target crosses the boundary, because each
@@ -785,9 +784,8 @@ An agent must not break these:
   Failed reads preserve observed state and their original errors. Setup-only
   OS requirements report an administrator action and remain retryable.
   Disable keeps packages, the unit, and container data. The GUI's Docker path
-  is unprivileged and does not change groups; the existing fixed system-Docker
-  helper commands and policies remain separate and unchanged. Missing helper
-  actions still leave affected privileged developer controls insensitive rather
+  is unprivileged and does not change groups; it invokes no fixed system-Docker
+  helper. Missing helper actions still leave affected privileged developer controls insensitive rather
   than hidden.
   A confirmed Developer Mode enable installs
   the Dev Container CLI (`devcontainer`) through Homebrew when available;

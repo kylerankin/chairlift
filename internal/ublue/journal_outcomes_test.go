@@ -73,45 +73,6 @@ func TestRunHelperJournalsSuccessWithDerivedCommand(t *testing.T) {
 	}
 }
 
-func TestRunHelperJournalsMultipleDerivedCommands(t *testing.T) {
-	journalPath := withJournalSink(t)
-
-	script := "#!/bin/sh\n" +
-		"echo 'chairlift-helper: exec [\"usermod\", \"-aG\", \"docker\", \"testuser\"]'\n" +
-		"echo 'chairlift-helper: exec [\"systemctl\", \"enable\", \"--now\", \"docker.socket\", \"docker.service\"]'\n" +
-		"echo 'docker enabled'\n" +
-		"exit 0\n"
-	fakePkexec := writeCustomFakePkexec(t, script)
-
-	stdout, stderr, err := runHelper(context.Background(), fakePkexec, ubluehelper.CommandDockerEnable)
-	if err != nil {
-		t.Fatalf("runHelper returned error: %v", err)
-	}
-	if stderr != "" {
-		t.Errorf("stderr = %q, want empty", stderr)
-	}
-	if stdout != "docker enabled\n" {
-		t.Errorf("stdout = %q, want clean stdout", stdout)
-	}
-
-	entries := readJournal(t, journalPath)
-	if len(entries) != 2 {
-		t.Fatalf("journal has %d entries, want 2 (dispatch + outcome)", len(entries))
-	}
-
-	outcome := entries[1]
-	if outcome.Outcome != journal.OutcomeSucceeded {
-		t.Errorf("outcome = %+v, want succeeded", outcome)
-	}
-	wantExecuted := [][]string{
-		{"usermod", "-aG", "docker", "testuser"},
-		{"systemctl", "enable", "--now", "docker.socket", "docker.service"},
-	}
-	if !reflect.DeepEqual(outcome.Executed, wantExecuted) {
-		t.Errorf("outcome.Executed = %v, want %v", outcome.Executed, wantExecuted)
-	}
-}
-
 func TestRunHelperJournalsRefusedOnExit126(t *testing.T) {
 	journalPath := withJournalSink(t)
 

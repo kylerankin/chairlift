@@ -204,12 +204,9 @@ func TestRecordOutcomeAppendsEntry(t *testing.T) {
 	Record("factory-reset", nil, []string{"pkexec", "/usr/bin/chairlift-helper", "factory-reset"}, SuppressedNone)
 	RecordOutcome("factory-reset", OutcomeCancelled, nil, nil)
 
-	twoCmds := [][]string{
-		{"usermod", "-aG", "docker", "testuser"},
-		{"systemctl", "enable", "--now", "docker.socket", "docker.service"},
-	}
-	Record("docker-enable", nil, []string{"pkexec", "/usr/bin/chairlift-helper", "docker-enable"}, SuppressedNone)
-	RecordOutcome("docker-enable", OutcomeSucceeded, nil, twoCmds)
+	kvmCmds := [][]string{{"usermod", "-aG", "kvm", "testuser"}}
+	Record("kvm-enable", nil, []string{"pkexec", "/usr/bin/chairlift-helper", "kvm-enable"}, SuppressedNone)
+	RecordOutcome("kvm-enable", OutcomeSucceeded, nil, kvmCmds)
 
 	entries := readEntries(t, path)
 	if len(entries) != 12 {
@@ -258,11 +255,11 @@ func TestRecordOutcomeAppendsEntry(t *testing.T) {
 	}
 
 	out6 := entries[11]
-	if out6.Seq != 12 || out6.Action != "docker-enable" || out6.Outcome != OutcomeSucceeded {
-		t.Errorf("out6 = %+v, want seq 12, action docker-enable, outcome succeeded", out6)
+	if out6.Seq != 12 || out6.Action != "kvm-enable" || out6.Outcome != OutcomeSucceeded {
+		t.Errorf("out6 = %+v, want seq 12, action kvm-enable, outcome succeeded", out6)
 	}
-	if !reflect.DeepEqual(out6.Executed, twoCmds) {
-		t.Errorf("out6.Executed = %v, want %v", out6.Executed, twoCmds)
+	if !reflect.DeepEqual(out6.Executed, kvmCmds) {
+		t.Errorf("out6.Executed = %v, want %v", out6.Executed, kvmCmds)
 	}
 }
 

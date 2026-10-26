@@ -78,8 +78,8 @@ func TestCurrentDocumentationMatchesSourceFacts(t *testing.T) {
 
 	t.Run("privileged integration inventory is complete", func(t *testing.T) {
 		ubluePolicy := readRepoFile(t, filepath.Join("data", "io.projectbluefin.chairlift.ublue.policy"))
-		if got := strings.Count(ubluePolicy, `<action id="io.projectbluefin.chairlift.ublue.`); got != 14 {
-			t.Fatalf("ublue policy actions = %d, want 14", got)
+		if got := strings.Count(ubluePolicy, `<action id="io.projectbluefin.chairlift.ublue.`); got != 12 {
+			t.Fatalf("ublue policy actions = %d, want 12", got)
 		}
 
 		current := strings.Join([]string{
@@ -98,13 +98,11 @@ func TestCurrentDocumentationMatchesSourceFacts(t *testing.T) {
 			"/usr/share/polkit-1/actions/io.projectbluefin.chairlift.ublue.policy",
 			"/usr/share/chairlift/config.yml",
 			"/usr/share/doc/chairlift/channels.example.yml",
-			"fourteen actions",
+			"twelve actions",
 			"pin <YYYYMMDD>",
 			"unpin [--dry-run]",
 			"factory-reset",
 			"kvm-enable",
-			"docker-enable",
-			"docker-disable",
 		} {
 			if !strings.Contains(current, required) {
 				t.Errorf("current documentation does not contain %q", required)
@@ -118,6 +116,8 @@ func TestCurrentDocumentationMatchesSourceFacts(t *testing.T) {
 			"declaring the three actions",
 			"builds two binaries",
 			"chairlift-updex-helper` only",
+			"docker-enable",
+			"docker-disable",
 		} {
 			if strings.Contains(current, stale) {
 				t.Errorf("current documentation still contains stale privileged-inventory claim %q", stale)

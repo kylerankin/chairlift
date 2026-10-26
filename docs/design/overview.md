@@ -590,15 +590,15 @@ fixed surfaces: `data/io.projectbluefin.chairlift.bootc.policy`,
 `data/io.projectbluefin.chairlift.updex.policy`, and
 `data/io.projectbluefin.chairlift.ublue.policy`.
 
-The fourteen ublue commands include fixed `kvm-enable`, `docker-enable`, and
-`docker-disable` actions alongside pin/unpin. The parser accepts no arbitrary
+The twelve ublue commands include fixed `kvm-enable` actions alongside
+pin/unpin. The parser accepts no arbitrary
 account, service, image or command argv. Privileged developer options stay
 visible when their installed actions are missing, with affected controls insensitive.
 WSL Mode defaults to nsl on Linux amd64, with Lima as an alternative backend;
 an existing Lima-only machine retains Lima. Both require accessible `/dev/kvm`;
 nsl also requires the account's `kvm` group membership. A new grant needs a
 new login only when `/dev/kvm` itself was not accessible.
-`dx-enable`, `kvm-enable` and `docker-enable` first copy a group that only the
+`dx-enable` and `kvm-enable` first copy a group that only the
 image's `/usr/lib/group` defines (nss-altfiles, as rpm-ostree composes ship
 them) into `/etc/group`, GID unchanged, because `usermod -aG` edits
 `/etc/group` alone and otherwise refuses the group
@@ -607,8 +607,7 @@ The GUI's Docker action instead installs Homebrew's engine and rootless tools,
 configures the account's `docker.service`, and uses `systemctl --user`. It
 requires no helper or group change and reports ready only when the user socket
 answers HTTP 200 `OK`. Homebrew's `bin` and `sbin` are inherited by the setup
-tool and its generated unit. The fixed system-Docker helper actions remain
-available independently; no GUI client wrapper remains for them. A confirmed
+tool and its generated unit. A confirmed
 Developer Mode enable installs the Dev Container CLI (`devcontainer`) through
 Homebrew when available; installation failure does not reverse developer access.
 IDEs and editors are not offered here (Bazaar or the Apps page).
@@ -617,7 +616,7 @@ IDEs and editors are not offered here (Bazaar or the Apps page).
 resolves the program it's asked to run to an absolute path and compares it
 textually against the `org.freedesktop.policykit.exec.path` annotation on each
 action. The updex policy's three actions annotate
-`/usr/bin/chairlift-updex-helper`; the ublue policy's fourteen actions annotate
+`/usr/bin/chairlift-updex-helper`; the ublue policy's twelve actions annotate
 `/usr/bin/chairlift-helper`. Both helper policies use
 `org.freedesktop.policykit.exec.argv1` to select exactly one action for the
 first helper argument. PolicyKit does not validate the remainder of argv, so
@@ -630,8 +629,7 @@ accepts only `enable-feature <name> [--dry-run]`, `disable-feature <name>
 `auto-updates-enable [--dry-run]`, `auto-updates-disable [--dry-run]`,
 `driver-switch <standard|nvidia|nvidia-open> [--dry-run]`, `factory-reset
 [--dry-run]`, `pin <YYYYMMDD> [--dry-run]`, `unpin [--dry-run]`,
-`kvm-enable [--dry-run]`, `docker-enable [--dry-run]`, and
-`docker-disable [--dry-run]`. A bare, `$PATH`-resolved command name can resolve to a different
+`kvm-enable [--dry-run]`. A bare, `$PATH`-resolved command name can resolve to a different
 absolute path depending on the invoking process's `$PATH`, which makes the
 path comparison miss and falls `pkexec` back to the generic, more restrictive
 action. The wrapper packages therefore always invoke their fixed `HelperPath`

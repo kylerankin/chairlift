@@ -256,11 +256,6 @@ func TestInstalledBundleAndHelperBoundary(t *testing.T) {
 		{name: "KVM refuses account", helper: "chairlift-helper", args: []string{"kvm-enable", "root"}, wantStderr: "usage: chairlift-helper kvm-enable"},
 		{name: "KVM refuses group", helper: "chairlift-helper", args: []string{"kvm-enable", "wheel"}, wantStderr: "usage: chairlift-helper kvm-enable"},
 		{name: "KVM outside pkexec", helper: "chairlift-helper", args: []string{"kvm-enable"}, wantStderr: "PKEXEC_UID is not set"},
-		{name: "Docker enable refuses unit", helper: "chairlift-helper", args: []string{"docker-enable", "other.service"}, wantStderr: "usage: chairlift-helper docker-enable"},
-		{name: "Docker enable refuses account", helper: "chairlift-helper", args: []string{"docker-enable", "root"}, wantStderr: "usage: chairlift-helper docker-enable"},
-		{name: "Docker enable outside pkexec", helper: "chairlift-helper", args: []string{"docker-enable"}, wantStderr: "PKEXEC_UID is not set"},
-		{name: "Docker disable refuses unit", helper: "chairlift-helper", args: []string{"docker-disable", "other.service"}, wantStderr: "usage: chairlift-helper docker-disable"},
-		{name: "Docker disable refuses flag", helper: "chairlift-helper", args: []string{"docker-disable", "--force"}, wantStderr: "usage: chairlift-helper docker-disable"},
 		// Restart takes no delay and no target: either would be a value the
 		// caller controls crossing an authenticated boundary.
 		{name: "ublue restart with a delay", helper: "chairlift-helper", args: []string{"restart", "02:00"}, wantStderr: "usage: chairlift-helper restart"},

@@ -111,14 +111,14 @@ func TestEnsureLocalGroupRefusesMalformedNamesAndMissingLocalFile(t *testing.T) 
 }
 
 func TestAccessGroupMatchesAccessArgs(t *testing.T) {
-	for _, command := range []string{CommandKVMEnable, CommandDockerEnable} {
+	for _, command := range []string{CommandKVMEnable} {
 		group, ok := AccessGroup(command)
 		_, args, argsOK := AccessArgs(command, "alice")
 		if !ok || !argsOK || args[1] != group {
 			t.Fatalf("AccessGroup(%s) = %q %v; AccessArgs = %v %v", command, group, ok, args, argsOK)
 		}
 	}
-	for _, command := range []string{CommandDockerDisable, CommandDXEnable, "root"} {
+	for _, command := range []string{CommandDXEnable, "root"} {
 		if group, ok := AccessGroup(command); ok {
 			t.Errorf("AccessGroup(%s) = %q, want refusal", command, group)
 		}

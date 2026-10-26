@@ -69,11 +69,6 @@ func main() {
 		runFactoryReset(ctx, invocation)
 	case ubluehelper.CommandKVMEnable:
 		runDeveloperAccess(ctx, invocation)
-	case ubluehelper.CommandDockerEnable, ubluehelper.CommandDockerDisable:
-		if invocation.Command == ubluehelper.CommandDockerEnable {
-			runDeveloperAccess(ctx, invocation)
-		}
-		runDocker(ctx, invocation)
 	default:
 		// Unreachable: ParseInvocation accepts only the commands above. The
 		// arm exists so a command added to the parser without a dispatch arm
@@ -292,20 +287,6 @@ func runDeveloperAccess(ctx context.Context, invocation ubluehelper.Invocation) 
 	}
 	if err := run(ctx, name, args...); err != nil {
 		fatal(fmt.Sprintf("granting developer access: %v", err))
-	}
-}
-
-func runDocker(ctx context.Context, invocation ubluehelper.Invocation) {
-	args, ok := ubluehelper.DockerArgs(invocation.Command)
-	if !ok {
-		fatal("unsupported Docker command")
-	}
-	if invocation.DryRun {
-		fmt.Printf("[DRY-RUN] would execute: systemctl %v\n", args)
-		return
-	}
-	if err := run(ctx, "systemctl", args...); err != nil {
-		fatal(fmt.Sprintf("changing Docker daemon: %v", err))
 	}
 }
 

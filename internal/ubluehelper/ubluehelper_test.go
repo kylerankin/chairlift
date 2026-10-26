@@ -225,8 +225,6 @@ func TestSupportedCommandsMatchesParser(t *testing.T) {
 		CommandPin,
 		CommandUnpin,
 		CommandKVMEnable,
-		CommandDockerEnable,
-		CommandDockerDisable,
 	}
 	if !reflect.DeepEqual(commands, want) {
 		t.Fatalf("SupportedCommands() = %v, want %v", commands, want)

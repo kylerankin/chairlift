@@ -50,8 +50,6 @@ const (
 	CommandPin           = "pin"
 	CommandUnpin         = "unpin"
 	CommandKVMEnable     = "kvm-enable"
-	CommandDockerEnable  = "docker-enable"
-	CommandDockerDisable = "docker-disable"
 )
 
 // HelperExecPrefix is the machine-readable execution prefix emitted by the
@@ -112,8 +110,6 @@ func SupportedCommands() []string {
 		CommandPin,
 		CommandUnpin,
 		CommandKVMEnable,
-		CommandDockerEnable,
-		CommandDockerDisable,
 	}
 }
 
@@ -131,8 +127,6 @@ func SupportedCommands() []string {
 //	pin <YYYYMMDD> [--dry-run]
 //	unpin [--dry-run]
 //	kvm-enable [--dry-run]
-//	docker-enable [--dry-run]
-//	docker-disable [--dry-run]
 //
 // Everything else — extra arguments, a misplaced flag, an unknown channel
 // word, an unknown command — is rejected.
@@ -189,7 +183,7 @@ func ParseInvocation(args []string) (Invocation, error) {
 
 	case CommandDXEnable, CommandDXDisable, CommandRestart, CommandRollback,
 		CommandAutoEnable, CommandAutoDisable, CommandFactoryReset, CommandUnpin,
-		CommandKVMEnable, CommandDockerEnable, CommandDockerDisable:
+		CommandKVMEnable:
 		if len(args) > 2 || (len(args) == 2 && args[1] != "--dry-run") {
 			return Invocation{}, fmt.Errorf("usage: chairlift-helper %s [--dry-run]", args[0])
 		}
@@ -473,22 +467,7 @@ func AccessGroup(command string) (string, bool) {
 	switch command {
 	case CommandKVMEnable:
 		return "kvm", true
-	case CommandDockerEnable:
-		return "docker", true
 	default:
 		return "", false
-	}
-}
-
-// DockerArgs contains the entire daemon lifecycle surface. Stopping both
-// socket and service prevents socket activation from undoing Disable.
-func DockerArgs(command string) ([]string, bool) {
-	switch command {
-	case CommandDockerEnable:
-		return []string{"enable", "--now", "docker.socket", "docker.service"}, true
-	case CommandDockerDisable:
-		return []string{"disable", "--now", "docker.socket", "docker.service"}, true
-	default:
-		return nil, false
 	}
 }

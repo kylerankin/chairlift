@@ -161,8 +161,7 @@ A confirmed Developer Mode enable also installs the Dev Container CLI
 (`devcontainer`) when Homebrew is available; an install failure does not reverse
 developer access. IDEs and editors are installed from Bazaar or Apps. The fixed
 `kvm-enable` action still grants KVM access, effective after a new login. The
-existing system-Docker helper commands and policies remain installed, but this
-rootless GUI action does not invoke them.
+Docker GUI action is fully unprivileged and invokes no fixed helper.
 
 The **Virtual Machine Engine** chooser (Built-in for nsl, or Lima) changes the current window's backend without rewriting
 YAML. `wsl_backend` supplies the initial choice; an existing Lima Ubuntu machine

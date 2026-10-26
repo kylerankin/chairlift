@@ -540,11 +540,10 @@ insensitive. Writes bind `helperexec.Run` to
 `HelperPath=/usr/bin/chairlift-helper`.
 
 [`ubluehelper.SupportedCommands()`](../../internal/ubluehelper/ubluehelper.go)
-is the complete fourteen-command surface:
+is the complete twelve-command surface:
 `channel-switch`, `dx-enable`, `dx-disable`, `restart`, `rollback`,
 `auto-updates-enable`, `auto-updates-disable`, `driver-switch`,
-`factory-reset`, `pin`, `unpin`, `kvm-enable`, `docker-enable`,
-`docker-disable`. Every command has exactly one action in
+`factory-reset`, `pin`, `unpin`, `kvm-enable`. Every command has exactly one action in
 [`data/io.projectbluefin.chairlift.ublue.policy`](../../data/io.projectbluefin.chairlift.ublue.policy).
 The helper dispatcher rejects unhandled commands; parser acceptance alone is
 not evidence a command executes.
@@ -738,9 +737,9 @@ Setup-only missing OS requirements use `PrerequisiteError` to report the
 administrator's subordinate-ID/networking configuration action.
 Disable stops/disables the user unit and keeps packages, the unit, and data.
 Live completion re-reads state and fails if the requested readiness/stopped
-state is not observed. Dry-run executes no mutations. The fixed privileged
-system-Docker helper commands and policies remain unchanged and separate from
-this GUI path. View mutations share `developerGate`, reset on every result,
+state is not observed. Dry-run executes no mutations. The privileged system-Docker helper commands
+and policies were retired when Docker moved to a rootless Homebrew install;
+nothing in this GUI path touches them. View mutations share `developerGate`, reset on every result,
 and render post-action observations on the GTK main thread.
 
 [`internal/gaming`](../../internal/gaming/gaming.go) manages the gaming tools
