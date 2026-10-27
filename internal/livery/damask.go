@@ -55,8 +55,12 @@ func DamaskInstalled(ctx context.Context) (bool, error) {
 	return false, nil
 }
 
-// DamaskInstall installs Damask into the user scope from the default remote
-// (Flathub). It is a no-op when Damask is already installed, and it respects
+// damaskRemote is the Flatpak remote Damask is installed from. It is named
+// explicitly so the install never depends on which remote flatpak picks by
+// default.
+const damaskRemote = "flathub"
+
+// DamaskInstall installs Damask into the user scope from Flathub. It is a no-op when Damask is already installed, and it respects
 // the dry-run gate.
 func DamaskInstall(ctx context.Context) error {
 	// A failed probe falls through to the install, which reports its own
@@ -69,7 +73,7 @@ func DamaskInstall(ctx context.Context) error {
 		log.Printf("[DRY-RUN] Would install %s from Flathub (user scope)", DamaskID)
 		return nil
 	}
-	return flatpak.Install(DamaskID, true)
+	return flatpak.InstallFromRemote(DamaskID, damaskRemote, true)
 }
 
 // damaskCommand is the launch for the installed Damask Flatpak. Desktops

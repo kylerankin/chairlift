@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 
+	"github.com/projectbluefin/chairlift/internal/deskenv"
 	"github.com/projectbluefin/chairlift/internal/dryrun"
 )
 
@@ -25,10 +26,16 @@ const (
 	pictureURIDarkKey = "picture-uri-dark"
 )
 
-// NativeBackgroundAvailable reports whether GNOME owns the desktop-background
-// schema on this host. A missing schema returns false, so the page offers
+// NativeBackgroundAvailable reports whether the session is GNOME and GNOME owns
+// the desktop-background schema on this host. Both are required: other
+// desktops (Plasma on Fedora-based images, for one) commonly ship
+// gsettings-desktop-schemas, so the schema alone would offer a write that
+// changes nothing on screen. Either missing returns false, so the page offers
 // wallpaper selection only where it can actually apply the picture.
 func NativeBackgroundAvailable(ctx context.Context) bool {
+	if detectDesktop() != deskenv.GNOME {
+		return false
+	}
 	_, err := gsettingsGet(ctx, NativeBackgroundSchema, pictureURIKey)
 	return err == nil
 }

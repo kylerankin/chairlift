@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/projectbluefin/chairlift/internal/deskenv"
 	"github.com/projectbluefin/chairlift/internal/dryrun"
 )
 
@@ -72,6 +73,31 @@ func TestRotateWallpaperIsNoOpWithoutNativeBackground(t *testing.T) {
 	}
 	if f.sawPrefix("gsettings set org.gnome.desktop.background") {
 		t.Fatal("rotation must not touch the background when the schema is absent")
+	}
+}
+
+// TestNativeBackgroundUnavailableOffGNOME pins that a non-GNOME session never
+// gets a GNOME background write, even when the schema is installed (Plasma on
+// Fedora-based images ships gsettings-desktop-schemas): selection reports
+// unavailable and rotation leaves the background alone.
+func TestNativeBackgroundUnavailableOffGNOME(t *testing.T) {
+	for _, desktop := range []deskenv.Desktop{deskenv.KDE, deskenv.Unknown} {
+		t.Run(desktop.String(), func(t *testing.T) {
+			f := wallpaperRotationState(t,
+				map[string]string{KeyWallpaperRotate: "true", KeyWallpaperChannel: "bluefin", KeyWallpaperImage: "bluefin/aurora.png"},
+				map[string]string{"bluefin/aurora.png": "b", "bluefin/moon.png": "b"},
+			)
+			useDesktop(t, desktop)
+			if NativeBackgroundAvailable(context.Background()) {
+				t.Fatalf("native background must be unavailable on %v even with the schema present", desktop)
+			}
+			if err := RotateWallpaper(context.Background()); err != nil {
+				t.Fatalf("rotation off GNOME should be a no-op: %v", err)
+			}
+			if f.sawPrefix("gsettings set org.gnome.desktop.background") {
+				t.Fatalf("rotation must not touch the GNOME background on %v", desktop)
+			}
+		})
 	}
 }
 
