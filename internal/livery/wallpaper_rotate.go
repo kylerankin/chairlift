@@ -58,7 +58,7 @@ WantedBy=timers.target
 // when there was nothing there to begin with. It is the inverse of the write
 // an install or remove performed, so a failed step leaves the disk as the
 // user had it.
-func restorePrior(ctx context.Context, path string, existed bool, data []byte) error {
+func restorePrior(path string, existed bool, data []byte) error {
 	if !existed {
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			return err
@@ -138,7 +138,9 @@ func renderWallpaperUnits() (servicePath, timerPath, serviceUnit, timerUnit stri
 // is nothing to rotate, and failing would only make the unit exit non-zero at
 // every run. It advances the catalog only: a channel with no resolvable image
 // is skipped, and the session token is recorded regardless so a permanently
-// unavailable image cannot re-advance on every retry.
+// unavailable image cannot re-advance on every retry. The token lives in its
+// own key (KeyWallpaperRotationToken), so this pass and the icon pass in
+// Rotate never mark each other as already done for the session.
 func RotateWallpaper(ctx context.Context) error {
 	state, err := Load(ctx)
 	if err != nil {
@@ -156,7 +158,7 @@ func RotateWallpaper(ctx context.Context) error {
 	}
 
 	token := sessionToken(ctx)
-	if token != "" && token == state.RotationToken {
+	if token != "" && token == state.WallpaperRotationToken {
 		return nil
 	}
 
@@ -185,7 +187,7 @@ func RotateWallpaper(ctx context.Context) error {
 	// The token is recorded even on failure, so a pass that already ran for
 	// this session does not advance again.
 	if token != "" {
-		if err := SetString(ctx, KeyRotationToken, token); err != nil {
+		if err := SetString(ctx, KeyWallpaperRotationToken, token); err != nil {
 			failures = append(failures, err.Error())
 		}
 	}
@@ -220,10 +222,10 @@ func InstallWallpaperRotation(ctx context.Context) (result error) {
 	}
 	defer func() {
 		if result != nil {
-			if err := restorePrior(ctx, servicePath, priors[servicePath].existed, priors[servicePath].data); err != nil {
+			if err := restorePrior(servicePath, priors[servicePath].existed, priors[servicePath].data); err != nil {
 				result = errors.Join(result, err)
 			}
-			if err := restorePrior(ctx, timerPath, priors[timerPath].existed, priors[timerPath].data); err != nil {
+			if err := restorePrior(timerPath, priors[timerPath].existed, priors[timerPath].data); err != nil {
 				result = errors.Join(result, err)
 			}
 			_, _ = runCommand(ctx, "systemctl", "--user", "daemon-reload")
@@ -284,10 +286,10 @@ func RemoveWallpaperRotation(ctx context.Context) (result error) {
 
 	defer func() {
 		if result != nil {
-			if err := restorePrior(ctx, servicePath, serviceExisted, serviceData); err != nil {
+			if err := restorePrior(servicePath, serviceExisted, serviceData); err != nil {
 				result = errors.Join(result, err)
 			}
-			if err := restorePrior(ctx, timerPath, timerExisted, timerData); err != nil {
+			if err := restorePrior(timerPath, timerExisted, timerData); err != nil {
 				result = errors.Join(result, err)
 			}
 			_, _ = runCommand(ctx, "systemctl", "--user", "daemon-reload")

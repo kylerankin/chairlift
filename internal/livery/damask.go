@@ -8,6 +8,7 @@ import (
 
 	"github.com/projectbluefin/chairlift/internal/dryrun"
 	"github.com/projectbluefin/chairlift/internal/flatpak"
+	"github.com/projectbluefin/chairlift/internal/launcher"
 )
 
 // DamaskID is the third-party Flatpak application id of the Damask wallpaper
@@ -16,9 +17,6 @@ import (
 // behalf without an explicit action. The id follows the Bluefin convention of
 // reverse-domain app ids.
 const DamaskID = "app.drey.Damask"
-
-// DamaskFlag is the command-line flag that launches Damask.
-const DamaskFlag = "--damask"
 
 // damaskScopes are the Flatpak scopes DamaskInstalled consults, user first.
 // It is a variable so a test can point it at a fixture list.
@@ -62,20 +60,28 @@ func DamaskInstall(ctx context.Context) error {
 	return flatpak.Install(DamaskID, true)
 }
 
-// launchDamask runs the desktop execution that opens Damask. It is a variable
-// so a test can assert the app:// URI without a real launcher on PATH.
-var launchDamask = func(ctx context.Context) error {
-	cmd := exec.CommandContext(ctx, "xdg-open", "app://"+DamaskID)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("livery: launching %s: %w: %s", DamaskID, err, string(out))
+// damaskCommand is the launch for the installed Damask Flatpak. Desktops
+// register no handler for an app:// URI, so xdg-open cannot start it;
+// `flatpak run` is the launcher every Flatpak install provides.
+func damaskCommand() *exec.Cmd {
+	return exec.Command("flatpak", "run", DamaskID)
+}
+
+// launchDamask starts Damask without waiting for it: the manager is a
+// long-lived window, and it must outlive the action's context. A later
+// unsuccessful exit is only logged, because the click has already returned.
+// It is a variable so a test can observe the launch without a real Flatpak.
+var launchDamask = func(context.Context) error {
+	if err := launcher.Start(damaskCommand(), func(err error) {
+		log.Printf("livery: %s exited: %v", DamaskID, err)
+	}); err != nil {
+		return fmt.Errorf("livery: launching %s: %w", DamaskID, err)
 	}
 	return nil
 }
 
-// DamaskOpen launches Damask via desktop execution. The Flatpak publishes an
-// app:// URI the desktop environment handles, so ChairLift hands off to
-// xdg-open rather than exec'ing the sandboxed binary directly. It is a no-op
-// under the dry-run gate.
+// DamaskOpen launches the installed Damask Flatpak with `flatpak run`. It is
+// a no-op under the dry-run gate.
 func DamaskOpen(ctx context.Context) error {
 	if dryrun.Enabled() {
 		log.Printf("[DRY-RUN] Would launch %s", DamaskID)

@@ -20,9 +20,9 @@ import (
 )
 
 // ensureWallpapersGroup builds the optional Wallpapers group once and returns
-// it. The group only exists when something is usable inside it — a Homebrew
-// wallpaper collection, Damask, or both — so callers guard it with the same
-// check that triggers the group's creation.
+// it. The group only exists when the Homebrew wallpaper collection is
+// configured or Damask is installed, so callers guard it with
+// pageview.WallpaperGroupVisible.
 func (uh *UserHome) ensureWallpapersGroup(page *adw.PreferencesPage) *adw.PreferencesGroup {
 	if uh.wallpapersGroup != nil {
 		return uh.wallpapersGroup
@@ -35,15 +35,42 @@ func (uh *UserHome) ensureWallpapersGroup(page *adw.PreferencesPage) *adw.Prefer
 	return group
 }
 
+// wallpaperProbe is what the background discovery learned about the host, so
+// building and syncing the group never runs a subprocess on the main thread.
+type wallpaperProbe struct {
+	damask           pageview.DamaskState
+	nativeBackground bool
+}
+
+// probeWallpaperHost runs the Damask and GNOME-background probes. It shells
+// out, so callers run it off the main thread.
+func probeWallpaperHost() wallpaperProbe {
+	ctx, cancel := livery.DefaultContext()
+	defer cancel()
+	installed := livery.DamaskInstalled(ctx)
+	return wallpaperProbe{
+		damask:           pageview.DamaskOffer(installed, installed || flatpak.IsInstalledCached()),
+		nativeBackground: livery.NativeBackgroundAvailable(ctx),
+	}
+}
+
 // publishWallpaperGroup builds the group and its always-present controls,
 // returning the group for the caller to append this collection's expander row
 // to. It is idempotent: the nil-guards in each builder make repeated calls a
 // no-op, so the group and its controls are built a single time.
-func (uh *UserHome) publishWallpaperGroup(page *adw.PreferencesPage, damaskAvailable bool) *adw.PreferencesGroup {
+func (uh *UserHome) publishWallpaperGroup(page *adw.PreferencesPage, probe wallpaperProbe) *adw.PreferencesGroup {
+	uh.wallpaperNativeBackground = probe.nativeBackground
+	damask := probe.damask
 	group := uh.ensureWallpapersGroup(page)
 	uh.buildWallpaperChannels(group)
-	uh.buildWallpaperRotation(group)
-	uh.buildWallpaperDamask(group, damaskAvailable)
+	// Rotation advances a channel, so without the selector there is nothing
+	// for the switch to act on and it is left out rather than shown dead.
+	if uh.wallpaperGrid != nil {
+		uh.buildWallpaperRotation(group)
+	}
+	if damask != pageview.DamaskHidden {
+		uh.buildWallpaperDamask(group, damask == pageview.DamaskInstalled)
+	}
 	return group
 }
 
@@ -195,10 +222,8 @@ func (uh *UserHome) syncWallpaperRotation() {
 	if uh.wallpaperRotate == nil {
 		return
 	}
-	ctx, cancel := livery.DefaultContext()
-	defer cancel()
 	available := pageview.WallpaperRotationAvailable(
-		livery.NativeBackgroundAvailable(ctx),
+		uh.wallpaperNativeBackground,
 		uh.liveryState.WallpaperChannel != "",
 	)
 	uh.wallpaperRotate.SetActive(uh.liveryState.WallpaperRotate)
@@ -246,7 +271,7 @@ func (uh *UserHome) refreshWallpaperDamask() {
 }
 
 // onWallpaperChannelChosen applies a channel selection through native
-// gsettings. The selection is immediate (no portal): GNOME takes the
+// gsettings and persists the channel, so rotation can advance it. The selection is immediate (no portal): GNOME takes the
 // background key and the desktop confirms the change. Under dry-run the
 // picture is not written and the preview toast says what would have happened.
 func (uh *UserHome) onWallpaperChannelChosen(channelID string) {
@@ -254,6 +279,7 @@ func (uh *UserHome) onWallpaperChannelChosen(channelID string) {
 		return
 	}
 	decision := actionmsg.WallpaperSelection(dryrun.Enabled())
+	currentImage := uh.liveryState.WallpaperImage
 	go func() {
 		ctx, cancel := livery.DefaultContext()
 		defer cancel()
@@ -262,11 +288,11 @@ func (uh *UserHome) onWallpaperChannelChosen(channelID string) {
 			uh.reportLiveryFailure("choosing a wallpaper channel", errors.New("channel has no images"))
 			return
 		}
-		// Advance from the stored image so re-picking the channel advances
-		// rather than snapping back to its first image.
+		// Keep the stored image when it belongs to this channel, so
+		// re-picking the channel does not snap back to its first image.
 		idx := 0
 		for i, img := range channel.Images {
-			if img.ID == uh.liveryState.WallpaperImage {
+			if img.ID == currentImage {
 				idx = i
 				break
 			}
@@ -277,20 +303,27 @@ func (uh *UserHome) onWallpaperChannelChosen(channelID string) {
 			uh.reportLiveryFailure("choosing a wallpaper channel", errors.New("image not found"))
 			return
 		}
-		if err := livery.ApplyNativeBackground(ctx, path); err != nil {
+		if err := livery.SelectWallpaper(ctx, channelID, target.ID, path); err != nil {
 			uh.reportLiveryFailure("choosing a wallpaper channel", err)
 			return
 		}
-		if !decision.MutateUI {
-			// Under dry-run the stored channel never moved, so the page
-			// keeps its old selection and the preview toast is the only
-			// confirmation, exactly as the other Livery selections do.
-			return
-		}
-		uh.liveryState.WallpaperChannel = channelID
-		uh.liveryState.WallpaperImage = target.ID
-		uh.syncWallpaperChannels()
-		uh.toastAdder.ShowToast(decision.Toast)
+		sgtk.RunOnMainThread(func() {
+			if !decision.MutateUI {
+				// Under dry-run the stored channel never moved, so the
+				// page keeps its old selection and the preview toast is
+				// the only confirmation, as the other Livery selections do.
+				if decision.Toast != "" {
+					uh.toastAdder.ShowToast(decision.Toast)
+				}
+				return
+			}
+			uh.liveryState.WallpaperChannel = channelID
+			uh.liveryState.WallpaperImage = target.ID
+			uh.syncWallpaperState()
+			if decision.Toast != "" {
+				uh.toastAdder.ShowToast(decision.Toast)
+			}
+		})
 	}()
 }
 
@@ -307,24 +340,26 @@ func (uh *UserHome) onWallpaperRotateToggled(enabled bool) {
 	}
 	decision := actionmsg.WallpaperRotation(dryrun.Enabled(), enabled)
 	setActivitySpinner(uh.wallpaperRotateSpinner, true)
+	desired := uh.liveryState
+	desired.WallpaperRotate = enabled
 	go func() {
 		ctx, cancel := livery.DefaultContext()
 		defer cancel()
-		desired := uh.liveryState
-		desired.WallpaperRotate = enabled
 		confirmed, err := livery.ConfigureWallpaperRotation(ctx, desired)
-		setActivitySpinner(uh.wallpaperRotateSpinner, false)
-		uh.wallpaperRotationGate.Reset()
-		if err != nil {
-			uh.wallpaperRotate.SetState(uh.liveryState.WallpaperRotate)
-			uh.reportLiveryFailure("rotating the wallpaper", err)
-			return
-		}
-		uh.liveryState.WallpaperRotate = confirmed.WallpaperRotate
-		uh.wallpaperRotate.SetState(confirmed.WallpaperRotate)
-		if !decision.MutateUI {
-			uh.toastAdder.ShowToast(decision.Toast)
-		}
+		sgtk.RunOnMainThread(func() {
+			setActivitySpinner(uh.wallpaperRotateSpinner, false)
+			uh.wallpaperRotationGate.Reset()
+			if err != nil {
+				uh.wallpaperRotate.SetState(uh.liveryState.WallpaperRotate)
+				uh.reportLiveryFailure("rotating the wallpaper", err)
+				return
+			}
+			uh.liveryState.WallpaperRotate = confirmed.WallpaperRotate
+			uh.wallpaperRotate.SetState(confirmed.WallpaperRotate)
+			if !decision.MutateUI {
+				uh.toastAdder.ShowToast(decision.Toast)
+			}
+		})
 	}()
 }
 
@@ -341,19 +376,30 @@ func (uh *UserHome) onWallpaperDamaskActivated() {
 	installed := uh.wallpaperDamaskAvailable
 	preview := dryrun.Enabled()
 	setActivitySpinner(uh.wallpaperDamaskSpinner, true)
-	go func() {
-		ctx, cancel := livery.DefaultContext()
-		defer cancel()
-		if preview {
+	// finish runs every completion step on the main thread: the spinner,
+	// the Damask row, and the toast are GTK widgets.
+	finish := func(update func()) {
+		sgtk.RunOnMainThread(func() {
+			if update != nil {
+				update()
+			}
+			setActivitySpinner(uh.wallpaperDamaskSpinner, false)
+			uh.wallpaperDamaskGate.Reset()
+		})
+	}
+	if preview {
+		finish(func() {
 			if installed {
 				uh.toastAdder.ShowToast("[DRY-RUN] Preview: opening Damask would start a live wallpaper manager — no changes made")
 			} else {
 				uh.toastAdder.ShowToast(actionmsg.DamaskInstall(true))
 			}
-			setActivitySpinner(uh.wallpaperDamaskSpinner, false)
-			uh.wallpaperDamaskGate.Reset()
-			return
-		}
+		})
+		return
+	}
+	go func() {
+		ctx, cancel := livery.DefaultContext()
+		defer cancel()
 		var err error
 		if installed {
 			err = livery.DamaskOpen(ctx)
@@ -363,25 +409,22 @@ func (uh *UserHome) onWallpaperDamaskActivated() {
 		if err != nil {
 			var notFound *flatpak.NotFoundError
 			if errors.As(err, &notFound) {
-				uh.toastAdder.ShowToast(actionmsg.DamaskStoreHandoff())
-			} else {
-				uh.reportLiveryFailure(damaskVerb(installed), err)
+				finish(func() { uh.toastAdder.ShowToast(actionmsg.DamaskStoreHandoff()) })
+				return
 			}
-			setActivitySpinner(uh.wallpaperDamaskSpinner, false)
-			uh.wallpaperDamaskGate.Reset()
+			uh.reportLiveryFailure(damaskVerb(installed), err)
+			finish(nil)
 			return
 		}
-		if !installed {
+		finish(func() {
+			if installed {
+				uh.toastAdder.ShowToast(actionmsg.DamaskOpen())
+				return
+			}
 			uh.wallpaperDamaskAvailable = true
-			sgtk.RunOnMainThread(uh.refreshWallpaperDamask)
-		}
-		if installed {
-			uh.toastAdder.ShowToast(actionmsg.DamaskOpen())
-		} else {
+			uh.refreshWallpaperDamask()
 			uh.toastAdder.ShowToast(actionmsg.DamaskInstall(false))
-		}
-		setActivitySpinner(uh.wallpaperDamaskSpinner, false)
-		uh.wallpaperDamaskGate.Reset()
+		})
 	}()
 }
 

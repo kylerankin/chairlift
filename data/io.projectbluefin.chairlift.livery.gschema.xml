@@ -125,5 +125,11 @@
       <description>When true, the headless rotation pass advances the selected image within the active channel at each login.</description>
     </key>
 
+    <key name="last-wallpaper-rotation-token" type="s">
+      <default>''</default>
+      <summary>Graphical session the wallpaper already rotated for</summary>
+      <description>Idempotence key for wallpaper rotation, kept apart from last-rotation-token so the icon and wallpaper passes cannot suppress each other within one session.</description>
+    </key>
+
   </schema>
 </schemalist>

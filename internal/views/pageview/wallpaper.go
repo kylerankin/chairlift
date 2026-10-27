@@ -105,3 +105,39 @@ func DamaskActionName(installed bool) string {
 	}
 	return "Install"
 }
+
+// DamaskState is what the Wallpapers group can offer for Damask on this host.
+type DamaskState int
+
+const (
+	// DamaskHidden means Damask is neither installed nor installable
+	// (no Flatpak), so the group shows no Damask control at all.
+	DamaskHidden DamaskState = iota
+	// DamaskInstallable means Flatpak is present but Damask is not.
+	DamaskInstallable
+	// DamaskInstalled means the Damask Flatpak is installed.
+	DamaskInstalled
+)
+
+// DamaskOffer reports which Damask control, if any, the group may show. A
+// host without Flatpak can neither install nor run Damask, so it gets none.
+func DamaskOffer(installed, flatpakAvailable bool) DamaskState {
+	switch {
+	case installed:
+		return DamaskInstalled
+	case flatpakAvailable:
+		return DamaskInstallable
+	default:
+		return DamaskHidden
+	}
+}
+
+// WallpaperGroupVisible reports whether the optional Wallpapers group is
+// built: only when the Homebrew wallpaper collection is configured or Damask
+// is installed. Inside a visible group the installed channels, the rotation
+// switch and the Damask install control (where Flatpak is present) appear as
+// usable; none of them alone surfaces the group, so a host with neither a
+// collection nor Damask keeps Livery without an empty Wallpapers group.
+func WallpaperGroupVisible(collection, damaskInstalled bool) bool {
+	return collection || damaskInstalled
+}

@@ -1303,7 +1303,11 @@ An agent must not break these:
   the dock's fetch is retried in-process (`rotateRetryDelays`) while the
   failure still looks like a network that is not up yet: a user manager cannot
   order against `network-online.target`, so a login that beats connectivity
-  would otherwise rotate nothing and say so only in the journal. The unit's
+  would otherwise rotate nothing and say so only in the journal. Wallpaper
+  rotation is a separate timer-driven oneshot running `chairlift
+  --rotate-wallpaper` (also short-circuited before `app.New()`), with its own
+  `last-wallpaper-rotation-token`: sharing the icon pass's token would let
+  whichever pass ran first suppress the other for the whole session. The unit's
   `ExecStart` must survive upgrades: `os.Executable` resolves a cask install
   to `<prefix>/Caskroom/chairlift/<version>/chairlift`, which the next
   `brew upgrade` deletes, so `livery.unitExecutable` names the prefix's

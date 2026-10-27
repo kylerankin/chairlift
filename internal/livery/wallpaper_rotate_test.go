@@ -3,6 +3,8 @@ package livery
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -84,5 +86,171 @@ func TestConfigureWallpaperRotationRespectsDryRun(t *testing.T) {
 	}
 	if f.sawPrefix("systemctl --user enable") {
 		t.Fatal("dry-run configure must not enable the timer")
+	}
+}
+
+// TestRotateWallpaperIgnoresTheIconRotationToken pins the separate
+// idempotence key: an icon pass that already stamped last-rotation-token for
+// this session must not make the wallpaper pass skip, and the wallpaper pass
+// records its own key rather than the icon one.
+func TestRotateWallpaperIgnoresTheIconRotationToken(t *testing.T) {
+	f := wallpaperRotationState(t,
+		map[string]string{
+			KeyWallpaperRotate: "true", KeyWallpaperChannel: "'bluefin'", KeyWallpaperImage: "'bluefin/aurora.png'",
+			KeyRotationToken: "'session:12345'",
+		},
+		map[string]string{"bluefin/aurora.png": "b", "bluefin/moon.png": "b"},
+	)
+	f.reply["systemctl --user show -p ActiveEnterTimestampMonotonic"] = "12345\n"
+
+	if err := RotateWallpaper(context.Background()); err != nil {
+		t.Fatalf("rotation failed: %v", err)
+	}
+	if !f.sawPrefix("gsettings set org.gnome.desktop.background picture-uri ") {
+		t.Fatalf("the icon pass's token suppressed the wallpaper pass: %v", f.calls)
+	}
+	if !f.sawPrefix(setCall(KeyWallpaperRotationToken, "session:12345")) {
+		t.Errorf("wallpaper pass did not record its own token: %v", f.calls)
+	}
+	if f.sawPrefix("gsettings set " + SchemaID + " " + KeyRotationToken + " ") {
+		t.Errorf("wallpaper pass overwrote the icon rotation token: %v", f.calls)
+	}
+}
+
+// TestRotateWallpaperRunsOncePerSession is the wallpaper pass's own
+// idempotence: a matching wallpaper token makes a second pass a no-op.
+func TestRotateWallpaperRunsOncePerSession(t *testing.T) {
+	f := wallpaperRotationState(t,
+		map[string]string{
+			KeyWallpaperRotate: "true", KeyWallpaperChannel: "'bluefin'", KeyWallpaperImage: "'bluefin/aurora.png'",
+			KeyWallpaperRotationToken: "'session:12345'",
+		},
+		map[string]string{"bluefin/aurora.png": "b", "bluefin/moon.png": "b"},
+	)
+	f.reply["systemctl --user show -p ActiveEnterTimestampMonotonic"] = "12345\n"
+
+	if err := RotateWallpaper(context.Background()); err != nil {
+		t.Fatalf("rotation failed: %v", err)
+	}
+	if f.sawPrefix("gsettings set org.gnome.desktop.background") {
+		t.Errorf("a second pass in the same session advanced the wallpaper: %v", f.calls)
+	}
+}
+
+// wallpaperUnitFixture points the unit directory and executable at test
+// values, and returns the service and timer paths.
+func wallpaperUnitFixture(t *testing.T) (servicePath, timerPath string) {
+	t.Helper()
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("GSETTINGS_SCHEMA_DIR", "")
+	original := executablePath
+	executablePath = func() (string, error) { return "/usr/bin/chairlift", nil }
+	t.Cleanup(func() { executablePath = original })
+	var err error
+	if servicePath, err = wallpaperUnitPath(); err != nil {
+		t.Fatal(err)
+	}
+	if timerPath, err = wallpaperTimerPath(); err != nil {
+		t.Fatal(err)
+	}
+	return servicePath, timerPath
+}
+
+func TestInstallWallpaperRotationWritesUnitsRunningTheFlag(t *testing.T) {
+	f := newFakeCommands(t)
+	servicePath, timerPath := wallpaperUnitFixture(t)
+
+	if err := InstallWallpaperRotation(context.Background()); err != nil {
+		t.Fatalf("InstallWallpaperRotation: %v", err)
+	}
+	service, err := os.ReadFile(servicePath)
+	if err != nil {
+		t.Fatalf("reading the service: %v", err)
+	}
+	if want := `ExecStart="/usr/bin/chairlift" ` + WallpaperRotateFlag; !strings.Contains(string(service), want) {
+		t.Errorf("service does not run %q:\n%s", want, service)
+	}
+	if _, err := os.Stat(timerPath); err != nil {
+		t.Errorf("timer not written: %v", err)
+	}
+	if !f.sawPrefix("systemctl --user enable " + WallpaperTimerName) {
+		t.Errorf("timer not enabled: %v", f.calls)
+	}
+}
+
+// TestInstallWallpaperRotationRestoresPriorUnitsOnFailure covers the rollback:
+// a failed enable leaves a previously-installed service byte-for-byte as it
+// was and removes a timer that did not exist before.
+func TestInstallWallpaperRotationRestoresPriorUnitsOnFailure(t *testing.T) {
+	f := newFakeCommands(t)
+	servicePath, timerPath := wallpaperUnitFixture(t)
+	prior := []byte("[Service]\nExecStart=/old/chairlift --rotate-wallpaper\n")
+	if err := os.MkdirAll(filepath.Dir(servicePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(servicePath, prior, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f.fail["systemctl --user enable"] = errors.New("exit status 1")
+
+	if err := InstallWallpaperRotation(context.Background()); err == nil {
+		t.Fatal("InstallWallpaperRotation reported success after enable failed")
+	}
+	got, err := os.ReadFile(servicePath)
+	if err != nil {
+		t.Fatalf("prior service was not restored: %v", err)
+	}
+	if string(got) != string(prior) {
+		t.Errorf("prior service not restored:\n got %q\nwant %q", got, prior)
+	}
+	if _, err := os.Stat(timerPath); !os.IsNotExist(err) {
+		t.Errorf("a timer that did not exist before was left behind: %v", err)
+	}
+}
+
+func TestRemoveWallpaperRotationDeletesUnits(t *testing.T) {
+	f := newFakeCommands(t)
+	servicePath, timerPath := wallpaperUnitFixture(t)
+	if err := InstallWallpaperRotation(context.Background()); err != nil {
+		t.Fatalf("InstallWallpaperRotation: %v", err)
+	}
+
+	if err := RemoveWallpaperRotation(context.Background()); err != nil {
+		t.Fatalf("RemoveWallpaperRotation: %v", err)
+	}
+	for _, path := range []string{servicePath, timerPath} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Errorf("%s still present after remove: %v", path, err)
+		}
+	}
+	if !f.sawPrefix("systemctl --user disable " + WallpaperTimerName) {
+		t.Errorf("timer not disabled: %v", f.calls)
+	}
+}
+
+// TestRemoveWallpaperRotationRestoresUnitsOnFailure covers the inverse
+// rollback: a failed disable puts both units back as they were.
+func TestRemoveWallpaperRotationRestoresUnitsOnFailure(t *testing.T) {
+	f := newFakeCommands(t)
+	servicePath, timerPath := wallpaperUnitFixture(t)
+	if err := InstallWallpaperRotation(context.Background()); err != nil {
+		t.Fatalf("InstallWallpaperRotation: %v", err)
+	}
+	service, _ := os.ReadFile(servicePath)
+	timer, _ := os.ReadFile(timerPath)
+	f.fail["systemctl --user disable "+WallpaperServiceName] = errors.New("exit status 1")
+
+	if err := RemoveWallpaperRotation(context.Background()); err == nil {
+		t.Fatal("RemoveWallpaperRotation reported success after disable failed")
+	}
+	for path, want := range map[string][]byte{servicePath: service, timerPath: timer} {
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Errorf("%s not restored: %v", path, err)
+			continue
+		}
+		if string(got) != string(want) {
+			t.Errorf("%s not restored byte-for-byte:\n got %q\nwant %q", path, got, want)
+		}
 	}
 }

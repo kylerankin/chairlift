@@ -2,6 +2,7 @@ package livery
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/projectbluefin/chairlift/internal/dryrun"
@@ -63,21 +64,38 @@ func TestDamaskInstallRespectsDryRun(t *testing.T) {
 	}
 }
 
-func TestDamaskOpenUsesDesktopExecution(t *testing.T) {
-	newFakeCommands(t)
-	useTempDataHome(t)
+// TestDamaskCommandRunsTheFlatpak pins the launch itself: desktops register
+// no app:// handler, so the command must be `flatpak run <id>`.
+func TestDamaskCommandRunsTheFlatpak(t *testing.T) {
+	cmd := damaskCommand()
+	want := []string{"flatpak", "run", DamaskID}
+	if strings.Join(cmd.Args, " ") != strings.Join(want, " ") {
+		t.Fatalf("Damask launch = %q, want %q", cmd.Args, want)
+	}
+}
+
+func TestDamaskOpenLaunchesUnlessDryRun(t *testing.T) {
 	original := launchDamask
 	t.Cleanup(func() { launchDamask = original })
-
-	var gotURI string
-	launchDamask = func(_ context.Context) error {
-		gotURI = "app://" + DamaskID
+	launches := 0
+	launchDamask = func(context.Context) error {
+		launches++
 		return nil
 	}
+
 	if err := DamaskOpen(context.Background()); err != nil {
-		t.Fatalf("DamaskOpen should launch via desktop execution: %v", err)
+		t.Fatalf("DamaskOpen: %v", err)
 	}
-	if gotURI != "app://"+DamaskID {
-		t.Fatalf("launch URI = %q, want app://%s", gotURI, DamaskID)
+	if launches != 1 {
+		t.Fatalf("DamaskOpen launched %d times, want 1", launches)
+	}
+
+	dryrun.Set(true)
+	t.Cleanup(func() { dryrun.Set(false) })
+	if err := DamaskOpen(context.Background()); err != nil {
+		t.Fatalf("dry-run DamaskOpen: %v", err)
+	}
+	if launches != 1 {
+		t.Fatal("dry-run DamaskOpen launched Damask")
 	}
 }

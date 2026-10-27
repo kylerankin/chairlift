@@ -3,6 +3,8 @@ package livery
 import (
 	"context"
 	"log"
+	"net/url"
+	"path/filepath"
 	"strconv"
 
 	"github.com/projectbluefin/chairlift/internal/dryrun"
@@ -33,22 +35,46 @@ func NativeBackgroundAvailable(ctx context.Context) bool {
 
 // ApplyNativeBackground writes file to GNOME's picture-uri and picture-uri-dark
 // so the selected collection image becomes the desktop picture in both colour
-// schemes. It writes neither key when dry-run is enabled, and reports the
-// missing-schema case as ErrExtensionMissing so the page can say so rather
-// than pretending the picture changed.
+// schemes. It writes neither key when dry-run is enabled. A missing schema
+// surfaces as ErrExtensionMissing, which gsettingsSet maps it to, so the page
+// can say so rather than pretending the picture changed.
 //
-// gsettingsSet quotes the path as a GVariant string, which is the same form
-// SetString uses for ChairLift's own string keys.
+// Both keys hold URIs, not paths: GNOME resolves them with
+// g_filename_from_uri, which rejects a bare path, so the absolute path is
+// written as a file:// URI quoted as a GVariant string.
 func ApplyNativeBackground(ctx context.Context, file string) error {
+	value := strconv.Quote(BackgroundURI(file))
 	if dryrun.Enabled() {
-		log.Printf("[DRY-RUN] would set %s %s and %s %s to %q",
+		log.Printf("[DRY-RUN] would set %s %s and %s %s to %s",
 			NativeBackgroundSchema, pictureURIKey,
-			NativeBackgroundSchema, pictureURIDarkKey, file)
+			NativeBackgroundSchema, pictureURIDarkKey, value)
 		return nil
 	}
-	quoted := strconv.Quote(file)
-	if err := gsettingsSet(ctx, NativeBackgroundSchema, pictureURIKey, quoted); err != nil {
+	if err := gsettingsSet(ctx, NativeBackgroundSchema, pictureURIKey, value); err != nil {
 		return err
 	}
-	return gsettingsSet(ctx, NativeBackgroundSchema, pictureURIDarkKey, quoted)
+	return gsettingsSet(ctx, NativeBackgroundSchema, pictureURIDarkKey, value)
+}
+
+// BackgroundURI returns the file:// URI GNOME's background keys expect for an
+// absolute path, percent-encoding any character a URI cannot carry verbatim.
+func BackgroundURI(file string) string {
+	return (&url.URL{Scheme: "file", Path: filepath.Clean(file)}).String()
+}
+
+// SelectWallpaper applies one channel image to the desktop and records the
+// channel and image, so the headless rotation pass (RotateWallpaper) knows
+// which channel to advance and where it left off. Under dry-run nothing is
+// written: ApplyNativeBackground only logs, and the choice is not persisted.
+func SelectWallpaper(ctx context.Context, channelID, imageID, file string) error {
+	if err := ApplyNativeBackground(ctx, file); err != nil {
+		return err
+	}
+	if dryrun.Enabled() {
+		return nil
+	}
+	if err := SetString(ctx, KeyWallpaperChannel, channelID); err != nil {
+		return err
+	}
+	return SetString(ctx, KeyWallpaperImage, imageID)
 }

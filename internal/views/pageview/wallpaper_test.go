@@ -1,0 +1,144 @@
+package pageview
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/projectbluefin/chairlift/internal/livery"
+)
+
+// withChannels points the wallpaper catalog at a fixture tree with one
+// directory per channel, each holding a single image.
+func withChannels(t *testing.T, ids ...string) {
+	t.Helper()
+	root := t.TempDir()
+	for _, id := range ids {
+		dir := filepath.Join(root, id)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "one.png"), []byte("png"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	original := livery.WallpaperBackgroundsRoot
+	livery.WallpaperBackgroundsRoot = root
+	t.Cleanup(func() { livery.WallpaperBackgroundsRoot = original })
+}
+
+func TestWallpaperSelectorRowsMarksTheConfirmedChannel(t *testing.T) {
+	withChannels(t, "framework", "bluefin")
+
+	rows := WallpaperSelectorRows("framework")
+	if len(rows) != 2 {
+		t.Fatalf("got %d rows, want 2: %+v", len(rows), rows)
+	}
+	if rows[0].ID != "bluefin" || rows[1].ID != "framework" {
+		t.Errorf("rows not in curated order: %+v", rows)
+	}
+	if rows[0].Selected || !rows[1].Selected {
+		t.Errorf("only framework should be selected: %+v", rows)
+	}
+	if WallpaperSelectorEmpty() {
+		t.Error("WallpaperSelectorEmpty with two channels installed")
+	}
+}
+
+func TestWallpaperSelectorIsEmptyWithoutChannels(t *testing.T) {
+	original := livery.WallpaperBackgroundsRoot
+	livery.WallpaperBackgroundsRoot = filepath.Join(t.TempDir(), "absent")
+	t.Cleanup(func() { livery.WallpaperBackgroundsRoot = original })
+
+	if rows := WallpaperSelectorRows(""); len(rows) != 0 {
+		t.Errorf("fabricated rows with no channel installed: %+v", rows)
+	}
+	if !WallpaperSelectorEmpty() {
+		t.Error("WallpaperSelectorEmpty false with no channel installed")
+	}
+}
+
+func TestWallpaperSelectedChannelRowNamesTheAction(t *testing.T) {
+	withChannels(t, "bluefin")
+	if got := WallpaperSelectedChannelRow("").Subtitle; got != "Choose a wallpaper channel" {
+		t.Errorf("empty selection subtitle = %q", got)
+	}
+	if got := WallpaperSelectedChannelRow("missing").Subtitle; got != "Choose a wallpaper channel" {
+		t.Errorf("unknown channel subtitle = %q", got)
+	}
+	channel, _ := livery.ChannelByID("bluefin")
+	if got := WallpaperSelectedChannelRow("bluefin").Subtitle; got != channel.Name {
+		t.Errorf("selected channel subtitle = %q, want %q", got, channel.Name)
+	}
+}
+
+func TestWallpaperRotationAvailableNeedsGNOMEAndAChannel(t *testing.T) {
+	for _, tc := range []struct {
+		gnome, channel, want bool
+	}{
+		{true, true, true},
+		{true, false, false},
+		{false, true, false},
+		{false, false, false},
+	} {
+		if got := WallpaperRotationAvailable(tc.gnome, tc.channel); got != tc.want {
+			t.Errorf("WallpaperRotationAvailable(%v, %v) = %v, want %v", tc.gnome, tc.channel, got, tc.want)
+		}
+	}
+}
+
+func TestWallpaperRotationRowWarnsForASourceBuild(t *testing.T) {
+	if got := WallpaperRotationRow(false).Subtitle; !strings.Contains(got, "moved or reinstalled") {
+		t.Errorf("source build subtitle does not warn: %q", got)
+	}
+	if got := WallpaperRotationRow(true).Subtitle; strings.Contains(got, "moved or reinstalled") {
+		t.Errorf("installed build subtitle warns: %q", got)
+	}
+}
+
+func TestDamaskOffer(t *testing.T) {
+	for _, tc := range []struct {
+		installed, flatpak bool
+		want               DamaskState
+	}{
+		{true, true, DamaskInstalled},
+		{true, false, DamaskInstalled},
+		{false, true, DamaskInstallable},
+		{false, false, DamaskHidden},
+	} {
+		if got := DamaskOffer(tc.installed, tc.flatpak); got != tc.want {
+			t.Errorf("DamaskOffer(%v, %v) = %v, want %v", tc.installed, tc.flatpak, got, tc.want)
+		}
+	}
+}
+
+func TestDamaskControlIsOneActionWithTwoStates(t *testing.T) {
+	if DamaskActionName(true) != "Open" || DamaskActionName(false) != "Install" {
+		t.Errorf("action names = %q/%q", DamaskActionName(true), DamaskActionName(false))
+	}
+	if DamaskRow(true).Title != DamaskRow(false).Title {
+		t.Error("Damask row title changes with install state")
+	}
+	if DamaskRow(true).Subtitle == DamaskRow(false).Subtitle {
+		t.Error("Damask row subtitle does not say which action applies")
+	}
+}
+
+// TestWallpaperGroupVisibleOnlyWithACollectionOrDamask pins the gating: a
+// host with neither the collection nor Damask installed never builds an
+// empty group, whatever else is present.
+func TestWallpaperGroupVisibleOnlyWithACollectionOrDamask(t *testing.T) {
+	for _, tc := range []struct {
+		collection, damask, want bool
+	}{
+		{false, false, false},
+		{true, false, true},
+		{false, true, true},
+		{true, true, true},
+	} {
+		if got := WallpaperGroupVisible(tc.collection, tc.damask); got != tc.want {
+			t.Errorf("WallpaperGroupVisible(%v, %v) = %v, want %v", tc.collection, tc.damask, got, tc.want)
+		}
+	}
+}

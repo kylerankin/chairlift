@@ -107,6 +107,10 @@ type UserHome struct {
 	// wallpaperDamaskAvailable records what the first Damask probe found, so
 	// the control's label and action never flip out from under the user.
 	wallpaperDamaskAvailable bool
+	// wallpaperNativeBackground records whether GNOME owned the background
+	// schema when the group was discovered, so syncing the rotation switch
+	// never shells out to gsettings on the main thread.
+	wallpaperNativeBackground bool
 	// wallpaperRotationGate admits one rotation toggle at a time; the timer
 	// write is a single shared unit, so a rapid on/off flip must not land
 	// RemoveWallpaperRotation before an earlier InstallWallpaperRotation.

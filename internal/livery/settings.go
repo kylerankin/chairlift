@@ -54,6 +54,11 @@ const (
 	KeyWallpaperChannel = "wallpaper-channel"
 	KeyWallpaperImage   = "wallpaper-image"
 	KeyWallpaperRotate  = "wallpaper-rotate"
+
+	// KeyWallpaperRotationToken is the wallpaper pass's own idempotence key.
+	// It is separate from KeyRotationToken so the icon and wallpaper passes,
+	// which run from different units, never mark each other as done.
+	KeyWallpaperRotationToken = "last-wallpaper-rotation-token"
 )
 
 // Keys is the complete key inventory, in schema order.
@@ -66,6 +71,7 @@ var Keys = []string{
 	KeyWallpaperChannel,
 	KeyWallpaperImage,
 	KeyWallpaperRotate,
+	KeyWallpaperRotationToken,
 }
 
 // ErrSchemaMissing reports that the Livery settings schema is not installed.
@@ -113,6 +119,8 @@ type State struct {
 	WallpaperImage string
 	// WallpaperRotate advances the selected image at each login while true.
 	WallpaperRotate bool
+	// WallpaperRotationToken is the session the wallpaper pass last ran for.
+	WallpaperRotationToken string
 }
 
 // AppGridSource returns the artwork source for the app-grid surface.
@@ -239,6 +247,8 @@ func Load(ctx context.Context) (State, error) {
 
 		WallpaperImage:  values[KeyWallpaperImage],
 		WallpaperRotate: parseBool(values[KeyWallpaperRotate]),
+
+		WallpaperRotationToken: values[KeyWallpaperRotationToken],
 	}
 	return s, nil
 }
