@@ -294,6 +294,9 @@ func (uh *UserHome) applyLiveryState(state livery.State, panelAvailable, appGrid
 		// window — including one GTK delivers after this function returns —
 		// would look like a user edit and write to dconf on page load.
 		uh.liveryLoaded = true
+		// The channel selector's sensitivity follows liveryLoaded, so it
+		// can only be enabled once the flag is set.
+		uh.syncWallpaperChannels()
 	}()
 	uh.liveryState = state
 	uh.liveryAppGridAvailable = appGridAvailable

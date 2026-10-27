@@ -578,13 +578,30 @@ def step_section_button_state(context, label, section, state):
     if state not in ("sensitive", "insensitive"):
         raise NotImplementedError(f"unknown button state {state!r}")
     want = state == "sensitive"
+    root = _section(context, section)
     button = atspi.find(
-        _section(context, section),
+        root,
         lambda n: atspi.is_button(n) and (atspi.name(n) == label or label in _texts(n)),
         f"a button showing {label!r} in {section!r}",
     )
-    ok = atspi.poll(lambda: atspi.sensitive(button) == want)
+    ok = atspi.poll(lambda: _operable(button, root) == want)
     assert ok, f"the {label!r} button in {section!r} never became {state}"
+
+
+def _operable(node, root):
+    """node and every ancestor up to root are sensitive.
+
+    GTK does not publish an insensitive container's state on its children, so
+    a button inside an insensitive FlowBox still reports itself sensitive
+    while GTK ignores its activation.
+    """
+    while node is not None:
+        if not atspi.sensitive(node):
+            return False
+        if node == root or (atspi.role(node) == atspi.role(root) and atspi.name(node) == atspi.name(root)):
+            return True
+        node = atspi.safe(lambda: node.parent, None)
+    return True
 
 
 # ---------------------------------------------------------------- wallpapers
