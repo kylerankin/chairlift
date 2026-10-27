@@ -7,6 +7,7 @@ import (
 	"codeberg.org/puregotk/puregotk/v4/adw"
 	"codeberg.org/puregotk/puregotk/v4/gtk"
 	sgtk "github.com/frostyard/snowkit/gtk"
+	"github.com/projectbluefin/chairlift/internal/capability"
 	"github.com/projectbluefin/chairlift/internal/dryrun"
 	"github.com/projectbluefin/chairlift/internal/homebrew"
 	"github.com/projectbluefin/chairlift/internal/views/actionmsg"
@@ -20,13 +21,16 @@ import (
 // an unavailable-tool card. Damask is independent of Homebrew, so its probe
 // runs in the same background discovery and an installed or installable
 // Damask builds the group even when the collection is absent (pageview.WallpaperGroupVisible).
+// The Damask probe runs only on a host with the Flatpak capability, so a
+// Homebrew-only host never asks flatpak anything.
 func (uh *UserHome) buildWallpapersGroup(page *adw.PreferencesPage) {
 	var paths []string
 	if cfg := uh.config.GetGroupConfig("applications_page", "brew_bundles_group"); cfg != nil {
 		paths = append(paths, cfg.BundlesPaths...)
 	}
+	flatpakCapable := uh.capabilities[capability.Flatpak]
 	go func() {
-		probe := probeWallpaperHost()
+		probe := probeWallpaperHost(flatpakCapable)
 		collectionFound := false
 		bundles, err := homebrew.AvailableBundles(paths)
 		if err != nil {

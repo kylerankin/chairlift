@@ -125,3 +125,20 @@ func TestChannelAndImageByID(t *testing.T) {
 		t.Fatal("ChannelByID accepted an unknown id")
 	}
 }
+
+func TestPreviewImageSkipsSlideshowXML(t *testing.T) {
+	withWallpaperRoot(t, map[string]string{
+		"bluefin/01-bluefin.xml": "b",
+		"bluefin/aurora.png":     "b",
+		"slides/only.XML":        "s",
+	})
+	channel, _ := ChannelByID("bluefin")
+	image, ok := PreviewImage(channel)
+	if !ok || image.ID != "bluefin/aurora.png" {
+		t.Fatalf("PreviewImage(bluefin) = %+v, %t; want the first raster image", image, ok)
+	}
+	slides, _ := ChannelByID("slides")
+	if image, ok := PreviewImage(slides); ok {
+		t.Fatalf("PreviewImage(slides) = %+v; an XML-only channel has no preview", image)
+	}
+}

@@ -145,6 +145,19 @@ func ChannelByID(id string) (WallpaperChannel, bool) {
 	return WallpaperChannel{}, false
 }
 
+// PreviewImage returns the channel's first raster image, for its thumbnail.
+// GNOME's XML animated-background files are selectable wallpapers but not
+// pictures GdkPixbuf can decode, so they are skipped; a channel holding only
+// XML entries has no preview and keeps its placeholder.
+func PreviewImage(channel WallpaperChannel) (WallpaperImage, bool) {
+	for _, image := range channel.Images {
+		if strings.ToLower(filepath.Ext(image.Path)) != ".xml" {
+			return image, true
+		}
+	}
+	return WallpaperImage{}, false
+}
+
 // ImageByID returns the image with the given id inside one channel.
 func ImageByID(channel WallpaperChannel, id string) (WallpaperImage, bool) {
 	for _, image := range channel.Images {

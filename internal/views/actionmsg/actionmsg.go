@@ -401,8 +401,8 @@ func WallpaperSelection(dryRun bool) LiveryDecision {
 // WallpaperRotation decides whether the Wallpapers rotation switch may
 // advance the confirmed rotation state. Under dry-run the switch springs
 // back and the preview toast says what would have been scheduled; a live run
-// mutates the page's remembered state and lets the timer's presence confirm
-// itself.
+// mutates the page's remembered state and lets the login unit's presence
+// confirm itself.
 func WallpaperRotation(dryRun bool, enable bool) LiveryDecision {
 	if dryRun {
 		return LiveryDecision{Toast: liveryPreview("rotating the wallpaper at login would be " + liveryTurned(enable))}

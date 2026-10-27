@@ -3,6 +3,7 @@ package views
 import (
 	"errors"
 	"log"
+	"os/exec"
 
 	"codeberg.org/puregotk/puregotk/v4/adw"
 	"codeberg.org/puregotk/puregotk/v4/gdk"
@@ -42,18 +43,25 @@ type wallpaperProbe struct {
 }
 
 // probeWallpaperHost runs the Damask and GNOME-background probes. It shells
-// out, so callers run it off the main thread.
-func probeWallpaperHost() wallpaperProbe {
+// out, so callers run it off the main thread. Damask is a Flatpak, so on a
+// host without the Flatpak capability it is hidden without ever asking
+// flatpak anything.
+func probeWallpaperHost(flatpakCapable bool) wallpaperProbe {
 	ctx, cancel := livery.DefaultContext()
 	defer cancel()
+	probe := wallpaperProbe{
+		damask:           pageview.DamaskHidden,
+		nativeBackground: livery.NativeBackgroundAvailable(ctx),
+	}
+	if !flatpakCapable {
+		return probe
+	}
 	installed, err := livery.DamaskInstalled(ctx)
 	if err != nil {
 		log.Printf("wallpapers: %v", err)
 	}
-	return wallpaperProbe{
-		damask:           pageview.DamaskOffer(installed, err != nil, installed || flatpak.IsInstalledCached()),
-		nativeBackground: livery.NativeBackgroundAvailable(ctx),
-	}
+	probe.damask = pageview.DamaskOffer(installed, err != nil, installed || flatpak.IsInstalledCached())
+	return probe
 }
 
 // publishWallpaperGroup builds the group and its always-present controls,
@@ -77,8 +85,9 @@ func (uh *UserHome) publishWallpaperGroup(page *adw.PreferencesPage, probe wallp
 }
 
 // buildWallpaperChannels builds the channel thumbnail selector once. Each
-// channel is one tile: its first image as a preview, its name, and a check
-// that marks the confirmed channel.
+// channel is one tile: a button showing its preview image, its name, and a
+// check that marks the confirmed channel. A button, rather than a bare
+// FlowBox child, gives every tile an accessible name and a click action.
 func (uh *UserHome) buildWallpaperChannels(group *adw.PreferencesGroup) {
 	if uh.wallpaperGrid != nil {
 		return
@@ -103,7 +112,7 @@ func (uh *UserHome) buildWallpaperChannels(group *adw.PreferencesGroup) {
 	uh.wallpaperGridIDs = make([]string, 0, len(rows))
 	uh.wallpaperGridImages = make(map[string]*gtk.Image, len(rows))
 	uh.wallpaperGridChecks = nil
-	for _, row := range rows {
+	for i, row := range rows {
 		box := gtk.NewBox(gtk.OrientationVerticalValue, 6)
 		box.SetMarginTop(12)
 		box.SetMarginBottom(12)
@@ -125,20 +134,23 @@ func (uh *UserHome) buildWallpaperChannels(group *adw.PreferencesGroup) {
 		tile := gtk.NewOverlay()
 		tile.SetChild(&box.Widget)
 		tile.AddOverlay(&check.Widget)
-		grid.Insert(&tile.Widget, -1)
+		button := gtk.NewButton()
+		button.AddCssClass("flat")
+		button.SetChild(&tile.Widget)
+		SetAccessibleLabel(button, row.Name)
+		channelID := row.ID
+		clicked := func(_ gtk.Button) { uh.onWallpaperChannelChosen(channelID) }
+		button.ConnectClicked(&clicked)
+		grid.Insert(&button.Widget, -1)
+		// The button is the tile's one focus stop; the FlowBox child
+		// wrapping it would otherwise be a second, action-less one.
+		if child := grid.GetChildAtIndex(int32(i)); child != nil {
+			child.SetFocusable(false)
+		}
 		uh.wallpaperGridIDs = append(uh.wallpaperGridIDs, row.ID)
 		uh.wallpaperGridImages[row.ID] = image
 		uh.wallpaperGridChecks = append(uh.wallpaperGridChecks, check)
 	}
-	catalog := rows
-	activated := func(_ gtk.FlowBox, ptr uintptr) {
-		child := gtk.FlowBoxChildNewFromInternalPtr(ptr)
-		index := int(child.GetIndex())
-		if index >= 0 && index < len(catalog) {
-			uh.onWallpaperChannelChosen(catalog[index].ID)
-		}
-	}
-	grid.ConnectChildActivated(&activated)
 	group.Add(&grid.Widget)
 	uh.syncWallpaperChannels()
 	uh.prefetchWallpaperPreviews()
@@ -173,20 +185,24 @@ func (uh *UserHome) syncWallpaperState() {
 // full-resolution wallpaper in memory.
 const wallpaperPreviewSize = 128
 
-// prefetchWallpaperPreviews decodes each channel's first image off the main
-// thread, scaled to the tile, and paints it on the main thread. A channel
-// with no discoverable image is left as its placeholder, so a missing pack
-// never shows a fake preview.
+// prefetchWallpaperPreviews decodes each channel's first raster image
+// (livery.PreviewImage) off the main thread, scaled to the tile, and paints
+// it on the main thread. A channel with no decodable image is left as its
+// placeholder, so a missing pack never shows a fake preview.
 func (uh *UserHome) prefetchWallpaperPreviews() {
 	for id, image := range uh.wallpaperGridImages {
 		id := id
 		image := image
 		go func() {
 			channel, ok := livery.ChannelByID(id)
-			if !ok || len(channel.Images) == 0 {
+			if !ok {
 				return
 			}
-			path, ok := livery.ResolveImage(channel.Images[0].Path)
+			preview, ok := livery.PreviewImage(channel)
+			if !ok {
+				return
+			}
+			path, ok := livery.ResolveImage(preview.Path)
 			if !ok {
 				return
 			}
@@ -357,8 +373,9 @@ func (uh *UserHome) onWallpaperChannelChosen(channelID string) {
 
 // onWallpaperRotateToggled commits the rotation preference only after the
 // user manager accepts the schedule, then mirrors the confirmed state back.
-// A Gate admits one toggle at a time; a failed operation leaves the last
-// persisted choice in place and springs the switch back to it.
+// A Gate admits one toggle at a time; a failed operation, or a dry-run
+// preview that wrote nothing, leaves the last persisted choice in place and
+// springs the switch back to it.
 func (uh *UserHome) onWallpaperRotateToggled(enabled bool) {
 	if uh.liverySuppress || !uh.liveryLoaded || enabled == uh.liveryState.WallpaperRotate {
 		return
@@ -382,19 +399,22 @@ func (uh *UserHome) onWallpaperRotateToggled(enabled bool) {
 				uh.reportLiveryFailure("rotating the wallpaper", err)
 				return
 			}
+			if !decision.MutateUI {
+				uh.setWallpaperRotateSwitch(uh.liveryState.WallpaperRotate)
+				uh.toastAdder.ShowToast(decision.Toast)
+				return
+			}
 			uh.liveryState.WallpaperRotate = confirmed.WallpaperRotate
 			uh.setWallpaperRotateSwitch(confirmed.WallpaperRotate)
-			if !decision.MutateUI {
-				uh.toastAdder.ShowToast(decision.Toast)
-			}
 		})
 	}()
 }
 
 // onWallpaperDamaskActivated runs the single Damask control's action: install
 // it when absent, launch it when installed. A dry run previews without
-// changing anything, and a Flatpak that vanished since the probe only shows a
-// toast pointing to the software store; nothing is launched.
+// changing anything, and a Flatpak that vanished since the probe — on either
+// the install or the launch path — only shows a toast pointing to the
+// software store; nothing is launched.
 func (uh *UserHome) onWallpaperDamaskActivated() {
 	if !uh.liveryLoaded {
 		return
@@ -437,7 +457,7 @@ func (uh *UserHome) onWallpaperDamaskActivated() {
 		}
 		if err != nil {
 			var notFound *flatpak.NotFoundError
-			if errors.As(err, &notFound) {
+			if errors.As(err, &notFound) || errors.Is(err, exec.ErrNotFound) {
 				finish(func() { uh.toastAdder.ShowToast(actionmsg.DamaskStoreHandoff()) })
 				return
 			}
