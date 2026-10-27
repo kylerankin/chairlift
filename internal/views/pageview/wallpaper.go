@@ -133,11 +133,11 @@ func DamaskOffer(installed, flatpakAvailable bool) DamaskState {
 }
 
 // WallpaperGroupVisible reports whether the optional Wallpapers group is
-// built: only when the Homebrew wallpaper collection is configured or Damask
-// is installed. Inside a visible group the installed channels, the rotation
-// switch and the Damask install control (where Flatpak is present) appear as
-// usable; none of them alone surfaces the group, so a host with neither a
-// collection nor Damask keeps Livery without an empty Wallpapers group.
-func WallpaperGroupVisible(collection, damaskInstalled bool) bool {
-	return collection || damaskInstalled
+// built: when the Homebrew wallpaper collection is configured or a Damask
+// control can be offered (installed, or installable through Flatpak). Damask
+// does not depend on Homebrew, so a host without the collection still gets the
+// group when Flatpak can install or open Damask. A host with neither keeps
+// Livery without an empty Wallpapers group.
+func WallpaperGroupVisible(collection bool, damask DamaskState) bool {
+	return collection || damask != DamaskHidden
 }

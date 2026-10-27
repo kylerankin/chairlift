@@ -156,7 +156,7 @@ func wallpaperUnitFixture(t *testing.T) (servicePath, timerPath string) {
 	return servicePath, timerPath
 }
 
-func TestInstallWallpaperRotationWritesUnitsRunningTheFlag(t *testing.T) {
+func TestWallpaperRotationInstallWritesUnitsRunningTheFlag(t *testing.T) {
 	f := newFakeCommands(t)
 	servicePath, timerPath := wallpaperUnitFixture(t)
 
@@ -178,10 +178,10 @@ func TestInstallWallpaperRotationWritesUnitsRunningTheFlag(t *testing.T) {
 	}
 }
 
-// TestInstallWallpaperRotationRestoresPriorUnitsOnFailure covers the rollback:
+// TestWallpaperRotationInstallRestoresPriorUnitsOnFailure covers the rollback:
 // a failed enable leaves a previously-installed service byte-for-byte as it
 // was and removes a timer that did not exist before.
-func TestInstallWallpaperRotationRestoresPriorUnitsOnFailure(t *testing.T) {
+func TestWallpaperRotationInstallRestoresPriorUnitsOnFailure(t *testing.T) {
 	f := newFakeCommands(t)
 	servicePath, timerPath := wallpaperUnitFixture(t)
 	prior := []byte("[Service]\nExecStart=/old/chairlift --rotate-wallpaper\n")

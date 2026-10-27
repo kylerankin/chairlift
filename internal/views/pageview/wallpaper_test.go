@@ -126,16 +126,19 @@ func TestDamaskControlIsOneActionWithTwoStates(t *testing.T) {
 }
 
 // TestWallpaperGroupVisibleOnlyWithACollectionOrDamask pins the gating: a
-// host with neither the collection nor Damask installed never builds an
-// empty group, whatever else is present.
+// host with neither the collection nor an offerable Damask never builds an
+// empty group, and an installable Damask surfaces it without Homebrew.
 func TestWallpaperGroupVisibleOnlyWithACollectionOrDamask(t *testing.T) {
 	for _, tc := range []struct {
-		collection, damask, want bool
+		collection bool
+		damask     DamaskState
+		want       bool
 	}{
-		{false, false, false},
-		{true, false, true},
-		{false, true, true},
-		{true, true, true},
+		{false, DamaskHidden, false},
+		{true, DamaskHidden, true},
+		{false, DamaskInstallable, true},
+		{false, DamaskInstalled, true},
+		{true, DamaskInstalled, true},
 	} {
 		if got := WallpaperGroupVisible(tc.collection, tc.damask); got != tc.want {
 			t.Errorf("WallpaperGroupVisible(%v, %v) = %v, want %v", tc.collection, tc.damask, got, tc.want)

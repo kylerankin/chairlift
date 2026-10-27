@@ -432,9 +432,9 @@ the push re-runs CI. It runs on request rather than per push for the same
 drift reason, and handles branches in this repository only. `make ci` checks
 that every page and configurable group has a screenshot and an entry here.
 
-Within Livery, **Wallpapers** appears when Homebrew is available and either
-the configured external wallpaper collection or the Damask Flatpak is
-present. Expand **Wallpaper Collections** to
+Within Livery, **Wallpapers** appears when the configured external wallpaper
+collection is present or, where Flatpak is available, Damask can be installed
+or opened; Damask does not require Homebrew. Expand **Wallpaper Collections** to
 inspect its actual packages. Its subtitle reports Installed, Update Available,
 Not Installed or Indeterminate; choose **Install** or **Update** explicitly.
 Opening the page never installs anything. A preview restores the action and

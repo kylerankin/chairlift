@@ -21,7 +21,7 @@ import (
 
 // ensureWallpapersGroup builds the optional Wallpapers group once and returns
 // it. The group only exists when the Homebrew wallpaper collection is
-// configured or Damask is installed, so callers guard it with
+// configured or Damask is installed or installable, so callers guard it with
 // pageview.WallpaperGroupVisible.
 func (uh *UserHome) ensureWallpapersGroup(page *adw.PreferencesPage) *adw.PreferencesGroup {
 	if uh.wallpapersGroup != nil {
@@ -94,6 +94,8 @@ func (uh *UserHome) buildWallpaperChannels(group *adw.PreferencesGroup) {
 	grid.SetMaxChildrenPerLine(5)
 	grid.SetRowSpacing(6)
 	grid.SetColumnSpacing(6)
+	// Insensitive until the persisted state loads; syncWallpaperChannels
+	// re-enables it once a selection can actually be applied.
 	grid.SetSensitive(false)
 	uh.wallpaperGrid = grid
 	uh.wallpaperGridImages = make(map[string]*gtk.Image, len(rows))
@@ -139,11 +141,14 @@ func (uh *UserHome) buildWallpaperChannels(group *adw.PreferencesGroup) {
 }
 
 // syncWallpaperChannels marks the confirmed channel's tile, so the page
-// highlights the image livery has already applied to the desktop.
+// highlights the image livery has already applied to the desktop, and enables
+// the selector once the state has loaded on a desktop that owns GNOME's
+// background keys.
 func (uh *UserHome) syncWallpaperChannels() {
 	if uh.wallpaperGrid == nil {
 		return
 	}
+	uh.wallpaperGrid.SetSensitive(uh.liveryLoaded && uh.wallpaperNativeBackground)
 	rows := pageview.WallpaperSelectorRows(uh.liveryState.WallpaperChannel)
 	for i, row := range rows {
 		if i < len(uh.wallpaperGridChecks) {
@@ -365,7 +370,8 @@ func (uh *UserHome) onWallpaperRotateToggled(enabled bool) {
 
 // onWallpaperDamaskActivated runs the single Damask control's action: install
 // it when absent, launch it when installed. A dry run previews without
-// changing anything, and a missing Flatpak is a store handoff, not a failure.
+// changing anything, and a Flatpak that vanished since the probe only shows a
+// toast pointing to the software store; nothing is launched.
 func (uh *UserHome) onWallpaperDamaskActivated() {
 	if !uh.liveryLoaded {
 		return

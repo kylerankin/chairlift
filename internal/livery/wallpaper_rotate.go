@@ -19,9 +19,11 @@ import (
 const WallpaperRotateFlag = "--rotate-wallpaper"
 
 // WallpaperServiceName and WallpaperTimerName are the systemd user units that
-// perform rotation. The service is a oneshot that runs one pass; the timer
-// fires it once a day and once after boot, so a picture changes whether or
-// not the user logs in at midnight.
+// perform rotation. The service is a oneshot that runs one pass when the
+// graphical session starts, and the timer (OnBootSec, which elapses at once
+// when the user manager starts after boot) fires it at login as well.
+// RotateWallpaper's per-session token makes repeated fires within
+// one session no-ops, so the picture advances once per login session.
 const (
 	WallpaperServiceName = "chairlift-livery-wallpaper-rotate.service"
 	WallpaperTimerName   = "chairlift-livery-wallpaper-rotate.timer"
@@ -44,9 +46,7 @@ WantedBy=graphical-session.target
 Description=%s Wallpaper rotation timer
 
 [Timer]
-OnCalendar=daily
 OnBootSec=1min
-Persistent=true
 Unit=%s
 
 [Install]

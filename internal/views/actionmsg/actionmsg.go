@@ -422,8 +422,9 @@ func DamaskInstall(dryRun bool) string {
 	return "Damask installed. Open it from the applications menu."
 }
 
-// DamaskStoreHandoff is the toast when Flatpak itself is absent and the only
-// handoff is to the software store. It is never reported as installed.
+// DamaskStoreHandoff is the toast when Flatpak itself turns out to be absent
+// at click time. ChairLift launches nothing; the toast only points the user to
+// their software store and never reports Damask as installed.
 func DamaskStoreHandoff() string {
 	return "Open your software store to install Damask."
 }

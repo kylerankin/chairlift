@@ -18,8 +18,8 @@ import (
 
 // buildWallpapersGroup discovers the external collection without constructing
 // an unavailable-tool card. Damask is independent of Homebrew, so its probe
-// runs in the same background discovery and an installed Damask builds the
-// group even when the collection is absent (pageview.WallpaperGroupVisible).
+// runs in the same background discovery and an installed or installable
+// Damask builds the group even when the collection is absent (pageview.WallpaperGroupVisible).
 func (uh *UserHome) buildWallpapersGroup(page *adw.PreferencesPage) {
 	var paths []string
 	if cfg := uh.config.GetGroupConfig("applications_page", "brew_bundles_group"); cfg != nil {
@@ -129,7 +129,7 @@ func (uh *UserHome) buildWallpapersGroup(page *adw.PreferencesPage) {
 		// Publish once more even if brew found nothing, so a Damask-only
 		// group still gets built. publishWallpaperGroup is idempotent: the
 		// nil-guards build the group and its controls once.
-		if !pageview.WallpaperGroupVisible(collectionFound, probe.damask == pageview.DamaskInstalled) {
+		if !pageview.WallpaperGroupVisible(collectionFound, probe.damask) {
 			return
 		}
 		sgtk.RunOnMainThread(func() {

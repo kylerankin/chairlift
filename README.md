@@ -105,8 +105,9 @@ never asks for a reboot.
 - **Wallpapers**: install or update the curated wallpaper collection
   (`artwork.Brewfile`) with Homebrew, pick an installed wallpaper channel and
   optionally advance it at each login, or install and open the Damask
-  live-wallpaper manager; shown when Homebrew is available and the
-  collection or Damask is present
+  live-wallpaper manager; shown when the collection is configured or, where
+  Flatpak is present, Damask can be installed or opened — Damask needs no
+  Homebrew
 
 ### 🔧 Updates & Maintenance
 
