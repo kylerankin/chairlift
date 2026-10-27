@@ -94,9 +94,12 @@ type UserHome struct {
 	// wallpaperRotateSpinner shows activity while the rotation unit is
 	// installed or removed. nil unless the group was built.
 	wallpaperRotateSpinner *gtk.Spinner
-	// wallpaperGrid is the channel thumbnail selector; index-aligned with
-	// pageview.WallpaperSelectorRows and the checks below. nil unless built.
+	// wallpaperGrid is the channel thumbnail selector; nil unless built.
+	// wallpaperGridIDs snapshots the channel catalog the tiles were built
+	// from, index-aligned with the tiles and wallpaperGridChecks, so a sync
+	// never re-reads the backgrounds directory or drifts from the tiles.
 	wallpaperGrid       *gtk.FlowBox
+	wallpaperGridIDs    []string
 	wallpaperGridImages map[string]*gtk.Image
 	wallpaperGridChecks []*gtk.Image
 	// wallpaperDamaskRow is the single stateful Damask control (install when
@@ -111,7 +114,7 @@ type UserHome struct {
 	// schema when the group was discovered, so syncing the rotation switch
 	// never shells out to gsettings on the main thread.
 	wallpaperNativeBackground bool
-	// wallpaperRotationGate admits one rotation toggle at a time; the timer
+	// wallpaperRotationGate admits one rotation toggle at a time; the unit
 	// write is a single shared unit, so a rapid on/off flip must not land
 	// RemoveWallpaperRotation before an earlier InstallWallpaperRotation.
 	wallpaperRotationGate actionstate.Gate

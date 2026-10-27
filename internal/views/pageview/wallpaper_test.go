@@ -99,16 +99,18 @@ func TestWallpaperRotationRowWarnsForASourceBuild(t *testing.T) {
 
 func TestDamaskOffer(t *testing.T) {
 	for _, tc := range []struct {
-		installed, flatpak bool
-		want               DamaskState
+		installed, failed, flatpak bool
+		want                       DamaskState
 	}{
-		{true, true, DamaskInstalled},
-		{true, false, DamaskInstalled},
-		{false, true, DamaskInstallable},
-		{false, false, DamaskHidden},
+		{true, false, true, DamaskInstalled},
+		{true, false, false, DamaskInstalled},
+		{false, false, true, DamaskInstallable},
+		{false, false, false, DamaskHidden},
+		{false, true, true, DamaskUnknown},
+		{false, true, false, DamaskHidden},
 	} {
-		if got := DamaskOffer(tc.installed, tc.flatpak); got != tc.want {
-			t.Errorf("DamaskOffer(%v, %v) = %v, want %v", tc.installed, tc.flatpak, got, tc.want)
+		if got := DamaskOffer(tc.installed, tc.failed, tc.flatpak); got != tc.want {
+			t.Errorf("DamaskOffer(%v, %v, %v) = %v, want %v", tc.installed, tc.failed, tc.flatpak, got, tc.want)
 		}
 	}
 }
@@ -122,6 +124,10 @@ func TestDamaskControlIsOneActionWithTwoStates(t *testing.T) {
 	}
 	if DamaskRow(true).Subtitle == DamaskRow(false).Subtitle {
 		t.Error("Damask row subtitle does not say which action applies")
+	}
+	if unknown := DamaskUnknownRow(); unknown.Title != DamaskRow(true).Title ||
+		unknown.Subtitle == DamaskRow(true).Subtitle || unknown.Subtitle == DamaskRow(false).Subtitle {
+		t.Errorf("unknown Damask row does not read as unknown: %+v", unknown)
 	}
 }
 
@@ -139,6 +145,7 @@ func TestWallpaperGroupVisibleOnlyWithACollectionOrDamask(t *testing.T) {
 		{false, DamaskInstallable, true},
 		{false, DamaskInstalled, true},
 		{true, DamaskInstalled, true},
+		{false, DamaskUnknown, true},
 	} {
 		if got := WallpaperGroupVisible(tc.collection, tc.damask); got != tc.want {
 			t.Errorf("WallpaperGroupVisible(%v, %v) = %v, want %v", tc.collection, tc.damask, got, tc.want)

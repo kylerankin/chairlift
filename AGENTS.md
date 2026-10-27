@@ -1304,8 +1304,10 @@ An agent must not break these:
   failure still looks like a network that is not up yet: a user manager cannot
   order against `network-online.target`, so a login that beats connectivity
   would otherwise rotate nothing and say so only in the journal. Wallpaper
-  rotation is a separate timer-driven oneshot running `chairlift
-  --rotate-wallpaper` (also short-circuited before `app.New()`), with its own
+  rotation is a separate oneshot enabled under `graphical-session.target`
+  (no timer: one would fire before the session and fall back to the boot
+  token) running `chairlift --rotate-wallpaper` (also short-circuited before
+  `app.New()`), with its own
   `last-wallpaper-rotation-token`: sharing the icon pass's token would let
   whichever pass ran first suppress the other for the whole session. The unit's
   `ExecStart` must survive upgrades: `os.Executable` resolves a cask install

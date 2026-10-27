@@ -2,6 +2,7 @@ package livery
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os/exec"
@@ -26,30 +27,41 @@ var damaskScopes = []func() ([]flatpak.Application, error){
 }
 
 // DamaskInstalled reports whether the external Damask Flatpak is present in
-// either the user or system scope. A query error — for example Flatpak not
-// installed — is reported as not available rather than propagated: the
-// Wallpapers group shows the Damask control only when Damask is available, and
-// a missing Flatpak is simply not available.
-func DamaskInstalled(ctx context.Context) bool {
+// either the user or system scope. Flatpak itself being absent
+// (*flatpak.NotFoundError) is a genuine "not installed". Any other failed
+// scope query, when no scope found Damask, is returned as an error: the probe
+// could not tell, so the caller must show an unknown state rather than offer
+// to install an app that may already be there.
+func DamaskInstalled(ctx context.Context) (bool, error) {
+	var probeErr error
 	for _, list := range damaskScopes {
 		apps, err := list()
 		if err != nil {
+			var notFound *flatpak.NotFoundError
+			if !errors.As(err, &notFound) {
+				probeErr = errors.Join(probeErr, err)
+			}
 			continue
 		}
 		for _, app := range apps {
 			if app.ApplicationID == DamaskID {
-				return true
+				return true, nil
 			}
 		}
 	}
-	return false
+	if probeErr != nil {
+		return false, fmt.Errorf("livery: checking for %s: %w", DamaskID, probeErr)
+	}
+	return false, nil
 }
 
 // DamaskInstall installs Damask into the user scope from the default remote
 // (Flathub). It is a no-op when Damask is already installed, and it respects
 // the dry-run gate.
 func DamaskInstall(ctx context.Context) error {
-	if DamaskInstalled(ctx) {
+	// A failed probe falls through to the install, which reports its own
+	// error if Damask turns out to be present after all.
+	if installed, _ := DamaskInstalled(ctx); installed {
 		log.Printf("livery: %s already installed", DamaskID)
 		return nil
 	}

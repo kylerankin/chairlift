@@ -445,7 +445,7 @@ Each installed channel under `/usr/share/backgrounds` (Bluefin, Bazzite,
 Framework, or any other directory of wallpapers) is a tile; choosing one sets GNOME's desktop picture in both light
 and dark styles and remembers the channel. **Rotate Wallpaper at Login**
 appears with the channels and is available once a channel is chosen on a
-GNOME session; it installs a user timer that shows the channel's next image
+GNOME session; it installs a user service, started with the graphical session, that shows the channel's next image
 once per login session. Where Flatpak is present, the **Damask** row installs the
 Damask live-wallpaper manager from Flathub when it is absent and opens it when
 it is installed; ChairLift never installs it without that click.

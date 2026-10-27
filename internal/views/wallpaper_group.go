@@ -3,11 +3,10 @@ package views
 import (
 	"errors"
 	"log"
-	"os"
 
 	"codeberg.org/puregotk/puregotk/v4/adw"
-	"codeberg.org/puregotk/puregotk/v4/gio"
-	"codeberg.org/puregotk/puregotk/v4/glib"
+	"codeberg.org/puregotk/puregotk/v4/gdk"
+	"codeberg.org/puregotk/puregotk/v4/gdkpixbuf"
 	"codeberg.org/puregotk/puregotk/v4/gtk"
 
 	sgtk "github.com/frostyard/snowkit/gtk"
@@ -47,9 +46,12 @@ type wallpaperProbe struct {
 func probeWallpaperHost() wallpaperProbe {
 	ctx, cancel := livery.DefaultContext()
 	defer cancel()
-	installed := livery.DamaskInstalled(ctx)
+	installed, err := livery.DamaskInstalled(ctx)
+	if err != nil {
+		log.Printf("wallpapers: %v", err)
+	}
 	return wallpaperProbe{
-		damask:           pageview.DamaskOffer(installed, installed || flatpak.IsInstalledCached()),
+		damask:           pageview.DamaskOffer(installed, err != nil, installed || flatpak.IsInstalledCached()),
 		nativeBackground: livery.NativeBackgroundAvailable(ctx),
 	}
 }
@@ -69,7 +71,7 @@ func (uh *UserHome) publishWallpaperGroup(page *adw.PreferencesPage, probe wallp
 		uh.buildWallpaperRotation(group)
 	}
 	if damask != pageview.DamaskHidden {
-		uh.buildWallpaperDamask(group, damask == pageview.DamaskInstalled)
+		uh.buildWallpaperDamask(group, damask)
 	}
 	return group
 }
@@ -98,6 +100,7 @@ func (uh *UserHome) buildWallpaperChannels(group *adw.PreferencesGroup) {
 	// re-enables it once a selection can actually be applied.
 	grid.SetSensitive(false)
 	uh.wallpaperGrid = grid
+	uh.wallpaperGridIDs = make([]string, 0, len(rows))
 	uh.wallpaperGridImages = make(map[string]*gtk.Image, len(rows))
 	uh.wallpaperGridChecks = nil
 	for _, row := range rows {
@@ -123,6 +126,7 @@ func (uh *UserHome) buildWallpaperChannels(group *adw.PreferencesGroup) {
 		tile.SetChild(&box.Widget)
 		tile.AddOverlay(&check.Widget)
 		grid.Insert(&tile.Widget, -1)
+		uh.wallpaperGridIDs = append(uh.wallpaperGridIDs, row.ID)
 		uh.wallpaperGridImages[row.ID] = image
 		uh.wallpaperGridChecks = append(uh.wallpaperGridChecks, check)
 	}
@@ -149,10 +153,9 @@ func (uh *UserHome) syncWallpaperChannels() {
 		return
 	}
 	uh.wallpaperGrid.SetSensitive(uh.liveryLoaded && uh.wallpaperNativeBackground)
-	rows := pageview.WallpaperSelectorRows(uh.liveryState.WallpaperChannel)
-	for i, row := range rows {
+	for i, id := range uh.wallpaperGridIDs {
 		if i < len(uh.wallpaperGridChecks) {
-			uh.wallpaperGridChecks[i].SetVisible(row.Selected)
+			uh.wallpaperGridChecks[i].SetVisible(id == uh.liveryState.WallpaperChannel)
 		}
 	}
 }
@@ -165,10 +168,15 @@ func (uh *UserHome) syncWallpaperState() {
 	uh.syncWallpaperRotation()
 }
 
-// prefetchWallpaperPreviews loads each channel's first image off the main
-// thread and paints it on the main thread. A channel with no discoverable
-// image is left as its placeholder, so a missing pack never shows a fake
-// preview.
+// wallpaperPreviewSize is the decode size for a channel preview: twice the
+// 64px tile, so the thumbnail stays sharp on a 2x display without holding the
+// full-resolution wallpaper in memory.
+const wallpaperPreviewSize = 128
+
+// prefetchWallpaperPreviews decodes each channel's first image off the main
+// thread, scaled to the tile, and paints it on the main thread. A channel
+// with no discoverable image is left as its placeholder, so a missing pack
+// never shows a fake preview.
 func (uh *UserHome) prefetchWallpaperPreviews() {
 	for id, image := range uh.wallpaperGridImages {
 		id := id
@@ -182,26 +190,21 @@ func (uh *UserHome) prefetchWallpaperPreviews() {
 			if !ok {
 				return
 			}
-			data, err := os.ReadFile(path)
+			// GdkPixbuf loading is threadsafe, and the scaled load decodes
+			// straight to the preview size.
+			pixbuf, err := gdkpixbuf.NewPixbufFromFileAtScale(path, wallpaperPreviewSize, wallpaperPreviewSize, true)
 			if err != nil {
 				log.Printf("wallpapers: preview %s: %v", id, err)
 				return
 			}
+			texture := gdk.NewTextureForPixbuf(pixbuf)
+			pixbuf.Unref()
 			sgtk.RunOnMainThread(func() {
-				setWallpaperPreview(image, data)
+				image.SetFromPaintable(texture)
+				texture.Unref()
 			})
 		}()
 	}
-}
-
-// setWallpaperPreview paints one image from raw bytes, mirroring
-// setLiveryPreview so previews and marks behave identically.
-func setWallpaperPreview(image *gtk.Image, data []byte) {
-	bytes := glib.NewBytes(data, uint(len(data)))
-	defer bytes.Unref()
-	icon := gio.NewBytesIcon(bytes)
-	defer icon.Unref()
-	image.SetFromGicon(icon)
 }
 
 // buildWallpaperRotation builds the rotation switch once. It is gated: the
@@ -231,27 +234,47 @@ func (uh *UserHome) syncWallpaperRotation() {
 		uh.wallpaperNativeBackground,
 		uh.liveryState.WallpaperChannel != "",
 	)
-	uh.wallpaperRotate.SetActive(uh.liveryState.WallpaperRotate)
+	uh.setWallpaperRotateSwitch(uh.liveryState.WallpaperRotate)
 	uh.wallpaperRotate.SetSensitive(available)
+}
+
+// setWallpaperRotateSwitch moves the rotation switch to a confirmed value
+// without it reading as a user toggle. GTK emits state-set for a programmatic
+// SetActive, and the group can be built after the state has loaded, so
+// without liverySuppress a page open with rotation on would rewrite and
+// re-enable the unit.
+func (uh *UserHome) setWallpaperRotateSwitch(active bool) {
+	previous := uh.liverySuppress
+	uh.liverySuppress = true
+	defer func() { uh.liverySuppress = previous }()
+	uh.wallpaperRotate.SetActive(active)
+	uh.wallpaperRotate.SetState(active)
 }
 
 // buildWallpaperDamask builds the single stateful Damask control once. When
 // installed it launches the manager; when absent it installs it. It is one
-// action with two states, never two competing buttons.
-func (uh *UserHome) buildWallpaperDamask(group *adw.PreferencesGroup, available bool) {
+// action with two states, never two competing buttons. When the install probe
+// failed the row says so and offers no action, because installing over an
+// unknown state could collide with an app that is already present.
+func (uh *UserHome) buildWallpaperDamask(group *adw.PreferencesGroup, state pageview.DamaskState) {
 	if uh.wallpaperDamaskRow != nil {
 		return
 	}
+	available := state == pageview.DamaskInstalled
 	uh.wallpaperDamaskAvailable = available
 	uh.wallpaperDamaskSpinner = newActivitySpinner()
 	damaskRow := adw.NewActionRow()
 	damaskRow.SetUseMarkup(false)
 	row := pageview.DamaskRow(available)
+	if state == pageview.DamaskUnknown {
+		row = pageview.DamaskUnknownRow()
+	}
 	damaskRow.SetTitle(row.Title)
 	damaskRow.SetSubtitle(row.Subtitle)
 	damaskRow.AddSuffix(&uh.wallpaperDamaskSpinner.Widget)
 	button := gtk.NewButtonWithLabel(pageview.DamaskActionName(available))
 	button.SetValign(gtk.AlignCenterValue)
+	button.SetVisible(state != pageview.DamaskUnknown)
 	damaskRow.AddSuffix(&button.Widget)
 	damaskRow.SetActivatable(false) // the button owns activation, not the row
 	uh.wallpaperDamaskRow = damaskRow
@@ -337,7 +360,7 @@ func (uh *UserHome) onWallpaperChannelChosen(channelID string) {
 // A Gate admits one toggle at a time; a failed operation leaves the last
 // persisted choice in place and springs the switch back to it.
 func (uh *UserHome) onWallpaperRotateToggled(enabled bool) {
-	if !uh.liveryLoaded {
+	if uh.liverySuppress || !uh.liveryLoaded || enabled == uh.liveryState.WallpaperRotate {
 		return
 	}
 	if !uh.wallpaperRotationGate.TryStart() {
@@ -355,12 +378,12 @@ func (uh *UserHome) onWallpaperRotateToggled(enabled bool) {
 			setActivitySpinner(uh.wallpaperRotateSpinner, false)
 			uh.wallpaperRotationGate.Reset()
 			if err != nil {
-				uh.wallpaperRotate.SetState(uh.liveryState.WallpaperRotate)
+				uh.setWallpaperRotateSwitch(uh.liveryState.WallpaperRotate)
 				uh.reportLiveryFailure("rotating the wallpaper", err)
 				return
 			}
 			uh.liveryState.WallpaperRotate = confirmed.WallpaperRotate
-			uh.wallpaperRotate.SetState(confirmed.WallpaperRotate)
+			uh.setWallpaperRotateSwitch(confirmed.WallpaperRotate)
 			if !decision.MutateUI {
 				uh.toastAdder.ShowToast(decision.Toast)
 			}
@@ -396,7 +419,7 @@ func (uh *UserHome) onWallpaperDamaskActivated() {
 	if preview {
 		finish(func() {
 			if installed {
-				uh.toastAdder.ShowToast("[DRY-RUN] Preview: opening Damask would start a live wallpaper manager — no changes made")
+				uh.toastAdder.ShowToast(actionmsg.DamaskOpenPreview())
 			} else {
 				uh.toastAdder.ShowToast(actionmsg.DamaskInstall(true))
 			}

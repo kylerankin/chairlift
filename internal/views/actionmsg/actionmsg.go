@@ -429,6 +429,11 @@ func DamaskStoreHandoff() string {
 	return "Open your software store to install Damask."
 }
 
+// DamaskOpenPreview is the dry-run toast for opening the installed manager.
+func DamaskOpenPreview() string {
+	return "[DRY-RUN] Preview: opening Damask would start a live wallpaper manager — no changes made"
+}
+
 // DamaskOpen is the toast that launches the installed manager.
 func DamaskOpen() string {
 	return "Damask opened."

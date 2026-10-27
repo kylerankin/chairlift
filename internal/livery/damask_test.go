@@ -22,8 +22,8 @@ func TestDamaskInstalledReportsPresenceInEitherScope(t *testing.T) {
 				return []flatpak.Application{{ApplicationID: DamaskID}}, nil
 			},
 		}
-		if !DamaskInstalled(context.Background()) {
-			t.Fatal("expected Damask reported installed from the system scope")
+		if installed, err := DamaskInstalled(context.Background()); err != nil || !installed {
+			t.Fatalf("expected Damask reported installed from the system scope, got %v, %v", installed, err)
 		}
 	})
 
@@ -32,18 +32,44 @@ func TestDamaskInstalledReportsPresenceInEitherScope(t *testing.T) {
 			func() ([]flatpak.Application, error) { return nil, nil },
 			func() ([]flatpak.Application, error) { return nil, nil },
 		}
-		if DamaskInstalled(context.Background()) {
-			t.Fatal("expected Damask reported absent")
+		if installed, err := DamaskInstalled(context.Background()); err != nil || installed {
+			t.Fatalf("expected Damask reported absent, got %v, %v", installed, err)
 		}
 	})
 
-	t.Run("a query error is treated as absent, not fatal", func(t *testing.T) {
+	t.Run("a failed query is unknown, not absent", func(t *testing.T) {
 		damaskScopes = []func() ([]flatpak.Application, error){
-			func() ([]flatpak.Application, error) { return nil, &flatpak.Error{Message: "flatpak not found"} },
+			func() ([]flatpak.Application, error) { return nil, &flatpak.Error{Message: "list failed"} },
 			func() ([]flatpak.Application, error) { return nil, nil },
 		}
-		if DamaskInstalled(context.Background()) {
-			t.Fatal("expected a failed scope query to be skipped")
+		if installed, err := DamaskInstalled(context.Background()); err == nil || installed {
+			t.Fatalf("expected a failed scope query to surface as an error, got %v, %v", installed, err)
+		}
+	})
+
+	t.Run("a failed query still finds Damask in the other scope", func(t *testing.T) {
+		damaskScopes = []func() ([]flatpak.Application, error){
+			func() ([]flatpak.Application, error) { return nil, &flatpak.Error{Message: "list failed"} },
+			func() ([]flatpak.Application, error) {
+				return []flatpak.Application{{ApplicationID: DamaskID}}, nil
+			},
+		}
+		if installed, err := DamaskInstalled(context.Background()); err != nil || !installed {
+			t.Fatalf("expected Damask found despite one failed scope, got %v, %v", installed, err)
+		}
+	})
+
+	t.Run("flatpak absent is not installed, not an error", func(t *testing.T) {
+		damaskScopes = []func() ([]flatpak.Application, error){
+			func() ([]flatpak.Application, error) {
+				return nil, &flatpak.NotFoundError{Message: "flatpak not found"}
+			},
+			func() ([]flatpak.Application, error) {
+				return nil, &flatpak.NotFoundError{Message: "flatpak not found"}
+			},
+		}
+		if installed, err := DamaskInstalled(context.Background()); err != nil || installed {
+			t.Fatalf("expected a missing Flatpak to read as absent, got %v, %v", installed, err)
 		}
 	})
 }

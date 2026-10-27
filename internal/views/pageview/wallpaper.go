@@ -96,6 +96,13 @@ func DamaskRow(installed bool) Row {
 	return Row{Title: "Damask", Subtitle: "Install a live wallpaper manager."}
 }
 
+// DamaskUnknownRow describes the Damask row when the install probe failed.
+// It offers no action: installing over an unknown state could fail on an app
+// that is already present.
+func DamaskUnknownRow() Row {
+	return Row{Title: "Damask", Subtitle: "Couldn't check whether Damask is installed."}
+}
+
 // DamaskActionName is the label the single Damask control shows. It is
 // "Open" when Damask is installed and "Install" when it is not, so the
 // control is one action with two states rather than two competing buttons.
@@ -117,14 +124,21 @@ const (
 	DamaskInstallable
 	// DamaskInstalled means the Damask Flatpak is installed.
 	DamaskInstalled
+	// DamaskUnknown means Flatpak is present but the install probe failed,
+	// so the group says it could not tell rather than offering an install
+	// for an app that may already be there.
+	DamaskUnknown
 )
 
 // DamaskOffer reports which Damask control, if any, the group may show. A
-// host without Flatpak can neither install nor run Damask, so it gets none.
-func DamaskOffer(installed, flatpakAvailable bool) DamaskState {
+// host without Flatpak can neither install nor run Damask, so it gets none. A
+// failed probe on a Flatpak host is unknown, never installable.
+func DamaskOffer(installed, probeFailed, flatpakAvailable bool) DamaskState {
 	switch {
 	case installed:
 		return DamaskInstalled
+	case probeFailed && flatpakAvailable:
+		return DamaskUnknown
 	case flatpakAvailable:
 		return DamaskInstallable
 	default:

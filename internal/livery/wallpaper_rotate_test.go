@@ -85,7 +85,7 @@ func TestConfigureWallpaperRotationRespectsDryRun(t *testing.T) {
 		t.Fatalf("dry-run configure should succeed: %v", err)
 	}
 	if f.sawPrefix("systemctl --user enable") {
-		t.Fatal("dry-run configure must not enable the timer")
+		t.Fatal("dry-run configure must not enable the rotation unit")
 	}
 }
 
@@ -170,20 +170,26 @@ func TestWallpaperRotationInstallWritesUnitsRunningTheFlag(t *testing.T) {
 	if want := `ExecStart="/usr/bin/chairlift" ` + WallpaperRotateFlag; !strings.Contains(string(service), want) {
 		t.Errorf("service does not run %q:\n%s", want, service)
 	}
-	if _, err := os.Stat(timerPath); err != nil {
-		t.Errorf("timer not written: %v", err)
+	// The service is enabled under graphical-session.target, so each login
+	// runs it with that session's token; no timer is written, because a
+	// timer can fire before the session and fall back to the boot token.
+	if !f.sawPrefix("systemctl --user enable " + WallpaperServiceName) {
+		t.Errorf("service not enabled: %v", f.calls)
 	}
-	if !f.sawPrefix("systemctl --user enable " + WallpaperTimerName) {
-		t.Errorf("timer not enabled: %v", f.calls)
+	if _, err := os.Stat(timerPath); !os.IsNotExist(err) {
+		t.Errorf("a timer was written: %v", err)
+	}
+	if f.sawPrefix("systemctl --user enable "+WallpaperTimerName) || f.sawPrefix("systemctl --user start") {
+		t.Errorf("install must only enable the service: %v", f.calls)
 	}
 }
 
 // TestWallpaperRotationInstallRestoresPriorUnitsOnFailure covers the rollback:
 // a failed enable leaves a previously-installed service byte-for-byte as it
-// was and removes a timer that did not exist before.
+// was.
 func TestWallpaperRotationInstallRestoresPriorUnitsOnFailure(t *testing.T) {
 	f := newFakeCommands(t)
-	servicePath, timerPath := wallpaperUnitFixture(t)
+	servicePath, _ := wallpaperUnitFixture(t)
 	prior := []byte("[Service]\nExecStart=/old/chairlift --rotate-wallpaper\n")
 	if err := os.MkdirAll(filepath.Dir(servicePath), 0o755); err != nil {
 		t.Fatal(err)
@@ -203,9 +209,6 @@ func TestWallpaperRotationInstallRestoresPriorUnitsOnFailure(t *testing.T) {
 	if string(got) != string(prior) {
 		t.Errorf("prior service not restored:\n got %q\nwant %q", got, prior)
 	}
-	if _, err := os.Stat(timerPath); !os.IsNotExist(err) {
-		t.Errorf("a timer that did not exist before was left behind: %v", err)
-	}
 }
 
 func TestRemoveWallpaperRotationDeletesUnits(t *testing.T) {
@@ -213,6 +216,10 @@ func TestRemoveWallpaperRotationDeletesUnits(t *testing.T) {
 	servicePath, timerPath := wallpaperUnitFixture(t)
 	if err := InstallWallpaperRotation(context.Background()); err != nil {
 		t.Fatalf("InstallWallpaperRotation: %v", err)
+	}
+	// A timer left by an earlier build is cleaned up alongside the service.
+	if err := os.WriteFile(timerPath, []byte("[Timer]\n"), 0o644); err != nil {
+		t.Fatal(err)
 	}
 
 	if err := RemoveWallpaperRotation(context.Background()); err != nil {
@@ -223,8 +230,27 @@ func TestRemoveWallpaperRotationDeletesUnits(t *testing.T) {
 			t.Errorf("%s still present after remove: %v", path, err)
 		}
 	}
+	if !f.sawPrefix("systemctl --user disable " + WallpaperServiceName) {
+		t.Errorf("service not disabled: %v", f.calls)
+	}
 	if !f.sawPrefix("systemctl --user disable " + WallpaperTimerName) {
-		t.Errorf("timer not disabled: %v", f.calls)
+		t.Errorf("leftover timer not disabled: %v", f.calls)
+	}
+}
+
+// TestRemoveWallpaperRotationSkipsAbsentTimer pins that removal never asks
+// systemd to disable a timer that was never installed.
+func TestRemoveWallpaperRotationSkipsAbsentTimer(t *testing.T) {
+	f := newFakeCommands(t)
+	wallpaperUnitFixture(t)
+	if err := InstallWallpaperRotation(context.Background()); err != nil {
+		t.Fatalf("InstallWallpaperRotation: %v", err)
+	}
+	if err := RemoveWallpaperRotation(context.Background()); err != nil {
+		t.Fatalf("RemoveWallpaperRotation: %v", err)
+	}
+	if f.sawPrefix("systemctl --user disable " + WallpaperTimerName) {
+		t.Errorf("disabled a timer that does not exist: %v", f.calls)
 	}
 }
 
@@ -235,6 +261,9 @@ func TestRemoveWallpaperRotationRestoresUnitsOnFailure(t *testing.T) {
 	servicePath, timerPath := wallpaperUnitFixture(t)
 	if err := InstallWallpaperRotation(context.Background()); err != nil {
 		t.Fatalf("InstallWallpaperRotation: %v", err)
+	}
+	if err := os.WriteFile(timerPath, []byte("[Timer]\n"), 0o644); err != nil {
+		t.Fatal(err)
 	}
 	service, _ := os.ReadFile(servicePath)
 	timer, _ := os.ReadFile(timerPath)

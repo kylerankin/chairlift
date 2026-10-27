@@ -18,19 +18,23 @@ import (
 // RotateFlag for the icon rotation.
 const WallpaperRotateFlag = "--rotate-wallpaper"
 
-// WallpaperServiceName and WallpaperTimerName are the systemd user units that
-// perform rotation. The service is a oneshot that runs one pass when the
-// graphical session starts, and the timer (OnBootSec, which elapses at once
-// when the user manager starts after boot) fires it at login as well.
-// RotateWallpaper's per-session token makes repeated fires within
-// one session no-ops, so the picture advances once per login session.
+// WallpaperServiceName is the systemd user unit that performs rotation. It
+// is a oneshot enabled under graphical-session.target, mirroring the icon
+// rotation unit (UnitName), so it runs one pass each time a graphical session
+// starts and sessionToken resolves to that session rather than the boot.
+// RotateWallpaper's per-session token makes a repeated run within one session
+// a no-op, so the picture advances once per login session.
+//
+// WallpaperTimerName is a timer earlier builds of this feature installed. A
+// timer fires on the user manager's clock, before graphical-session.target is
+// active, so it is no longer written; RemoveWallpaperRotation still cleans a
+// leftover one up.
 const (
 	WallpaperServiceName = "chairlift-livery-wallpaper-rotate.service"
 	WallpaperTimerName   = "chairlift-livery-wallpaper-rotate.timer"
 )
 
-var (
-	wallpaperServiceTemplate = `[Unit]
+const wallpaperServiceTemplate = `[Unit]
 Description=%s Wallpaper rotation
 PartOf=graphical-session.target
 After=graphical-session.target
@@ -42,17 +46,6 @@ Type=oneshot
 [Install]
 WantedBy=graphical-session.target
 `
-	wallpaperTimerTemplate = `[Unit]
-Description=%s Wallpaper rotation timer
-
-[Timer]
-OnBootSec=1min
-Unit=%s
-
-[Install]
-WantedBy=timers.target
-`
-)
 
 // restorePrior restores one previously-existing unit file, or removes the path
 // when there was nothing there to begin with. It is the inverse of the write
@@ -98,36 +91,31 @@ func readPrior(path string) (data []byte, existed bool, err error) {
 	return data, true, nil
 }
 
-// renderWallpaperUnits returns the paths and bytes InstallWallpaperRotation
-// would write for the service and timer units.
-func renderWallpaperUnits() (servicePath, timerPath, serviceUnit, timerUnit string, err error) {
+// renderWallpaperUnit returns the path and bytes InstallWallpaperRotation
+// would write for the service unit.
+func renderWallpaperUnit() (servicePath, serviceUnit string, err error) {
 	exe, err := unitExecutable()
 	if err != nil {
-		return "", "", "", "", fmt.Errorf("livery: locating the application executable: %w", err)
+		return "", "", fmt.Errorf("livery: locating the application executable: %w", err)
 	}
 	servicePath, err = wallpaperUnitPath()
 	if err != nil {
-		return "", "", "", "", err
-	}
-	timerPath, err = wallpaperTimerPath()
-	if err != nil {
-		return "", "", "", "", err
+		return "", "", err
 	}
 	var env string
 	if dir := os.Getenv("GSETTINGS_SCHEMA_DIR"); dir != "" {
 		quoted, err := systemdQuote("GSETTINGS_SCHEMA_DIR=" + dir)
 		if err != nil {
-			return "", "", "", "", fmt.Errorf("livery: carrying GSETTINGS_SCHEMA_DIR into the rotation unit: %w", err)
+			return "", "", fmt.Errorf("livery: carrying GSETTINGS_SCHEMA_DIR into the rotation unit: %w", err)
 		}
 		env = "Environment=" + quoted + "\n"
 	}
 	quotedExe, err := systemdQuote(exe)
 	if err != nil {
-		return "", "", "", "", fmt.Errorf("livery: writing the rotation unit's ExecStart: %w", err)
+		return "", "", fmt.Errorf("livery: writing the rotation unit's ExecStart: %w", err)
 	}
 	serviceUnit = fmt.Sprintf(wallpaperServiceTemplate, branding.AppName, env, quotedExe, WallpaperRotateFlag)
-	timerUnit = fmt.Sprintf(wallpaperTimerTemplate, branding.AppName, WallpaperServiceName)
-	return servicePath, timerPath, serviceUnit, timerUnit, nil
+	return servicePath, serviceUnit, nil
 }
 
 // RotateWallpaper advances the selected image within the active channel and
@@ -198,65 +186,45 @@ func RotateWallpaper(ctx context.Context) error {
 	return nil
 }
 
-// InstallWallpaperRotation writes and enables the rotation timer. It is
-// idempotent: rewriting an identical unit and re-enabling an enabled timer are
-// both no-ops as far as the user can observe. A failure restores whatever was
-// on disk before.
+// InstallWallpaperRotation writes and enables the rotation service under
+// graphical-session.target, mirroring InstallRotation. It is idempotent:
+// rewriting an identical unit and re-enabling an enabled service are both
+// no-ops as far as the user can observe. A failure restores whatever was on
+// disk before.
 func InstallWallpaperRotation(ctx context.Context) (result error) {
-	servicePath, timerPath, serviceUnit, timerUnit, err := renderWallpaperUnits()
+	servicePath, serviceUnit, err := renderWallpaperUnit()
 	if err != nil {
 		return err
 	}
 	if dryrun.Enabled() {
-		log.Printf("[DRY-RUN] would write %s and %s and enable them", servicePath, timerPath)
+		log.Printf("[DRY-RUN] would write %s and enable it", servicePath)
 		return nil
 	}
 
-	type prior struct {
-		data    []byte
-		existed bool
-	}
-	priors := map[string]prior{
-		servicePath: func() prior { d, e, _ := readPrior(servicePath); return prior{d, e} }(),
-		timerPath:   func() prior { d, e, _ := readPrior(timerPath); return prior{d, e} }(),
-	}
+	priorData, priorExisted, _ := readPrior(servicePath)
 	defer func() {
 		if result != nil {
-			if err := restorePrior(servicePath, priors[servicePath].existed, priors[servicePath].data); err != nil {
-				result = errors.Join(result, err)
-			}
-			if err := restorePrior(timerPath, priors[timerPath].existed, priors[timerPath].data); err != nil {
+			if err := restorePrior(servicePath, priorExisted, priorData); err != nil {
 				result = errors.Join(result, err)
 			}
 			_, _ = runCommand(ctx, "systemctl", "--user", "daemon-reload")
 		}
 	}()
 
-	writes := []struct {
-		path string
-		data []byte
-	}{
-		{servicePath, []byte(serviceUnit)},
-		{timerPath, []byte(timerUnit)},
-	}
-	for _, w := range writes {
-		if err := writeFileAtomically(w.path, w.data); err != nil {
-			return fmt.Errorf("livery: installing %s: %w", filepath.Base(w.path), err)
-		}
+	if err := writeFileAtomically(servicePath, []byte(serviceUnit)); err != nil {
+		return fmt.Errorf("livery: installing %s: %w", filepath.Base(servicePath), err)
 	}
 	if out, err := runCommand(ctx, "systemctl", "--user", "daemon-reload"); err != nil {
 		return fmt.Errorf("livery: reloading user units: %w: %s", err, strings.TrimSpace(out))
 	}
-	if out, err := runCommand(ctx, "systemctl", "--user", "enable", WallpaperTimerName); err != nil {
+	if out, err := runCommand(ctx, "systemctl", "--user", "enable", WallpaperServiceName); err != nil {
 		return fmt.Errorf("livery: enabling wallpaper rotation: %w: %s", err, strings.TrimSpace(out))
-	}
-	if out, err := runCommand(ctx, "systemctl", "--user", "start", WallpaperTimerName); err != nil {
-		return fmt.Errorf("livery: starting wallpaper rotation: %w: %s", err, strings.TrimSpace(out))
 	}
 	return nil
 }
 
-// RemoveWallpaperRotation disables and deletes the rotation units. A failure
+// RemoveWallpaperRotation disables and deletes the rotation service and any
+// timer an earlier build left behind. A failure
 // restores whatever was on disk before.
 func RemoveWallpaperRotation(ctx context.Context) (result error) {
 	servicePath, err := wallpaperUnitPath()
@@ -296,9 +264,19 @@ func RemoveWallpaperRotation(ctx context.Context) (result error) {
 		}
 	}()
 
-	for _, name := range []string{WallpaperTimerName, WallpaperServiceName} {
-		if out, err := runCommand(ctx, "systemctl", "--user", "disable", name); err != nil {
-			return fmt.Errorf("livery: disabling %s: %w: %s", name, err, strings.TrimSpace(out))
+	units := []struct {
+		name    string
+		existed bool
+	}{
+		{WallpaperTimerName, timerExisted},
+		{WallpaperServiceName, serviceExisted},
+	}
+	for _, unit := range units {
+		if !unit.existed {
+			continue
+		}
+		if out, err := runCommand(ctx, "systemctl", "--user", "disable", unit.name); err != nil {
+			return fmt.Errorf("livery: disabling %s: %w: %s", unit.name, err, strings.TrimSpace(out))
 		}
 	}
 	for _, path := range []string{servicePath, timerPath} {
@@ -312,9 +290,10 @@ func RemoveWallpaperRotation(ctx context.Context) (result error) {
 	return nil
 }
 
-// SyncWallpaperTimer installs the timer when rotation is desired and removes
-// it when it is not, so the timer's presence always matches the switch.
-func SyncWallpaperTimer(ctx context.Context, s State) error {
+// SyncWallpaperRotation installs the rotation service when rotation is desired
+// and removes it when it is not, so the unit's presence always matches the
+// switch.
+func SyncWallpaperRotation(ctx context.Context, s State) error {
 	if s.WallpaperRotate {
 		return InstallWallpaperRotation(ctx)
 	}
@@ -329,11 +308,11 @@ func ConfigureWallpaperRotation(ctx context.Context, desired State) (State, erro
 	if err != nil {
 		return State{}, err
 	}
-	if err := SyncWallpaperTimer(ctx, desired); err != nil {
+	if err := SyncWallpaperRotation(ctx, desired); err != nil {
 		return previous, err
 	}
 	if err := SetBool(ctx, KeyWallpaperRotate, desired.WallpaperRotate); err != nil {
-		return previous, errors.Join(err, SyncWallpaperTimer(ctx, previous))
+		return previous, errors.Join(err, SyncWallpaperRotation(ctx, previous))
 	}
 	return desired, nil
 }
