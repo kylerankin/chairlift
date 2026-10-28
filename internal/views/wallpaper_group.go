@@ -72,7 +72,11 @@ func (uh *UserHome) publishWallpaperGroup(page *adw.PreferencesPage, probe wallp
 	uh.wallpaperNativeBackground = probe.nativeBackground
 	damask := probe.damask
 	group := uh.ensureWallpapersGroup(page)
-	uh.buildWallpaperChannels(group)
+	// Channel selection writes GNOME's background keys, so the selector is
+	// omitted — not drawn insensitive — where GNOME does not own them.
+	if probe.nativeBackground {
+		uh.buildWallpaperChannels(group)
+	}
 	// Rotation advances a channel, so without the selector there is nothing
 	// for the switch to act on and it is left out rather than shown dead.
 	if uh.wallpaperGrid != nil {
