@@ -137,7 +137,11 @@ func RotateWallpaper(ctx context.Context) error {
 	if !state.WallpaperRotate {
 		return nil
 	}
-	if !NativeBackgroundAvailable(ctx) {
+	available, err := NativeBackgroundAvailable(ctx)
+	if err != nil {
+		return err
+	}
+	if !available {
 		log.Printf("livery: skipping wallpaper rotation: GNOME background schema is not available")
 		return nil
 	}

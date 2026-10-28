@@ -38,8 +38,9 @@ func (uh *UserHome) ensureWallpapersGroup(page *adw.PreferencesPage) *adw.Prefer
 // wallpaperProbe is what the background discovery learned about the host, so
 // building and syncing the group never runs a subprocess on the main thread.
 type wallpaperProbe struct {
-	damask           pageview.DamaskState
-	nativeBackground bool
+	damask                 pageview.DamaskState
+	nativeBackground       bool
+	nativeBackgroundFailed bool
 }
 
 // probeWallpaperHost runs the Damask and GNOME-background probes. It shells
@@ -49,9 +50,11 @@ type wallpaperProbe struct {
 func probeWallpaperHost(flatpakCapable bool) wallpaperProbe {
 	ctx, cancel := livery.DefaultContext()
 	defer cancel()
+	available, err := livery.NativeBackgroundAvailable(ctx)
 	probe := wallpaperProbe{
-		damask:           pageview.DamaskHidden,
-		nativeBackground: livery.NativeBackgroundAvailable(ctx),
+		damask:               pageview.DamaskHidden,
+		nativeBackground:     available,
+		nativeBackgroundFailed: err != nil,
 	}
 	if !flatpakCapable {
 		return probe
@@ -72,6 +75,12 @@ func (uh *UserHome) publishWallpaperGroup(page *adw.PreferencesPage, probe wallp
 	uh.wallpaperNativeBackground = probe.nativeBackground
 	damask := probe.damask
 	group := uh.ensureWallpapersGroup(page)
+	// A failed probe is surfaced as "unknown", not hidden as unsupported, so a
+	// transient settings failure reads as an error rather than a host without
+	// GNOME's background schema.
+	if probe.nativeBackgroundFailed {
+		uh.buildWallpaperProbeFailed(group)
+	}
 	// Channel selection writes GNOME's background keys, so the selector is
 	// omitted — not drawn insensitive — where GNOME does not own them.
 	if probe.nativeBackground {
@@ -86,6 +95,24 @@ func (uh *UserHome) publishWallpaperGroup(page *adw.PreferencesPage, probe wallp
 		uh.buildWallpaperDamask(group, damask)
 	}
 	return group
+}
+
+// buildWallpaperProbeFailed adds a read-only row explaining that ChairLift could
+// not check whether GNOME owns the desktop picture, so the absent selector and
+// rotation switch read as an unknown state rather than a host without the
+// feature. It is built once, like the other group controls.
+func (uh *UserHome) buildWallpaperProbeFailed(group *adw.PreferencesGroup) {
+	if uh.wallpaperProbeFailedRow != nil {
+		return
+	}
+	row := pageview.WallpaperUnknownRow()
+	unknownRow := adw.NewActionRow()
+	unknownRow.SetUseMarkup(false)
+	unknownRow.SetTitle(row.Title)
+	unknownRow.SetSubtitle(row.Subtitle)
+	unknownRow.SetActivatable(false)
+	uh.wallpaperProbeFailedRow = unknownRow
+	group.Add(&unknownRow.Widget)
 }
 
 // buildWallpaperChannels builds the channel thumbnail selector once. Each

@@ -114,6 +114,10 @@ type UserHome struct {
 	// schema when the group was discovered, so syncing the rotation switch
 	// never shells out to gsettings on the main thread.
 	wallpaperNativeBackground bool
+	// wallpaperProbeFailedRow is the read-only "couldn't check" row shown when
+	// the GNOME-background probe failed, so the absent selector and rotation
+	// switch read as unknown rather than unsupported. nil unless built.
+	wallpaperProbeFailedRow *adw.ActionRow
 	// wallpaperRotationGate admits one rotation toggle at a time; the unit
 	// write is a single shared unit, so a rapid on/off flip must not land
 	// RemoveWallpaperRotation before an earlier InstallWallpaperRotation.

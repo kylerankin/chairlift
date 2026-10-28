@@ -2,6 +2,8 @@ package livery
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log"
 	"net/url"
 	"path/filepath"
@@ -31,20 +33,50 @@ const (
 // desktops (Plasma on Fedora-based images, for one) commonly ship
 // gsettings-desktop-schemas, so the schema alone would offer a write that
 // changes nothing on screen. Either missing returns false, so the page offers
-// wallpaper selection only where it can actually apply the picture.
-func NativeBackgroundAvailable(ctx context.Context) bool {
+// wallpaper selection only where it can actually apply the picture. A failure
+// to probe — a hung or broken settings tool — is returned, not swallowed as a
+// false, so callers can report "unknown" rather than hiding the feature as
+// unsupported (per #230: detection failures are errors, not "unsupported").
+func NativeBackgroundAvailable(ctx context.Context) (bool, error) {
 	if detectDesktop() != deskenv.GNOME {
-		return false
+		return false, nil
 	}
 	_, err := gsettingsGet(ctx, NativeBackgroundSchema, pictureURIKey)
-	return err == nil
+	if errors.Is(err, ErrExtensionMissing) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("livery: probing %s: %w", NativeBackgroundSchema, err)
+	}
+	return true, nil
+}
+
+// ErrBackgroundSchemaMissing reports a failed wallpaper write because GNOME's
+// desktop-background schema is absent. gsettingsSet maps a missing schema to
+// ErrExtensionMissing, whose text blames a GNOME Shell extension; wrapping it
+// here keeps the journal naming the wallpaper feature instead.
+var ErrBackgroundSchemaMissing = errors.New("livery: GNOME desktop-background schema is not installed")
+
+// wrapBackgroundSchemaError renames gsettingsSet's schema-missing error — which
+// blames an unrelated GNOME Shell extension — to a wallpaper-specific message
+// so the journal stays truthful. A nil error passes through; any other failure
+// (a hung or otherwise broken tool) is returned unchanged.
+func wrapBackgroundSchemaError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, ErrExtensionMissing) {
+		return fmt.Errorf("%w", ErrBackgroundSchemaMissing)
+	}
+	return err
 }
 
 // ApplyNativeBackground writes file to GNOME's picture-uri and picture-uri-dark
 // so the selected collection image becomes the desktop picture in both colour
 // schemes. It writes neither key when dry-run is enabled. A missing schema
-// surfaces as ErrExtensionMissing, which gsettingsSet maps it to, so the page
-// can say so rather than pretending the picture changed.
+// surfaces as ErrBackgroundSchemaMissing: gsettingsSet maps a missing schema to
+// ErrExtensionMissing, whose text blames a GNOME Shell extension, so the write
+// path renames it rather than logging a failure against an unrelated feature.
 //
 // Both keys hold URIs, not paths: GNOME resolves them with
 // g_filename_from_uri, which rejects a bare path, so the absolute path is
@@ -57,10 +89,10 @@ func ApplyNativeBackground(ctx context.Context, file string) error {
 			NativeBackgroundSchema, pictureURIDarkKey, value)
 		return nil
 	}
-	if err := gsettingsSet(ctx, NativeBackgroundSchema, pictureURIKey, value); err != nil {
+	if err := wrapBackgroundSchemaError(gsettingsSet(ctx, NativeBackgroundSchema, pictureURIKey, value)); err != nil {
 		return err
 	}
-	return gsettingsSet(ctx, NativeBackgroundSchema, pictureURIDarkKey, value)
+	return wrapBackgroundSchemaError(gsettingsSet(ctx, NativeBackgroundSchema, pictureURIDarkKey, value))
 }
 
 // BackgroundURI returns the file:// URI GNOME's background keys expect for an

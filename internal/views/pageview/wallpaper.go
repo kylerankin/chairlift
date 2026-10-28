@@ -42,18 +42,6 @@ func WallpaperRotationAvailable(gnomeAvailable, channelSelected bool) bool {
 	return gnomeAvailable && channelSelected
 }
 
-// WallpaperSelectedChannelRow describes the currently selected channel. An
-// empty selection names the action rather than leaving the row blank.
-func WallpaperSelectedChannelRow(channelID string) Row {
-	if channelID == "" {
-		return Row{Title: "Channel", Subtitle: "Choose a wallpaper channel"}
-	}
-	if channel, ok := livery.ChannelByID(channelID); ok {
-		return Row{Title: "Channel", Subtitle: channel.Name}
-	}
-	return Row{Title: "Channel", Subtitle: "Choose a wallpaper channel"}
-}
-
 // WallpaperSelectorItem is one channel in the thumbnail selector.
 type WallpaperSelectorItem struct {
 	ID       string
@@ -76,12 +64,6 @@ func WallpaperSelectorRows(selectedID string) []WallpaperSelectorItem {
 	return out
 }
 
-// WallpaperSelectorEmpty reports whether no channel is discoverable, so the
-// page can hide the selector rather than draw an empty row of nothing.
-func WallpaperSelectorEmpty() bool {
-	return len(livery.WallpaperChannels()) == 0
-}
-
 // DamaskRow describes the single stateful Damask control.
 //
 // Damask is an external Flatpak, not a ChairLift action, so the row's title
@@ -101,6 +83,14 @@ func DamaskRow(installed bool) Row {
 // that is already present.
 func DamaskUnknownRow() Row {
 	return Row{Title: "Damask", Subtitle: "Couldn't check whether Damask is installed."}
+}
+
+// WallpaperUnknownRow describes the read-only row the Wallpapers group shows
+// when it could not probe whether GNOME owns the desktop picture. It offers no
+// selector or rotation switch: the user is told the state is unknown rather
+// than the feature being silently hidden as unsupported.
+func WallpaperUnknownRow() Row {
+	return Row{Title: "Wallpapers", Subtitle: "Couldn't check whether GNOME owns the desktop picture."}
 }
 
 // DamaskActionName is the label the single Damask control shows. It is

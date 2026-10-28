@@ -76,6 +76,33 @@ func TestRotateWallpaperIsNoOpWithoutNativeBackground(t *testing.T) {
 	}
 }
 
+// TestRotateWallpaperSurfacesAProbeFailure pins that a transient GNOME
+// background probe failure (a hung or broken settings tool) is returned from
+// RotateWallpaper rather than swallowed as a no-op, so the unit exits
+// non-zero instead of silently hiding the feature (#230: detection failures
+// are errors, not "unsupported").
+func TestRotateWallpaperSurfacesAProbeFailure(t *testing.T) {
+	f := wallpaperRotationState(t,
+		map[string]string{KeyWallpaperRotate: "true", KeyWallpaperChannel: "bluefin", KeyWallpaperImage: "bluefin/aurora.png"},
+		map[string]string{"bluefin/aurora.png": "b", "bluefin/moon.png": "b"},
+	)
+	// A probe failure that is not a missing schema: the tool exits nonzero
+	// with output that is neither "No such schema" nor "not installed", so
+	// gsettingsGet returns a wrapped error and NativeBackgroundAvailable
+	// surfaces it rather than reporting a genuine false.
+	f.reply["gsettings get org.gnome.desktop.background picture-uri"] = "internal error"
+	f.fail["gsettings get org.gnome.desktop.background picture-uri"] = errors.New("gsettings: connection hung")
+	if _, err := NativeBackgroundAvailable(context.Background()); err == nil {
+		t.Fatal("a transient probe failure must be returned, not swallowed as unavailable")
+	}
+	if err := RotateWallpaper(context.Background()); err == nil {
+		t.Fatal("rotation must return a probe failure so the unit exits non-zero")
+	}
+	if f.sawPrefix("gsettings set org.gnome.desktop.background") {
+		t.Fatal("rotation must not touch the background when the probe failed")
+	}
+}
+
 // TestNativeBackgroundUnavailableOffGNOME pins that a non-GNOME session never
 // gets a GNOME background write, even when the schema is installed (Plasma on
 // Fedora-based images ships gsettings-desktop-schemas): selection reports
@@ -88,7 +115,8 @@ func TestNativeBackgroundUnavailableOffGNOME(t *testing.T) {
 				map[string]string{"bluefin/aurora.png": "b", "bluefin/moon.png": "b"},
 			)
 			useDesktop(t, desktop)
-			if NativeBackgroundAvailable(context.Background()) {
+			available, err := NativeBackgroundAvailable(context.Background())
+			if available || err != nil {
 				t.Fatalf("native background must be unavailable on %v even with the schema present", desktop)
 			}
 			if err := RotateWallpaper(context.Background()); err != nil {

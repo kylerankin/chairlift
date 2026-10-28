@@ -2,6 +2,7 @@ package livery
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/projectbluefin/chairlift/internal/dryrun"
@@ -51,6 +52,25 @@ func TestSelectWallpaperPersistsTheChannel(t *testing.T) {
 		if !f.sawPrefix(want) {
 			t.Errorf("missing %q in %v", want, f.calls)
 		}
+	}
+}
+
+// TestApplyNativeBackgroundRenamesMissingSchemaError pins that a write failing
+// because GNOME's background schema is absent surfaces ErrBackgroundSchemaMissing
+// rather than gsettingsSet's ErrExtensionMissing, whose text blames an unrelated
+// GNOME Shell extension, so the journal stays truthful.
+func TestApplyNativeBackgroundRenamesMissingSchemaError(t *testing.T) {
+	f := newFakeCommands(t)
+	// A missing schema: the tool exits nonzero with "No such schema" output, so
+	// gsettingsSet maps it to ErrExtensionMissing.
+	f.reply["gsettings set "+NativeBackgroundSchema+" "+pictureURIKey] = "No such schema"
+	f.fail["gsettings set "+NativeBackgroundSchema+" "+pictureURIKey] = errors.New("gsettings: schema missing")
+	err := ApplyNativeBackground(context.Background(), "/usr/share/backgrounds/bluefin/aurora.png")
+	if !errors.Is(err, ErrBackgroundSchemaMissing) {
+		t.Fatalf("ApplyNativeBackground: err = %v, want %v", err, ErrBackgroundSchemaMissing)
+	}
+	if errors.Is(err, ErrExtensionMissing) {
+		t.Fatalf("ApplyNativeBackground: err still names ErrExtensionMissing: %v", err)
 	}
 }
 

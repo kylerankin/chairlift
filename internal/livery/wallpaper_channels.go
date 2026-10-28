@@ -188,14 +188,3 @@ func NextImage(channelID, current string) string {
 	}
 	return channel.Images[0].ID
 }
-
-// WallpaperChannelIDs returns the channel ids in display order. Exposed so the
-// pageview can build the selection model without reaching into the catalog.
-func WallpaperChannelIDs() []string {
-	channels := WallpaperChannels()
-	ids := make([]string, 0, len(channels))
-	for _, channel := range channels {
-		ids = append(ids, channel.ID)
-	}
-	return ids
-}

@@ -41,9 +41,6 @@ func TestWallpaperSelectorRowsMarksTheConfirmedChannel(t *testing.T) {
 	if rows[0].Selected || !rows[1].Selected {
 		t.Errorf("only framework should be selected: %+v", rows)
 	}
-	if WallpaperSelectorEmpty() {
-		t.Error("WallpaperSelectorEmpty with two channels installed")
-	}
 }
 
 func TestWallpaperSelectorIsEmptyWithoutChannels(t *testing.T) {
@@ -53,23 +50,6 @@ func TestWallpaperSelectorIsEmptyWithoutChannels(t *testing.T) {
 
 	if rows := WallpaperSelectorRows(""); len(rows) != 0 {
 		t.Errorf("fabricated rows with no channel installed: %+v", rows)
-	}
-	if !WallpaperSelectorEmpty() {
-		t.Error("WallpaperSelectorEmpty false with no channel installed")
-	}
-}
-
-func TestWallpaperSelectedChannelRowNamesTheAction(t *testing.T) {
-	withChannels(t, "bluefin")
-	if got := WallpaperSelectedChannelRow("").Subtitle; got != "Choose a wallpaper channel" {
-		t.Errorf("empty selection subtitle = %q", got)
-	}
-	if got := WallpaperSelectedChannelRow("missing").Subtitle; got != "Choose a wallpaper channel" {
-		t.Errorf("unknown channel subtitle = %q", got)
-	}
-	channel, _ := livery.ChannelByID("bluefin")
-	if got := WallpaperSelectedChannelRow("bluefin").Subtitle; got != channel.Name {
-		t.Errorf("selected channel subtitle = %q, want %q", got, channel.Name)
 	}
 }
 
