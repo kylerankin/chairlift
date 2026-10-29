@@ -539,3 +539,46 @@ func TestMergeQueueGateWaitsForEveryTestJob(t *testing.T) {
 		t.Errorf("docs/quality.md does not name the required %q check", mergeQueueGateContext)
 	}
 }
+
+// TestAppTokensAreScoped keeps every GitHub App installation token minted in
+// a workflow limited to named permissions, so a compromised job never
+// inherits the app's full installation permission set.
+func TestAppTokensAreScoped(t *testing.T) {
+	entries, err := os.ReadDir(filepath.Join(RepoRoot(), ".github", "workflows"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || (!strings.HasSuffix(entry.Name(), ".yml") && !strings.HasSuffix(entry.Name(), ".yaml")) {
+			continue
+		}
+		path := filepath.Join(".github", "workflows", entry.Name())
+		var workflow struct {
+			Jobs map[string]struct {
+				Steps []struct {
+					Uses string                 `yaml:"uses"`
+					With map[string]interface{} `yaml:"with"`
+				} `yaml:"steps"`
+			} `yaml:"jobs"`
+		}
+		if err := yaml.Unmarshal([]byte(readRepoFile(t, path)), &workflow); err != nil {
+			t.Fatalf("parse %s: %v", path, err)
+		}
+		for job, spec := range workflow.Jobs {
+			for _, step := range spec.Steps {
+				if !strings.HasPrefix(step.Uses, "actions/create-github-app-token@") {
+					continue
+				}
+				scoped := false
+				for key := range step.With {
+					if strings.HasPrefix(key, "permission-") {
+						scoped = true
+					}
+				}
+				if !scoped {
+					t.Errorf("%s job %s mints an app token without any permission-* input", path, job)
+				}
+			}
+		}
+	}
+}
