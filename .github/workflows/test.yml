@@ -5,6 +5,26 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # The merge queue is a separate event: it builds each candidate on its own
+  # temporary ref (refs/heads/gh-readonly-queue/main/pr-<n>-<sha>), and
+  # neither `push` nor `pull_request` fires for it. Without this trigger the
+  # queue has nothing to wait for and merges unvalidated heads.
+  #
+  # Deliberately unfiltered. `github.ref` here is the queue ref, never `main`,
+  # so a `branches: [main]` filter would match nothing and silently restore
+  # the ungated queue this trigger exists to fix. The queue runs only on the
+  # default branch anyway, so there is nothing to filter out.
+  merge_group:
+    types: [checks_requested]
+
+# Only pull_request runs are cancellable. A merge_group run builds a queue
+# candidate and a push run builds main; cancelling either would leave the
+# required "Tests Passed" check failed on a head that is actually being
+# merged. github.ref is unique per queue ref and per branch, so those runs
+# never share a group with a pull request's.
+concurrency:
+  group: tests-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions: {}
 
@@ -21,20 +41,29 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.26.6"
+          go-version: "1.27.4"
+
+      # Workflow safety gate at the org-agreed threshold (projectbluefin/actions#674).
+      # advanced-security: false fails the job on findings instead of uploading
+      # SARIF, which would need security-events: write. Documented exceptions
+      # live in .github/zizmor.yml.
+      - name: zizmor (workflow safety)
+        uses: zizmorcore/zizmor-action@45d7276c9ca790aabd705e31ca99c6185c3e76dd # v0.8.1
+        with:
+          advanced-security: false
+          min-severity: medium
+          min-confidence: medium
 
       - name: golangci-lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
-          version: latest
+          version: v2.15.0
 
   unit-test:
     name: Unit Tests
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      # Codecov's tokenless OIDC upload needs this job-scoped permission.
-      id-token: write
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -42,21 +71,13 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.26.6"
+          go-version: "1.27.4"
 
       - name: Download dependencies
         run: go mod download
 
       - name: Run unit tests with coverage
         run: go test -v ./internal/... -coverprofile=coverage.out -covermode=atomic -run "^Test[^I]" -skip "Integration"
-
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v6.0.2
-        with:
-          files: ./coverage.out
-          fail_ci_if_error: false
-          verbose: true
-        continue-on-error: true
 
   race-test:
     name: Race Detection
@@ -70,7 +91,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.26.6"
+          go-version: "1.27.4"
 
       - name: Download dependencies
         run: go mod download
@@ -87,52 +108,118 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # Cleanup removes hosted toolchains; reinstall Go only after it finishes.
+      - name: Free disk space for Dakota
+        uses: projectbluefin/actions/bootc-build/setup-runner@d1f65645c53d413462117fe1f05d00b9d9382f89 # v1
+        with:
+          storage-backend: remove-software
+          update-podman: "false"
+
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.26.6"
+          go-version: "1.27.4"
 
-      - name: Install headless GTK runtime
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends \
-            dbus-x11 \
-            flatpak \
-            imagemagick \
-            libadwaita-1-0 \
-            libgtk-4-1 \
-            x11-apps \
-            x11-utils \
-            xauth \
-            xdotool \
-            xvfb
+      - name: Prepare the Dakota suite environment
+        uses: ./.github/actions/dakota-venv
 
-      # imagemagick (import), x11-utils (xdpyinfo), x11-apps (xwd — a
-      # separate Debian/Ubuntu package from x11-utils, easy to miss since
-      # both sound like "the X utilities"), and xdotool are the
-      # screenshot walkthrough's additional requirements. flatpak matters
-      # for a different reason: buildUpdateAllGroup (internal/views/update_all.go)
-      # omits the whole Update All group when no provider — OS staging,
-      # Flatpak, or Homebrew — is available on the host, and the walkthrough
-      # asserts that group gets built. ubuntu-latest ships Homebrew, but not
-      # on PATH by default (needs `brew shellenv`), and never ships bootc, so
-      # without `flatpak` installed here nothing is available and the group
-      # silently vanishes — which is exactly the failure this step used to
-      # hit once the missing-xwd error above it was fixed. Installing flatpak
-      # is simpler than wiring Homebrew onto PATH, and more representative:
-      # it's what a real Bluefin/Dakota host actually has. The GTK runtime
-      # above already covers the startup smoke test.
+      # internal/ui/*.ui is committed blueprint-compiler output, embedded by
+      # the pure-Go build. Recompile every .blp in the pinned Dakota image
+      # and fail if a committed .ui is stale.
+      - name: Check compiled blueprints
+        run: make blueprints-check
+
+      # Every E2E test that needs a display runs inside
+      # ghcr.io/projectbluefin/dakota:testing (test/e2e/dakota.sh) under a
+      # private headless Mutter Wayland session: the GTK, Libadwaita and
+      # accessibility stack ChairLift ships on. The runner supplies only
+      # podman and Go. The behave suite runs in the atspi job below.
       - name: Run E2E tests
         env:
           CHAIRLIFT_WALKTHROUGH_DIR: ${{ github.workspace }}/walkthrough
+          CHAIRLIFT_SCHEMA_DIR: ${{ github.workspace }}/build/schemas
+          E2E_COVERDIR: ${{ github.workspace }}/covdata-e2e
         run: make e2e
 
       - name: Upload walkthrough screenshots
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: walkthrough-screenshots
           path: walkthrough/
+          if-no-files-found: warn
+
+  # The behave AT-SPI suite, split into shards that run in parallel: run
+  # serially it is most of the E2E wall time. Each shard is a behave tag
+  # expression over the feature files' first tags, balanced by measured
+  # scenario time. internal/installcheck's
+  # TestATSPIShardsCoverEveryFeatureOnce fails when a feature is in no shard
+  # or in two, so a new feature cannot silently stop running here.
+  atspi:
+    name: AT-SPI (${{ matrix.shard }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard: features
+            tags: "@features"
+          - shard: apps
+            tags: "@apps or @updates"
+          - shard: livery
+            tags: "@livery or @help"
+          - shard: config
+            tags: "@config or @maintenance or @agents or @navigation or @setup or @shell"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Cleanup removes hosted toolchains; reinstall Go only after it finishes.
+      - name: Free disk space for Dakota
+        uses: projectbluefin/actions/bootc-build/setup-runner@d1f65645c53d413462117fe1f05d00b9d9382f89 # v1
+        with:
+          storage-backend: remove-software
+          update-podman: "false"
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.27.4"
+          # Keep production-only builds from seeding the harness cache.
+          cache-dependency-path: |
+            go.mod
+            go.sum
+            Makefile
+            test/e2e/dakota.sh
+            test/e2e/dakota-image.sh
+
+      - name: Prepare the Dakota suite environment
+        uses: ./.github/actions/dakota-venv
+
+      - name: Run AT-SPI suite shard on Dakota
+        env:
+          ATSPI_TAGS: ${{ matrix.tags }}
+        run: make e2e-atspi
+
+      # JUnit XML, behave.log, and per-scenario logs, journals, accessibility
+      # tree dumps and screenshots for any failed scenario. The per-scenario
+      # HOME and runtime directories are excluded: they hold Homebrew caches
+      # and sockets, not evidence.
+      - name: Upload AT-SPI suite results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: atspi-results-${{ matrix.shard }}
+          path: |
+            build/atspi/
+            !build/atspi/*/bin/
+            !build/atspi/*/home/
+            !build/atspi/*/runtime/
+            !build/atspi/*/scenarios/*/home/
+            !build/atspi/*/scenarios/*/runtime/
+            !build/atspi/*/scenarios/*/bin/
           if-no-files-found: warn
 
   verify:
@@ -147,7 +234,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.26.6"
+          go-version: "1.27.4"
 
       - name: Verify go.mod is tidy
         run: |
@@ -178,7 +265,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.26.6"
+          go-version: "1.27.4"
 
       - name: Build binary
         run: |
@@ -186,8 +273,36 @@ jobs:
           ls -lh build/chairlift
 
       - name: Upload artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: chairlift-${{ matrix.goos }}-${{ matrix.goarch }}
           path: build/chairlift
           retention-days: 7
+
+  # The one check context the default-branch ruleset requires, for both pull
+  # requests and merge groups. Requiring the individual jobs instead would
+  # pin branch protection to names this file can rename or re-matrix — the
+  # build job alone expands to "Build (linux, amd64)" and "Build (linux,
+  # arm64)" — so the ruleset would drift out of step with CI silently. One
+  # name that fans out here cannot.
+  tests-passed:
+    name: Tests Passed
+    needs: [lint, unit-test, race-test, e2e, atspi, verify, build]
+    # Required. Without it a failed dependency *skips* this job, and GitHub
+    # counts a skipped required check as passing — which is the ungated merge
+    # this whole workflow exists to prevent, only harder to see.
+    if: always()
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Require every gate job to have succeeded
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "Gate job results: ${RESULTS}"
+          for result in ${RESULTS}; do
+            if [ "${result}" != "success" ]; then
+              echo "::error::A gate job concluded '${result}'; refusing to report success."
+              exit 1
+            fi
+          done

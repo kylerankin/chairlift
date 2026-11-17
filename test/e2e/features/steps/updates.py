@@ -1,0 +1,405 @@
+"""Steps for the Updates destination (updates.feature).
+
+The destination is the status-first update shell (internal/views/
+update_shell.go): a header of wordmark, primary action, and one status line
+(plus a detail line for failures), whose text comes from
+internal/views/updatepresent, and one row per update source.
+The fake tools behind these steps live in fixtures/stubs_updates.py.
+"""
+
+import os
+
+from behave import step, then
+
+import chairlift_atspi as atspi
+
+
+# behave executes every steps module itself, so importing steps/common.py
+# would register its steps a second time; these two lookups are repeated.
+def content(context):
+    if context.app is None:
+        raise AssertionError("ChairLift is not running in this scenario (@no-app?)")
+    return atspi.page_root(context.app)
+
+
+def text_present(root, wanted, exact=False):
+    return any((value == wanted) if exact else (wanted in value) for value in atspi.all_text_under(root))
+
+
+# The status line carries this accessible description (update_shell.go), which
+# is how it is told apart from a source row saying the same words, such as
+# "Up to date" or "Checking for updates…".
+STATUS_DESCRIPTION = "Update status"
+
+# Every label updatepresent gives the primary action.
+PRIMARY_LABELS = ("Check Again", "Update All", "Try Again", "Retry Failed")
+
+
+def _status_nodes(context):
+    return atspi.find_all(content(context), lambda n: atspi.description(n) == STATUS_DESCRIPTION)
+
+
+def _status_line(context):
+    """The one status line on screen, or None when there is not exactly one."""
+    nodes = _status_nodes(context)
+    if len(nodes) != 1:
+        return None
+    return atspi.name(nodes[0]) or atspi.text(nodes[0])
+
+
+@step('the Updates status reads "{line}"')
+def step_status_reads(context, line):
+    ok = atspi.poll(lambda: _status_line(context) == line)
+    assert ok, f"the Updates status reads {_status_line(context)!r}, want {line!r}"
+
+
+@step('the Updates status starts with "{prefix}"')
+def step_status_starts_with(context, prefix):
+    ok = atspi.poll(lambda: (_status_line(context) or "").startswith(prefix))
+    assert ok, f"the Updates status reads {_status_line(context)!r}, want it to start with {prefix!r}"
+
+
+@then("the Updates status sits directly under the primary action")
+def step_status_under_primary(context):
+    def ordered():
+        nodes = list(atspi.search_nodes(content(context)))
+        primary = [i for i, n in enumerate(nodes) if any(atspi.is_button(n, label) for label in PRIMARY_LABELS)]
+        status = [i for i, n in enumerate(nodes) if atspi.description(n) == STATUS_DESCRIPTION]
+        if len(primary) != 1 or len(status) != 1 or status[0] < primary[0]:
+            return False
+        # Only the primary's own label may stand between them: no title,
+        # description, or other text sits between the action and its status.
+        action = atspi.label_text(nodes[primary[0]])
+        between = nodes[primary[0] + 1 : status[0]]
+        return not any(atspi.role(n) == "label" and atspi.name(n) not in ("", action) for n in between)
+
+    assert atspi.poll(ordered), "the status line does not directly follow the primary action"
+
+
+@then("the Updates page offers no primary action")
+def step_no_primary(context):
+    def none_shown():
+        return not atspi.find_all(
+            content(context), lambda n: any(atspi.is_button(n, label) for label in PRIMARY_LABELS)
+        )
+
+    assert atspi.poll(none_shown), "a primary update action is still offered"
+
+
+@then('the Updates page offers only the "{label}" action')
+def step_only_primary(context, label):
+    assert label in PRIMARY_LABELS, f"{label!r} is not a primary action updatepresent can offer"
+
+    def offered():
+        return sorted(
+            {
+                wanted
+                for wanted in PRIMARY_LABELS
+                for n in atspi.find_all(content(context), lambda n, w=wanted: atspi.is_button(n, w))
+            }
+        )
+
+    ok = atspi.poll(lambda: offered() == [label])
+    assert ok, f"primary actions offered are {offered()}, want only {label!r}"
+
+
+@then("the Updates progress bar is {visibility:w}")
+def step_progress_visibility(context, visibility):
+    assert visibility in ("shown", "hidden")
+    assert atspi.poll(
+        lambda: bool(atspi.find_all(content(context), lambda n: atspi.role(n) == "progress bar"))
+        == (visibility == "shown")
+    ), f"Updates progress bar is not {visibility}"
+
+
+@then('the Updates page shows no "{title}" row')
+def step_row_absent(context, title):
+    """A source nobody on this machine can use gets no row (#675).
+
+    Configuration that disables a source for the whole machine, and a host that
+    cannot back one, both leave the page: a row whose only content is "you
+    cannot use this" reports a state the reader can neither change nor act on.
+    """
+
+    def gone():
+        return not atspi.find_all(
+            content(context),
+            lambda n: atspi.role(n) in atspi.ROW_ROLES
+            and any(atspi.name(c) == title for c in atspi.descendants(n, only_showing=True)),
+        )
+
+    assert atspi.poll(gone), f"the Updates page still shows a {title!r} row"
+
+
+# ---------------------------------------------------------------- sidebar badge
+
+
+def _updates_badge(context):
+    for row in atspi.sidebar_rows(context.app):
+        labels = [
+            atspi.name(n)
+            for n in atspi.descendants(row, only_showing=True)
+            if atspi.role(n) in atspi.LABEL_ROLES and atspi.name(n)
+        ]
+        if "Updates" in labels:
+            return [label for label in labels if label != "Updates"]
+    raise AssertionError("the sidebar has no Updates row")
+
+
+@step('the Updates sidebar badge shows "{count}"')
+def step_badge_shows(context, count):
+    ok = atspi.poll(lambda: _updates_badge(context) == [count])
+    assert ok, f"Updates sidebar badge is {_updates_badge(context)}, want [{count!r}]"
+
+
+@step("the Updates sidebar row shows no badge")
+def step_badge_hidden(context):
+    ok = atspi.poll(lambda: _updates_badge(context) == [])
+    assert ok, f"Updates sidebar row still shows {_updates_badge(context)}"
+
+
+# ---------------------------------------------------------------- fake tools
+
+
+def _state(context, name):
+    return os.path.join(context.updates_state, name)
+
+
+def _calls(context, program):
+    try:
+        with open(_state(context, f"{program}.calls"), encoding="utf-8") as handle:
+            return [line.rstrip("\n") for line in handle]
+    except FileNotFoundError:
+        return []
+
+
+@step("Flatpak now offers an update for Firefox")
+def step_flatpak_offers_firefox(context):
+    with open(_state(context, "flatpak-remote-ls-user"), "w", encoding="utf-8") as handle:
+        handle.write("Firefox\torg.mozilla.firefox\t131.0\n")
+
+
+@step("the Flatpak remote is reachable again")
+def step_flatpak_reachable(context):
+    for scope in ("user", "system"):
+        try:
+            os.remove(_state(context, f"flatpak-remote-ls-{scope}.fail"))
+        except FileNotFoundError:
+            pass
+
+
+@then('the {program:w} tool was never asked to "{subcommand}"')
+def step_tool_never_ran(context, program, subcommand):
+    def _counts(call):
+        parts = call.split()
+        if not parts or parts[0] != subcommand:
+            return False
+        # Read-only trust store discovery (`brew trust --json=v1`) changes
+        # nothing and is expected during untrusted-tap checks; state-changing
+        # trust mutations still fail.
+        if program == "brew" and subcommand == "trust" and parts == ["trust", "--json=v1"]:
+            return False
+        return True
+
+    ran = [call for call in _calls(context, program) if _counts(call)]
+    assert not ran, f"{program} received {ran}"
+
+# ---------------------------------------------------------------- switches
+
+
+@then('the switch in the "{row}" row can be toggled again')
+def step_switch_sensitive(context, row):
+    def check():
+        target = atspi.row_containing(content(context), row, timeout=1)
+        switches = [
+            n for n in atspi.descendants(target, only_showing=True)
+            if atspi.role(n) in ("switch", "toggle button", "check box")
+        ]
+        return bool(switches) and all(atspi.sensitive(n) for n in switches)
+
+    assert atspi.poll(check), f"the switch in {row!r} stayed insensitive"
+
+
+# ---------------------------------------------------------------- preferences
+
+
+# The Preferences dialog (internal/window/preferences.go) presents inside the
+# main window, over the Updates page, which has rows with the same titles. Its
+# "Update Sources" group is the only one with that name, so it is the scope;
+# the post-update maintenance switch lives in its "Maintenance" group.
+_PREFERENCE_GROUPS = {"Run Maintenance After Updates": "Maintenance"}
+
+
+def _preference_group(context, row):
+    if context.app is None:
+        raise AssertionError("ChairLift is not running in this scenario (@no-app?)")
+    group = _PREFERENCE_GROUPS.get(row, "Update Sources")
+    return atspi.find(
+        context.app,
+        lambda n: atspi.role(n) == "grouping" and atspi.name(n) == group,
+        f"the Preferences dialog's {group} group",
+    )
+
+
+# Each source is an AdwSwitchRow, which publishes itself with the "switch"
+# role (not a list row) and nests a second "switch" for its GtkSwitch. The
+# outer one is the row: it carries the subtitle and the row's sensitivity,
+# which is what the user can or cannot press. Pre-order search finds it
+# before the inner switch.
+def _preference_switch(context, row):
+    return atspi.find(
+        _preference_group(context, row),
+        lambda n: atspi.role(n) in ("switch", "toggle button", "check box") and atspi.name(n) == row,
+        f"the Preferences {row!r} switch row",
+        timeout=1,
+    )
+
+
+@then('the Preferences "{row}" row says "{text}"')
+def step_preference_row_says(context, row, text):
+    def check():
+        return text_present(_preference_switch(context, row), text)
+
+    assert atspi.poll(check), f"Preferences row {row!r} never said {text!r}"
+
+
+@then('the Preferences "{row}" switch is {state:w} and {verdict:w} input')
+def step_preference_switch(context, row, state, verdict):
+    if state not in ("on", "off") or verdict not in ("accepts", "refuses"):
+        raise NotImplementedError(f"unknown switch state {state!r} or verdict {verdict!r}")
+    want_on, want_sensitive = state == "on", verdict == "accepts"
+
+    def check():
+        switch = _preference_switch(context, row)
+        return bool(atspi.checked(switch)) == want_on and atspi.sensitive(switch) == want_sensitive
+
+    assert atspi.poll(check), f"the Preferences {row!r} switch never read {state} and {verdict} input"
+
+
+@step('I toggle the Preferences "{row}" switch')
+def step_toggle_preference(context, row):
+    # The row publishes no action; its nested GtkSwitch does.
+    atspi.activate(atspi.find(
+        _preference_switch(context, row),
+        lambda n: atspi.role(n) in ("switch", "toggle button", "check box") and bool(atspi.actions(n)),
+        f"the actionable switch in the Preferences {row!r} row",
+        timeout=1,
+    ))
+
+
+@then("the action journal holds exactly {count:d} entry")
+@then("the action journal holds exactly {count:d} entries")
+def step_journal_count(context, count):
+    try:
+        with open(context.journal_path, encoding="utf-8") as handle:
+            entries = [line for line in handle if line.strip()]
+    except FileNotFoundError:
+        entries = []
+    assert len(entries) == count, f"journal holds {len(entries)} entries, want {count}: {entries[:6]}"
+
+
+@then('the update for "{title}" is listed once with an accessible action')
+def step_single_visible_update(context, title):
+    def check():
+        rows = atspi.find_all(
+            content(context),
+            lambda node: atspi.role(node) in atspi.ROW_ROLES and any(
+                atspi.name(child) == title for child in atspi.descendants(node, only_showing=True)
+            ),
+        )
+        return len(rows) == 1 and any(
+            atspi.is_button(node, "Update") for node in atspi.descendants(rows[0], only_showing=True)
+        )
+    assert atspi.poll(check), f"{title!r} is duplicated or its Update action is hidden"
+
+
+@step("software source discovery is reachable again")
+def step_sources_reachable(context):
+    os.unlink(_state(context, "brew-sources.fail"))
+
+
+@step("the Flatpak update check is allowed to finish")
+def step_release_flatpak_check(context):
+    with open(_state(context, "flatpak-remote-ls-user.release"), "w", encoding="utf-8"):
+        pass
+
+
+# The Activity indicator sits in the window-wide header bar above the
+# sidebar/content split (internal/ui/window.blp), outside the content side
+# the other lookups search.
+ACTIVITY_LABEL = "Activity"
+
+
+def _activity_indicators(context):
+    if context.app is None:
+        raise AssertionError("ChairLift is not running in this scenario (@no-app?)")
+    window = atspi.main_window(context.app)
+    return atspi.find_all(window, lambda n: atspi.is_button(n, ACTIVITY_LABEL))
+
+
+@then("the Activity indicator is {visibility:w}")
+def step_activity_indicator(context, visibility):
+    assert visibility in ("shown", "hidden")
+    want = visibility == "shown"
+    ok = atspi.poll(lambda: bool(_activity_indicators(context)) == want)
+    assert ok, f"the Activity indicator is not {visibility}"
+
+
+@step("I open the Activity indicator")
+def step_open_activity(context):
+    found = atspi.poll(lambda: _activity_indicators(context))
+    assert found, "the Activity indicator is not shown"
+    atspi.activate(found[0])
+
+
+def _sidebar_showing(context):
+    bar = atspi.safe(lambda: atspi.sidebar(context.app))
+    return bar is not None and atspi.showing(bar)
+
+
+# Each keyboard-resize step is Mutter's normal increment (10 px); the default
+# 900 px window passes internal/ui/window.blp's 550sp breakpoint after about
+# 36, and the window's 360 px minimum stops it well after that.
+NARROW_MAX_STEPS = 80
+# The steps go in short bursts with a brief pause instead of dogtail's
+# per-key action delay and a poll after each key: at that pace narrowing takes
+# about 25 s, long enough for a held update check to reach the application's
+# 30 s command timeout before the scenario can look at it.
+NARROW_BURST = 6
+NARROW_KEY_DELAY = 0.03
+
+
+@step("the window is narrowed below the sidebar breakpoint")
+def step_narrow_window(context):
+    """Resize the window with Mutter's keyboard resize until the split collapses.
+
+    GTK 4 does not implement AT-SPI Component.SetSize, and a bare headless
+    Mutter has no Shell to script, so Alt+F8 is the input left: the first
+    arrow picks the edge to move (Left picks the left edge) and each Right
+    then moves that edge inwards. Stopping once the sidebar stops showing
+    lands just below the breakpoint, whatever size the window started at.
+    """
+    if not _sidebar_showing(context):
+        raise AssertionError("the sidebar is already hidden before narrowing the window")
+    atspi.press("<Alt>F8")
+    atspi.press("Left")
+    saved = atspi.config.actionDelay
+    atspi.config.actionDelay = NARROW_KEY_DELAY
+    try:
+        for _ in range(0, NARROW_MAX_STEPS, NARROW_BURST):
+            for _ in range(NARROW_BURST):
+                atspi.press("Right")
+            if atspi.poll(lambda: not _sidebar_showing(context), timeout=0.2):
+                break
+    finally:
+        atspi.config.actionDelay = saved
+    atspi.press("Return")
+    assert atspi.poll(lambda: not _sidebar_showing(context)), (
+        f"the sidebar still shows after {NARROW_MAX_STEPS} keyboard-resize steps"
+    )
+
+
+@step("the sidebar is hidden")
+def step_sidebar_hidden(context):
+    ok = atspi.poll(lambda: not _sidebar_showing(context))
+    assert ok, "the sidebar is still showing"

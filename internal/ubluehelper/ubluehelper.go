@@ -1,7 +1,8 @@
 // Package ubluehelper holds the argv-parsing logic for
-// cmd/chairlift-ublue-helper, the privileged helper binary invoked via
+// cmd/chairlift-helper, the privileged helper binary invoked via
 // pkexec to perform the Bluefin-family write operations: switching the bootc
-// release channel and toggling developer-mode group membership.
+// release channel, toggling developer-mode group membership, and turning on
+// or updating rootful system Docker.
 //
 // It mirrors internal/updexhelper's contract and exists for the same reason:
 // PolicyKit selects an action from the executable path and the first
@@ -14,7 +15,7 @@
 //   - The target image reference. The helper derives it from
 //     /usr/share/ublue-os/image-info.json via internal/imageinfo, so an
 //     authenticated caller cannot direct `bootc switch` at an arbitrary
-//     registry. Only a channel word crosses the boundary.
+//     registry. Only validated channel, driver, gaming-mode, or day words cross the boundary.
 //   - The username. The helper resolves it from the PKEXEC_UID pkexec sets
 //     on the invoking session, so an authenticated caller cannot add an
 //     unrelated account to the privileged developer groups.
@@ -26,6 +27,8 @@ package ubluehelper
 import (
 	"fmt"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/projectbluefin/chairlift/internal/autoupdate"
 	"github.com/projectbluefin/chairlift/internal/imageinfo"
@@ -44,8 +47,19 @@ const (
 	CommandAutoEnable    = "auto-updates-enable"
 	CommandAutoDisable   = "auto-updates-disable"
 	CommandDriverSwitch  = "driver-switch"
+	CommandGamingSwitch  = "gaming-switch"
 	CommandFactoryReset  = "factory-reset"
+	CommandPin           = "pin"
+	CommandUnpin         = "unpin"
+	CommandKVMEnable     = "kvm-enable"
+	CommandDockerEnable  = "docker-enable"
+	CommandDockerDisable = "docker-disable"
+	CommandDockerUpdate  = "docker-update"
 )
+
+// HelperExecPrefix is the machine-readable execution prefix emitted by the
+// privileged helper before executing a derived command.
+const HelperExecPrefix = "chairlift-helper: exec "
 
 // The channel words accepted as channel-switch's second argument. They are
 // the string forms of imageinfo.ChannelStable and imageinfo.ChannelTesting;
@@ -70,7 +84,18 @@ type Invocation struct {
 	Command string
 	Channel imageinfo.Channel
 	Driver  imageinfo.Driver
+	Gaming  bool
+	Day     string
 	DryRun  bool
+}
+
+// UsesChannelTable reports whether this invocation needs the administrator's
+// channel and driver configuration to resolve its fixed image target. Every other
+// command uses fixed argv and must remain available if that optional table is
+// malformed.
+func (i Invocation) UsesChannelTable() bool {
+	return i.Command == CommandChannelSwitch || i.Command == CommandDriverSwitch ||
+		i.Command == CommandGamingSwitch || i.Command == CommandPin || i.Command == CommandUnpin
 }
 
 // SupportedCommands returns the complete first-argument set accepted by the
@@ -87,11 +112,18 @@ func SupportedCommands() []string {
 		CommandAutoEnable,
 		CommandAutoDisable,
 		CommandDriverSwitch,
+		CommandGamingSwitch,
 		CommandFactoryReset,
+		CommandPin,
+		CommandUnpin,
+		CommandKVMEnable,
+		CommandDockerEnable,
+		CommandDockerDisable,
+		CommandDockerUpdate,
 	}
 }
 
-// ParseInvocation accepts only the three argv shapes ChairLift emits:
+// ParseInvocation accepts only the fixed argv shapes ChairLift emits:
 //
 //	channel-switch <stable|testing> [--dry-run]
 //	dx-enable [--dry-run]
@@ -101,18 +133,25 @@ func SupportedCommands() []string {
 //	auto-updates-enable [--dry-run]
 //	auto-updates-disable [--dry-run]
 //	driver-switch <standard|nvidia|nvidia-open> [--dry-run]
+//	gaming-switch <enable|disable> [--dry-run]
 //	factory-reset [--dry-run]
+//	pin <YYYYMMDD> [--dry-run]
+//	unpin [--dry-run]
+//	kvm-enable [--dry-run]
+//	docker-enable [--dry-run]
+//	docker-disable [--dry-run]
+//	docker-update [--dry-run]
 //
 // Everything else — extra arguments, a misplaced flag, an unknown channel
 // word, an unknown command — is rejected.
 func ParseInvocation(args []string) (Invocation, error) {
 	if len(args) == 0 {
-		return Invocation{}, fmt.Errorf("usage: chairlift-ublue-helper <command> [args...]")
+		return Invocation{}, fmt.Errorf("usage: chairlift-helper <command> [args...]")
 	}
 
 	switch args[0] {
 	case CommandChannelSwitch:
-		usage := fmt.Errorf("usage: chairlift-ublue-helper %s <%s|%s> [--dry-run]",
+		usage := fmt.Errorf("usage: chairlift-helper %s <%s|%s> [--dry-run]",
 			CommandChannelSwitch, ChannelStable, ChannelTesting)
 		if len(args) != 2 && len(args) != 3 {
 			return Invocation{}, usage
@@ -127,8 +166,21 @@ func ParseInvocation(args []string) (Invocation, error) {
 		}
 		return Invocation{Command: CommandChannelSwitch, Channel: channel, DryRun: dryRun}, nil
 
+	case CommandPin:
+		usage := fmt.Errorf("usage: chairlift-helper pin <YYYYMMDD> [--dry-run]")
+		if len(args) != 2 && len(args) != 3 {
+			return Invocation{}, usage
+		}
+		if len(args) == 3 && args[2] != "--dry-run" {
+			return Invocation{}, usage
+		}
+		if err := ValidateDay(args[1], time.Now()); err != nil {
+			return Invocation{}, fmt.Errorf("%w: %v", usage, err)
+		}
+		return Invocation{Command: CommandPin, Day: args[1], DryRun: len(args) == 3}, nil
+
 	case CommandDriverSwitch:
-		usage := fmt.Errorf("usage: chairlift-ublue-helper %s <%s|%s|%s> [--dry-run]",
+		usage := fmt.Errorf("usage: chairlift-helper %s <%s|%s|%s> [--dry-run]",
 			CommandDriverSwitch, imageinfo.DriverStandard, imageinfo.DriverNVIDIA, imageinfo.DriverNVIDIAOpen)
 		if len(args) != 2 && len(args) != 3 {
 			return Invocation{}, usage
@@ -143,10 +195,24 @@ func ParseInvocation(args []string) (Invocation, error) {
 		}
 		return Invocation{Command: CommandDriverSwitch, Driver: driver, DryRun: dryRun}, nil
 
+	case CommandGamingSwitch:
+		usage := fmt.Errorf("usage: chairlift-helper gaming-switch <enable|disable> [--dry-run]")
+		if len(args) != 2 && len(args) != 3 {
+			return Invocation{}, usage
+		}
+		if args[1] != "enable" && args[1] != "disable" {
+			return Invocation{}, usage
+		}
+		if len(args) == 3 && args[2] != "--dry-run" {
+			return Invocation{}, usage
+		}
+		return Invocation{Command: CommandGamingSwitch, Gaming: args[1] == "enable", DryRun: len(args) == 3}, nil
+
 	case CommandDXEnable, CommandDXDisable, CommandRestart, CommandRollback,
-		CommandAutoEnable, CommandAutoDisable, CommandFactoryReset:
+		CommandAutoEnable, CommandAutoDisable, CommandFactoryReset, CommandUnpin,
+		CommandKVMEnable, CommandDockerEnable, CommandDockerDisable, CommandDockerUpdate:
 		if len(args) > 2 || (len(args) == 2 && args[1] != "--dry-run") {
-			return Invocation{}, fmt.Errorf("usage: chairlift-ublue-helper %s [--dry-run]", args[0])
+			return Invocation{}, fmt.Errorf("usage: chairlift-helper %s [--dry-run]", args[0])
 		}
 		return Invocation{Command: args[0], DryRun: len(args) == 2}, nil
 
@@ -166,6 +232,34 @@ func parseChannel(word string) (imageinfo.Channel, bool) {
 		return imageinfo.ChannelTesting, true
 	default:
 		return imageinfo.ChannelUnknown, false
+	}
+}
+
+const (
+	// DefaultTimeout bounds a helper command that does not pull an image.
+	DefaultTimeout = 10 * time.Minute
+
+	// ImageSwitchTimeout bounds a command that runs `bootc switch` or
+	// downloads the Docker runtime. A switch to another channel, driver
+	// variant, gaming mode, or dated build pulls the same multi-gigabyte image an OS update
+	// stages, so it gets the OS staging budget (bootc.DefaultTimeout) rather
+	// than the default: at ten minutes a slow link had its pull killed
+	// mid-transfer. docker-enable and docker-update fetch the signed Homebrew
+	// index and the daemon's bottles, which a slow link cannot finish in the
+	// default budget either.
+	ImageSwitchTimeout = 30 * time.Minute
+)
+
+// Timeout returns how long the helper lets command run. The GUI's context
+// for the same command must outlast it (see ublue), so the helper reports
+// its own outcome instead of the caller giving up first.
+func Timeout(command string) time.Duration {
+	switch command {
+	case CommandChannelSwitch, CommandDriverSwitch, CommandGamingSwitch, CommandPin, CommandUnpin,
+		CommandDockerEnable, CommandDockerUpdate:
+		return ImageSwitchTimeout
+	default:
+		return DefaultTimeout
 	}
 }
 
@@ -215,6 +309,18 @@ func DriverSwitchArgs(info imageinfo.Info, driver imageinfo.Driver) ([]string, b
 	return []string{"switch", "--enforce-container-sigpolicy", target}, true
 }
 
+// GamingSwitchArgs returns the complete bootc argv for the published gaming
+// counterpart of the booted image, preserving its registry, stream, and driver.
+// Unknown or pinned streams and images without a published pair are refused.
+// The switch stages the image only: restarting remains a separate action.
+func GamingSwitchArgs(info imageinfo.Info, enabled bool) ([]string, bool) {
+	target, ok := imageinfo.GamingTarget(info.CleanRef(), info.EffectiveTag(), enabled)
+	if !ok {
+		return nil, false
+	}
+	return []string{"switch", "--enforce-container-sigpolicy", target}, true
+}
+
 // RollbackArgs returns the `bootc` argv that makes the previous deployment
 // the default for the next boot.
 //
@@ -222,9 +328,17 @@ func DriverSwitchArgs(info imageinfo.Info, driver imageinfo.Driver) ([]string, b
 // operates on the rollback deployment the host already records, so there is
 // no target for a caller to influence. Rolling back to an arbitrary earlier
 // image is a different operation — it is a switch to a pinned reference, and
-// belongs to the channel-switch action's validation, not here.
+// belongs to the pin action's validation, not here.
 func RollbackArgs() []string {
 	return []string{"rollback"}
+}
+
+// IsSameRollbackRefusal reports whether an error or stderr output from `bootc switch`
+// is the composefs refusal indicating the target matches the existing rollback deployment's
+// fs-verity digest.
+func IsSameRollbackRefusal(output string) bool {
+	return strings.Contains(output, "has the same fs-verity digest as the existing Some(Rollback) deployment") ||
+		(strings.Contains(output, "same fs-verity digest") && strings.Contains(output, "Rollback"))
 }
 
 // FactoryResetArgs returns the argv that replaces the running deployment
@@ -234,14 +348,16 @@ func RollbackArgs() []string {
 // `--experimental` is required by bootc itself — this reset path is not
 // stabilized upstream — and ChairLift does not hide that from the argv or
 // from the confirmation dialog that must be shown before this ever runs
-// (pageview.FactoryResetConfirmation). `--apply` makes the reset take effect
-// immediately rather than only staging it, because a "staged" factory reset
-// that silently applies at the next unrelated restart is a worse surprise
-// than the operation itself. Like Restart and Rollback this takes no
-// caller-supplied value: a factory reset has exactly one target, the image
-// already booted.
+// (pageview.FactoryResetConfirmation). `--apply` is deliberately absent:
+// bootc documents it as "Restart or reboot into the new target image.
+// Currently, this option always reboots", so carrying it rebooted the
+// machine the moment the user authenticated, discarding unsaved work, while
+// every user-facing string promises the reset applies at the next restart.
+// Without it bootc prepares the fresh deployment and the user restarts when
+// ready. Like Restart and Rollback this takes no caller-supplied value: a
+// factory reset has exactly one target, the image already booted.
 func FactoryResetArgs() []string {
-	return []string{"install", "reset", "--experimental", "--apply"}
+	return []string{"install", "reset", "--experimental"}
 }
 
 // AutoUpdateArgs returns the ordered systemctl argv lists that turn automatic
@@ -255,7 +371,16 @@ func FactoryResetArgs() []string {
 // disabling, so that a package upgrade re-running `systemctl preset` cannot
 // quietly re-enable something the user turned off.
 //
-// The unit name is fixed to autoupdate.TimerUnit rather than passed in: a
+// Every unattended trigger of uupd.service is covered, not just the timer the
+// switch reports: autoupdate.ResumeTimerUnit fires the same service after
+// every resume. Disabling masks it with --now, which also stops a timer
+// already armed by a resume; systemctl masks and stops a unit that is absent
+// without error, so images that do not ship it still succeed. Enabling only
+// unmasks it: its enablement links are never removed, so unmasking restores
+// exactly what the image (or the user) had, without trying to enable a unit
+// an image may not ship.
+//
+// The unit names are fixed in autoupdate rather than passed in: a
 // caller-supplied unit would let an authenticated user enable or mask any
 // systemd unit on the machine.
 func AutoUpdateArgs(command string) ([][]string, bool) {
@@ -264,11 +389,13 @@ func AutoUpdateArgs(command string) ([][]string, bool) {
 		return [][]string{
 			{"unmask", autoupdate.TimerUnit},
 			{"enable", "--now", autoupdate.TimerUnit},
+			{"unmask", autoupdate.ResumeTimerUnit},
 		}, true
 	case CommandAutoDisable:
 		return [][]string{
 			{"disable", "--now", autoupdate.TimerUnit},
 			{"mask", autoupdate.TimerUnit},
+			{"mask", "--now", autoupdate.ResumeTimerUnit},
 		}, true
 	default:
 		return nil, false
@@ -296,7 +423,7 @@ func SwitchArgs(info imageinfo.Info, channel imageinfo.Channel) ([]string, bool)
 // PKEXEC_UID environment variable pkexec sets to the *invoking* session's
 // uid. Reading the identity from the environment pkexec controls — rather
 // than from argv, which the caller controls — is what keeps
-// `pkexec chairlift-ublue-helper dx-enable` from being usable to add an
+// `pkexec chairlift-helper dx-enable` from being usable to add an
 // arbitrary account to the privileged developer groups.
 //
 // An absent, empty, non-numeric, or negative value is rejected. uid 0 is
@@ -332,5 +459,75 @@ func GroupArgs(command, username, group string) (string, []string, bool) {
 		return "gpasswd", []string{"-d", username, group}, true
 	default:
 		return "", nil, false
+	}
+}
+
+// skippedGroupPrefix starts the line the helper writes to stderr for a
+// developer group it could not change (usually one this image does not
+// define). The GUI reads these lines back with SkippedGroups.
+const skippedGroupPrefix = "skipped group "
+
+// SkippedGroupLine formats the helper's report of a group it skipped.
+func SkippedGroupLine(group string, err error) string {
+	return fmt.Sprintf("%s%s: %v", skippedGroupPrefix, group, err)
+}
+
+// SkippedGroups returns, in DevGroups order, the developer groups the helper
+// reported skipping in output. Only names in DevGroups are returned, so
+// arbitrary helper output cannot inject text into the GUI's warning.
+func SkippedGroups(output string) []string {
+	reported := map[string]bool{}
+	for _, line := range strings.Split(output, "\n") {
+		rest, ok := strings.CutPrefix(strings.TrimSpace(line), skippedGroupPrefix)
+		if !ok {
+			continue
+		}
+		if name, _, ok := strings.Cut(rest, ":"); ok {
+			reported[name] = true
+		}
+	}
+	var skipped []string
+	for _, group := range DevGroups() {
+		if reported[group] {
+			skipped = append(skipped, group)
+		}
+	}
+	return skipped
+}
+
+// AccessArgs grants only the one group authorized by each developer option.
+// The username comes from PKEXEC_UID; no group or account arrives in argv.
+func AccessArgs(command, username string) (string, []string, bool) {
+	group, ok := AccessGroup(command)
+	if username == "" || !ok {
+		return "", nil, false
+	}
+	return "usermod", []string{"-aG", group, username}, true
+}
+
+// AccessGroup names the one group each developer option grants.
+func AccessGroup(command string) (string, bool) {
+	switch command {
+	case CommandKVMEnable:
+		return "kvm", true
+	case CommandDockerEnable:
+		return "docker", true
+	default:
+		return "", false
+	}
+}
+
+// DockerArgs returns the systemctl argv that enables the image's own Docker
+// units, or disables whichever units are installed. Stopping both socket and
+// service prevents socket activation from undoing Disable. Enabling a
+// Homebrew-installed runtime is EnableDocker's ordered sequence instead.
+func DockerArgs(command string) ([]string, bool) {
+	switch command {
+	case CommandDockerEnable:
+		return []string{"enable", "--now", "docker.socket", "docker.service"}, true
+	case CommandDockerDisable:
+		return []string{"disable", "--now", "docker.socket", "docker.service"}, true
+	default:
+		return nil, false
 	}
 }

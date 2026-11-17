@@ -1,14 +1,27 @@
 package views
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
 	"os/exec"
+	"os/user"
+	"strings"
+	"time"
 
+	sgtk "github.com/frostyard/snowkit/gtk"
+	"github.com/projectbluefin/chairlift/internal/bootc"
+	"github.com/projectbluefin/chairlift/internal/branding"
+	"github.com/projectbluefin/chairlift/internal/deskenv"
+	"github.com/projectbluefin/chairlift/internal/gpu"
+	"github.com/projectbluefin/chairlift/internal/imageinfo"
+	"github.com/projectbluefin/chairlift/internal/launcher"
+	"github.com/projectbluefin/chairlift/internal/views/actionstate"
 	"github.com/projectbluefin/chairlift/internal/views/pageview"
 
 	"codeberg.org/puregotk/puregotk/v4/adw"
+	"codeberg.org/puregotk/puregotk/v4/gdk"
 	"codeberg.org/puregotk/puregotk/v4/gtk"
 )
 
@@ -20,16 +33,20 @@ func (uh *UserHome) buildHelpPage() {
 	}
 
 	// Help Resources group
-	if uh.config.IsGroupEnabled("help_page", "help_resources_group") {
+	if uh.groupEnabled("help_page", "help_resources_group") {
 		group := adw.NewPreferencesGroup()
 		group.SetTitle("Help &amp; Resources")
-		group.SetDescription("Get help and learn more about ChairLift")
+		group.SetDescription("Get help and learn more about " + branding.AppName)
 
 		groupCfg := uh.config.GetGroupConfig("help_page", "help_resources_group")
 		if groupCfg != nil {
 			resources := pageview.HelpResources(groupCfg.Website, groupCfg.Issues, groupCfg.Chat)
 			for _, resource := range resources {
 				row := adw.NewActionRow()
+				// Titles and URLs come from configuration and are not Pango
+				// markup: a URL's "&" would otherwise fail to parse and
+				// render the subtitle empty.
+				row.SetUseMarkup(false)
 				row.SetTitle(resource.Title)
 				row.SetSubtitle(resource.URL)
 				row.SetActivatable(true)
@@ -49,6 +66,122 @@ func (uh *UserHome) buildHelpPage() {
 
 		page.Add(group)
 	}
+	// Diagnostics group (issue #249): Clean action row to gather scrubbed
+	// system diagnostics onto the clipboard for support requests.
+	uh.buildDiagnosticsGroup(page)
+
+	// Feature availability (issue #209): groups configuration enables but
+	// this host cannot back, from the capability set resolved at startup.
+	// Collapsed behind one expander, and absent when nothing is missing.
+	if rows := pageview.UnavailableFeatures(uh.capabilities, uh.config.IsGroupEnabled); len(rows) > 0 {
+		group := adw.NewPreferencesGroup()
+		group.SetTitle("Feature Availability")
+		expander := adw.NewExpanderRow()
+		expander.SetTitle("Why Is Something Missing?")
+		expander.SetSubtitle("Features this computer can't use right now.")
+		for _, r := range rows {
+			row := adw.NewActionRow()
+			row.SetTitle(r.Title)
+			row.SetSubtitle(r.Subtitle)
+			expander.AddRow(&row.Widget)
+		}
+		group.Add(&expander.Widget)
+		page.Add(group)
+	}
+}
+
+func (uh *UserHome) buildDiagnosticsGroup(page *adw.PreferencesPage) {
+	group := adw.NewPreferencesGroup()
+	group.SetTitle("Diagnostics")
+	group.SetDescription("Share these details when you ask for help.")
+
+	row := adw.NewActionRow()
+	diagRow := pageview.SystemDiagnosticsRow()
+	row.SetTitle(diagRow.Title)
+	row.SetSubtitle(diagRow.Subtitle)
+	copyBtn := gtk.NewButtonWithLabel("Copy")
+	copyBtn.SetValign(gtk.AlignCenterValue)
+	copyGate := &actionstate.Gate{}
+	onCopy := func() {
+		if !copyGate.TryStart() {
+			return
+		}
+		copyBtn.SetSensitive(false)
+		go func() {
+			// Gather diagnostic data off the main thread.
+			var diag pageview.DiagnosticsData
+			if info, err := imageinfo.Detect(); err == nil {
+				diag.OSName = info.Name
+				diag.OSVersion = info.EffectiveTag()
+				diag.ImageRef = info.CleanRef()
+			}
+			diag.SystemVersion, diag.Digest = bootedBuild()
+			if data, err := os.ReadFile("/proc/sys/kernel/osrelease"); err == nil {
+				diag.Kernel = strings.TrimSpace(string(data))
+			}
+			diag.DesktopEnv = deskenv.Detect().String()
+			diag.GPU = gpu.Detect().Describe()
+
+			var username, homedir string
+			if u, err := user.Current(); err == nil && u != nil {
+				username = u.Username
+				homedir = u.HomeDir
+			} else {
+				username = os.Getenv("USER")
+				homedir = os.Getenv("HOME")
+			}
+
+			text := pageview.FormatScrubbedDiagnostics(diag, username, homedir)
+
+			sgtk.RunOnMainThread(func() {
+				defer copyGate.Reset()
+				defer copyBtn.SetSensitive(true)
+				display := gdk.DisplayGetDefault()
+				if display != nil {
+					clipboard := display.GetClipboard()
+					if clipboard != nil {
+						clipboard.SetText(text)
+					}
+				}
+				if uh.toastAdder != nil {
+					uh.toastAdder.ShowToast(pageview.DiagnosticsClipboardToast())
+				}
+			})
+		}()
+	}
+
+	btnCb := func(_ gtk.Button) { onCopy() }
+	copyBtn.ConnectClicked(&btnCb)
+
+	// Copy is the row's one control. The row itself is not activatable: an
+	// activatable row with its own handler was a second focus stop doing
+	// the same thing.
+	row.AddSuffix(&copyBtn.Widget)
+	group.Add(&row.Widget)
+	page.Add(group)
+}
+
+// diagnosticsStatusTimeout bounds the status read behind Copy, which holds
+// the button insensitive until it returns.
+const diagnosticsStatusTimeout = 10 * time.Second
+
+// bootedBuild returns the booted deployment's version and full image digest
+// through the same unprivileged bootc.GetStatus read the Updates page's
+// Details row uses, or empty strings on a host with no readable deployment.
+// It never prompts: no pkexec route is involved. Call it off the main thread.
+func bootedBuild() (version, digest string) {
+	if !bootc.IsBootcBootedCached() {
+		return "", ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), diagnosticsStatusTimeout)
+	defer cancel()
+	status, err := bootc.GetStatus(ctx)
+	if err != nil {
+		log.Printf("views: reading the booted build for diagnostics failed: %v", err)
+		return "", ""
+	}
+	booted := status.Status.Booted
+	return booted.Version(), booted.Digest()
 }
 
 // openURL opens a URL in the default browser using xdg-open
@@ -58,13 +191,17 @@ func (uh *UserHome) openURL(url string) {
 	cmd := exec.Command("xdg-open", url)
 	cmd.Env = os.Environ()
 
-	if err := cmd.Start(); err != nil {
+	if err := launcher.Start(cmd, func(err error) {
 		log.Printf("Failed to open URL %s: %v", url, err)
-		uh.toastAdder.ShowErrorToast(fmt.Sprintf("Failed to open URL: %s", url))
+		// xdg-open exits nonzero when the session has no URL handler or the
+		// URL is malformed; surface that async failure instead of silently
+		// dropping it. Must run on the GTK main thread.
+		sgtk.RunOnMainThread(func() {
+			uh.toastAdder.ShowErrorToast(fmt.Sprintf("Couldn't open %s.", url))
+		})
+	}); err != nil {
+		log.Printf("Failed to open URL %s: %v", url, err)
+		uh.toastAdder.ShowErrorToast(fmt.Sprintf("Couldn't open %s.", url))
 		return
 	}
-
-	go func() {
-		_ = cmd.Wait()
-	}()
 }

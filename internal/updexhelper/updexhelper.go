@@ -1,11 +1,11 @@
 // Package updexhelper holds the argv-parsing and Options-building logic for
 // cmd/chairlift-updex-helper, the privileged helper binary invoked via
 // pkexec to perform updex write operations. It is deliberately free of any
-// puregotk/GTK import (only stdlib plus github.com/frostyard/updex/updex),
+// puregotk/GTK import (only stdlib plus github.com/frostyard/updex/v2/updex),
 // so its logic can be unit-tested on a headless host — a test binary for a
 // package that imports puregotk panics while resolving GTK/graphene shared
 // libraries at package init, before any test function runs. See
-// docs/agents/skills/gtk-headless-tests.md.
+// docs/skills/gtk-headless-testing/SKILL.md.
 //
 // cmd/chairlift-updex-helper/main.go is reduced to dispatching the validated
 // Invocation returned here, then passing the per-subcommand Options struct to
@@ -14,8 +14,10 @@ package updexhelper
 
 import (
 	"fmt"
+	"strings"
+	"time"
 
-	"github.com/frostyard/updex/updex"
+	"github.com/frostyard/updex/v2/updex"
 )
 
 const (
@@ -23,6 +25,27 @@ const (
 	CommandDisableFeature = "disable-feature"
 	CommandUpdate         = "update"
 )
+
+const (
+	// DefaultTimeout bounds enable-feature and disable-feature, which change
+	// the feature configuration without downloading images.
+	DefaultTimeout = 5 * time.Minute
+
+	// UpdateTimeout bounds update, which downloads every enabled feature's
+	// sysext images; it gets the same download-sized budget as the ublue
+	// helper's image switches, so a slow link is not cut off mid-download.
+	UpdateTimeout = 30 * time.Minute
+)
+
+// Timeout returns how long the helper lets command run. The GUI's context
+// adds an authentication allowance on top (internal/updex), because its clock
+// also runs while the PolicyKit prompt is open.
+func Timeout(command string) time.Duration {
+	if command == CommandUpdate {
+		return UpdateTimeout
+	}
+	return DefaultTimeout
+}
 
 // Invocation is a validated privileged-helper command. PolicyKit selects an
 // action from the executable path and first argument; ParseInvocation is the
@@ -94,4 +117,28 @@ func DisableOptions(dryRun bool) updex.DisableFeatureOptions {
 // parsed --dry-run flag for this one subcommand.
 func UpdateOptions(dryRun bool) updex.UpdateFeaturesOptions {
 	return updex.UpdateFeaturesOptions{DryRun: dryRun}
+}
+
+// UpdateFailureDetail is the helper's stderr line for a failed update. updex
+// reports each component's failure only in its result (its own warnings go to
+// a no-op reporter in the helper) and returns the generic "one or more
+// components failed to update", so printing err alone left the update run
+// naming no component and no reason. The detail appends every failed
+// feature/component and its error, on one line because the GUI shows the
+// whole stderr as the source's failure message; components that succeeded
+// are omitted.
+func UpdateFailureDetail(results []updex.UpdateFeaturesResult, err error) string {
+	var failed []string
+	for _, feature := range results {
+		for _, component := range feature.Results {
+			if component.Error == "" {
+				continue
+			}
+			failed = append(failed, fmt.Sprintf("%s/%s: %s", feature.Feature, component.Component, component.Error))
+		}
+	}
+	if len(failed) == 0 {
+		return err.Error()
+	}
+	return err.Error() + ": " + strings.Join(failed, "; ")
 }

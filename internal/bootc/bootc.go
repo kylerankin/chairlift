@@ -1,8 +1,8 @@
 // Package bootc provides an interface to bootc-based system updates.
-// Status reads call `bootc status --format json` directly (unprivileged).
-// Update staging is delegated to the snow-shipped workaround script
-// /usr/libexec/bootc-update-stage via pkexec, because bootc's own
-// registry-transport pull currently fails on snow images.
+// Status and update checks never need root: on a composefs host they are
+// read from on-disk state and the registry (composefs.go), elsewhere from
+// `bootc status` and `bootc upgrade --check` run unprivileged. Update staging
+// is delegated to the fixed /usr/libexec/bootc-update-stage via pkexec.
 package bootc
 
 import (
@@ -11,14 +11,17 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 	"os/exec"
 	"sync"
 	"time"
+
+	"github.com/projectbluefin/chairlift/internal/registrytags"
+	"github.com/projectbluefin/chairlift/internal/stageexec"
 )
 
 const (
 	bootcCommand   = "bootc"
-	pkexecCommand  = "pkexec"
 	DefaultTimeout = 30 * time.Minute
 )
 
@@ -29,29 +32,14 @@ func DefaultContext() (context.Context, context.CancelFunc) {
 
 // Error represents a bootc-related error. Err, when non-nil, carries the
 // underlying cause (for example context.DeadlineExceeded or
-// context.Canceled) so callers can classify it with errors.Is.
-type Error struct {
-	Message string
-	Err     error
-}
+// context.Canceled) so callers can classify it with errors.Is. It aliases
+// stageexec.Error so status reads and update staging share one error
+// contract.
+type Error = stageexec.Error
 
-func (e *Error) Error() string {
-	return e.Message
-}
-
-// Unwrap exposes the underlying cause to errors.Is/errors.As.
-func (e *Error) Unwrap() error {
-	return e.Err
-}
-
-// NotFoundError is returned when bootc is not installed
-type NotFoundError struct {
-	Message string
-}
-
-func (e *NotFoundError) Error() string {
-	return e.Message
-}
+// NotFoundError is returned when bootc (or the stage script's pkexec
+// launcher) is not installed. It aliases stageexec.NotFoundError.
+type NotFoundError = stageexec.NotFoundError
 
 // ImageReference identifies a container image (org.containers.bootc/v1).
 type ImageReference struct {
@@ -137,8 +125,23 @@ func parseStatus(data []byte) (*Status, error) {
 	return &s, nil
 }
 
-// GetStatus returns the current bootc host status. Runs unprivileged.
+// hostRoot is the filesystem the composefs reader inspects. Tests replace it.
+var hostRoot fs.FS = os.DirFS("/")
+
+// registryTag resolves an image tag for the root-free update check. Tests
+// replace it so no gated test reaches a registry.
+var registryTag tagResolver = func(ctx context.Context, repository, tag string) (registrytags.Tag, error) {
+	return (&registrytags.Client{}).Tag(ctx, repository, tag)
+}
+
+// GetStatus returns the current bootc host status without root: from
+// composefs state when the host booted from it, otherwise from
+// `bootc status`.
 func GetStatus(ctx context.Context) (*Status, error) {
+	status, err := readComposefsStatus(hostRoot)
+	if !errors.Is(err, errNotComposefs) {
+		return status, err
+	}
 	return getStatusFrom(ctx, bootcCommand)
 }
 

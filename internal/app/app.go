@@ -2,26 +2,54 @@
 package app
 
 import (
+	"context"
 	"log"
 	"os"
 	"time"
 	"unsafe"
 
+	"github.com/projectbluefin/chairlift/internal/agentmode"
 	"github.com/projectbluefin/chairlift/internal/dryrun"
 	"github.com/projectbluefin/chairlift/internal/imageinfo"
+	"github.com/projectbluefin/chairlift/internal/legacydesktop"
 	"github.com/projectbluefin/chairlift/internal/navigation"
 	"github.com/projectbluefin/chairlift/internal/window"
 
 	"github.com/frostyard/snowkit/gobj"
+	sgtk "github.com/frostyard/snowkit/gtk"
 
 	"codeberg.org/puregotk/puregotk/v4/adw"
 	"codeberg.org/puregotk/puregotk/v4/gio"
 	"codeberg.org/puregotk/puregotk/v4/glib"
 	"codeberg.org/puregotk/puregotk/v4/gobject"
-	"codeberg.org/puregotk/puregotk/v4/gtk"
 )
 
 const appID = "io.projectbluefin.chairlift"
+
+// optionSetup is the long name of the --setup option, and with it the key
+// GLib uses for the option in the command-line dictionary it forwards to the
+// primary instance.
+const optionSetup = "setup"
+const optionFirstRun = "first-run"
+
+// optionAgentMode is the long name of the --agent-mode option, and with it the
+// key GLib uses for the option in the command-line dictionary it forwards to
+// the primary instance.
+const optionAgentMode = "agent-mode"
+
+// optionDXMode is the long name of the --dx-mode option, and with it the
+// key GLib uses for the option in the command-line dictionary it forwards to
+// the primary instance.
+const optionDXMode = "dx-mode"
+
+// optionAskBluefin is the long name of the --ask-bluefin option, and with it the
+// key GLib uses for the option in the command-line dictionary it forwards to
+// the primary instance.
+const optionAskBluefin = "ask-bluefin"
+
+// optionPromptFile is the long name of the --prompt-file option, which hands
+// --ask-bluefin a starting prompt to prefill in Goose.
+const optionPromptFile = "prompt-file"
 
 var (
 	gTypeApplication gobject.Type
@@ -31,8 +59,12 @@ var (
 // Application wraps the Adwaita Application as a proper GObject subtype
 type Application struct {
 	adw.Application
-	window *window.Window
-	dryRun bool
+	window              *window.Window
+	setupRequested      bool
+	agentModeRequested  bool
+	dxModeRequested     bool
+	askBluefinRequested bool
+	askBluefinReason    string
 }
 
 func init() {
@@ -60,24 +92,40 @@ func init() {
 				}
 				(*Application)(ptr).onActivate()
 			})
+			appClass.OverrideCommandLine(func(a *gio.Application, cl *gio.ApplicationCommandLine) int32 {
+				ptr := reg.Get(a.GoPointer())
+				if ptr == nil {
+					log.Fatal("Application instance not found")
+				}
+				return (*Application)(ptr).onCommandLine(cl)
+			})
 		},
 	})
 }
 
 // New creates a new ChairLift application
 func New() *Application {
-	obj := gobject.NewObject(gTypeApplication, "application_id", appID, "flags", gio.GApplicationFlagsNoneValue)
+	// HandlesCommandLine, not None: a second `chairlift --setup` against a
+	// running instance does not run this function at all, so a flag read
+	// from that process's os.Args can never reach the process owning the
+	// window. With this flag GLib forwards the parsed option dictionary to
+	// the primary instance's command_line handler, which is what makes
+	// --setup re-open the assistant at any time as README documents.
+	obj := gobject.NewObject(gTypeApplication, "application_id", appID, "flags", gio.GApplicationHandlesCommandLineValue, uintptr(0))
 	if obj == nil {
 		log.Fatal("Failed to create application")
 	}
 
 	app := (*Application)(appRegistry.Get(obj.GoPointer()))
 
-	// Check for --dry-run flag before GTK processes args
+	// Check for --dry-run before GTK processes args. Dry-run stays a local
+	// read: it is a property of this process's integrations, and a remote
+	// invocation must not be able to flip the mode of a running window.
+	// --setup is read from the option dictionary in onCommandLine instead,
+	// so it works for a remote invocation too.
 	for _, arg := range os.Args[1:] {
 		if arg == "--dry-run" || arg == "-d" {
 			log.Println("Running in dry-run mode")
-			app.dryRun = true
 			// One process-wide flag; every integration package reads
 			// dryrun.Enabled() directly, so a new integration cannot
 			// silently fall out of dry-run mode by missing a setter here.
@@ -86,7 +134,6 @@ func New() *Application {
 			// rows on a host that is not a Bluefin system. This is a no-op
 			// in every ordinary build; see imageinfo_override.go.
 			applyImageInfoOverride()
-			break
 		}
 	}
 
@@ -101,10 +148,203 @@ func New() *Application {
 		log.Printf("channel table loaded from %s", path)
 	}
 
+	go func() {
+		_ = legacydesktop.Clean()
+	}()
+
 	// Register command line options
 	app.registerOptions()
+	app.AddMainOption(optionFirstRun, 0, glib.GOptionFlagNoneValue, glib.GOptionArgNoneValue, "Open the first-run software wizard", "")
 
 	return app
+}
+
+// onCommandLine runs on the primary instance for every invocation, local or
+// remote, and owns the --setup and --agent-mode launch decisions.
+//
+// A remote invocation reaches here with the option dictionary GLib forwarded
+// from the other process; the primary's own os.Args says nothing about it.
+// When the window already exists the assistant is presented directly, because
+// activation reuses the window and deliberately does not re-run the first-run
+// check.
+func (a *Application) onCommandLine(cl *gio.ApplicationCommandLine) int32 {
+	setup := commandLineRequestsSetup(cl)
+	agentMode := commandLineRequestsAgentMode(cl)
+	askBluefin := commandLineRequestsAskBluefin(cl)
+	dxMode := commandLineRequestsDXMode(cl)
+	promptPath := commandLinePromptFile(cl)
+	running := a.window != nil
+
+	if promptPath != "" && !askBluefin {
+		log.Printf("app: --%s ignored without --%s", optionPromptFile, optionAskBluefin)
+	}
+
+	if askBluefin {
+		a.Hold()
+		go func() {
+			// The prompt is read here, off the main thread, and kept only in
+			// memory; its text is never logged.
+			promptUnreadable := false
+			if promptPath != "" {
+				if prompt, err := agentmode.ReadPromptFile(promptPath); err != nil {
+					log.Printf("app: ask bluefin prompt file not used: %v", err)
+					promptUnreadable = true
+				} else {
+					agentmode.HoldPrompt(prompt)
+				}
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			_, facts, _ := agentmode.ObserveLive(ctx)
+			cancel()
+			decision := agentmode.Dispatch(facts)
+			// Launch is plain exec and profile write, so it runs here; only
+			// GTK work goes to the main thread. Its context only gates the
+			// start and Launch's own bounded startup wait, so a Goose that
+			// dies while starting opens Agents with the failure; the probe's
+			// context is already spent.
+			if decision.Action == agentmode.DispatchLaunch {
+				_, launchErr := agentmode.Launch(context.Background(), facts, func(asyncErr error) {
+					log.Printf("app: goose desktop exited with error: %v", asyncErr)
+				})
+				if launchErr == nil {
+					if !promptUnreadable {
+						sgtk.RunOnMainThread(a.Release)
+						return
+					}
+					// Goose opened with an empty chat; open Agents with
+					// a toast saying why the question is missing.
+					decision.Reason = ""
+				} else {
+					log.Printf("app: launch goose desktop failed: %v", launchErr)
+					decision.Reason = "Couldn't open Goose. Try again."
+				}
+			}
+			// Unready or failed, a held prompt waits for the next Goose
+			// launch from the Agents page; say so, so it isn't lost.
+			if agentmode.PendingPrompt() != "" && decision.State != agentmode.StateUnsupported {
+				decision.Reason = agentmode.HeldPromptReason(decision.Reason)
+			}
+			if promptUnreadable {
+				decision.Reason = agentmode.UnreadablePromptReason(decision.Reason)
+			}
+			sgtk.RunOnMainThread(func() {
+				defer a.Release()
+				a.askBluefinRequested = true
+				a.askBluefinReason = decision.Reason
+
+				a.Activate()
+
+				if running && a.window != nil {
+					a.window.NavigateToAgentsPage()
+					a.window.ShowMissingPrerequisite(decision.Reason)
+				}
+			})
+		}()
+		return 0
+	}
+
+	// Consumed by onActivate when this invocation is the one that creates the
+	// window, so an explicit request skips the disposition probe instead of
+	// racing it to Present.
+	a.setupRequested = setup
+	a.agentModeRequested = agentMode
+	a.dxModeRequested = dxMode
+
+	a.Activate()
+
+	if setup && running && a.window != nil {
+		a.window.PresentFirstRun()
+	}
+	// A running instance opens the Agents page directly: activation reuses the
+	// window and deliberately does not re-run the first-run check, so the
+	// launch intent is handled here, mirroring --setup.
+	if agentMode && running && a.window != nil {
+		a.window.NavigateToAgentsPage()
+	}
+	// A running instance opens the Developer Mode detail directly for DX Mode.
+	if dxMode && running && a.window != nil {
+		a.window.NavigateToDXModePage()
+	}
+	return 0
+}
+
+// commandLineRequestsSetup reports whether the invocation carried --setup/-s.
+//
+// GLib keys the dictionary on the long option name, so the short form needs
+// no separate lookup.
+func commandLineRequestsSetup(cl *gio.ApplicationCommandLine) bool {
+	if cl == nil {
+		return false
+	}
+	opts := cl.GetOptionsDict()
+	if opts == nil {
+		return false
+	}
+	return opts.Contains(optionSetup) || opts.Contains(optionFirstRun)
+}
+
+// commandLineRequestsAgentMode reports whether the invocation carried
+// --agent-mode. GLib keys the dictionary on the long option name, so the short
+// form needs no separate lookup, exactly as commandLineRequestsSetup does for
+// --setup.
+func commandLineRequestsAgentMode(cl *gio.ApplicationCommandLine) bool {
+	if cl == nil {
+		return false
+	}
+	opts := cl.GetOptionsDict()
+	if opts == nil {
+		return false
+	}
+	return opts.Contains(optionAgentMode)
+}
+
+// commandLineRequestsDXMode reports whether the invocation carried --dx-mode.
+// GLib keys the dictionary on the long option name.
+func commandLineRequestsDXMode(cl *gio.ApplicationCommandLine) bool {
+	if cl == nil {
+		return false
+	}
+	opts := cl.GetOptionsDict()
+	if opts == nil {
+		return false
+	}
+	return opts.Contains(optionDXMode)
+}
+
+// commandLineRequestsAskBluefin reports whether the invocation carried
+// --ask-bluefin. GLib keys the dictionary on the long option name, so the short
+// form needs no separate lookup.
+func commandLineRequestsAskBluefin(cl *gio.ApplicationCommandLine) bool {
+	if cl == nil {
+		return false
+	}
+	opts := cl.GetOptionsDict()
+	if opts == nil {
+		return false
+	}
+	return opts.Contains(optionAskBluefin)
+}
+
+// commandLinePromptFile returns the --prompt-file path of the invocation, made
+// absolute against the invoking process's working directory: a remote
+// invocation's relative path names a file where it ran, not where the
+// primary instance did.
+func commandLinePromptFile(cl *gio.ApplicationCommandLine) string {
+	if cl == nil {
+		return ""
+	}
+	opts := cl.GetOptionsDict()
+	if opts == nil || !opts.Contains(optionPromptFile) {
+		return ""
+	}
+	stringType := glib.NewVariantType("s")
+	defer stringType.Free()
+	value := opts.LookupValue(optionPromptFile, stringType)
+	if value == nil {
+		return ""
+	}
+	defer value.Unref()
+	return agentmode.ResolvePromptPath(value.GetString(nil), cl.GetCwd())
 }
 
 // onActivate is called when the application is activated
@@ -112,7 +352,10 @@ func (a *Application) onActivate() {
 	activateStart := time.Now()
 	log.Println("ChairLift activated")
 
-	// Guard: reuse existing window if already created
+	// Guard: reuse existing window if already created. The first-run check
+	// deliberately does not re-run here — re-activating the application
+	// (clicking its icon) would otherwise rebuild the assistant's model and
+	// send a user who is mid-wizard back to the welcome screen.
 	if a.window != nil {
 		a.window.Present()
 		return
@@ -122,9 +365,41 @@ func (a *Application) onActivate() {
 	win := window.New(a.Application)
 	a.window = win
 	a.AddWindow(&win.Window)
+	a.registerQuitAction()
 	a.setupKeyboardShortcuts(win.NavigationItems())
 	win.Present()
+	win.CheckFirstRun(a.setupRequested)
+	if a.dxModeRequested {
+		win.NavigateToDXModePage()
+	} else if a.agentModeRequested || a.askBluefinRequested {
+		win.NavigateToAgentsPage()
+		if a.askBluefinRequested && a.askBluefinReason != "" {
+			win.ShowMissingPrerequisite(a.askBluefinReason)
+		}
+	}
 	log.Printf("app: window presented in %s (since activate)", time.Since(activateStart))
+}
+
+// registerQuitAction registers the app.quit action that navigation's
+// <Primary>q shortcut targets. GTK registers no quit action for an
+// application by default, so without this the accelerator
+// setupKeyboardShortcuts installs resolves to nothing and Ctrl+Q is
+// advertised in the shortcuts dialog while doing nothing.
+//
+// g_application_quit never emits close-request, so a bare Quit skipped the
+// update-in-progress guard and Ctrl+Q killed a running update mid-flight.
+// The action asks the window's shared guard first; when no update runs it
+// quits in one press, setup included.
+func (a *Application) registerQuitAction() {
+	quitAction := gio.NewSimpleAction("quit", nil)
+	quitActivateCb := func(action gio.SimpleAction, param uintptr) {
+		if a.window != nil && a.window.RefuseCloseWhileUpdating() {
+			return
+		}
+		a.Quit()
+	}
+	quitAction.ConnectActivate(&quitActivateCb)
+	a.AddAction(quitAction)
 }
 
 // setupKeyboardShortcuts sets up application-wide keyboard shortcuts
@@ -144,9 +419,44 @@ func (a *Application) registerOptions() {
 		"Don't make any changes to the system.",
 		"",
 	)
-}
-
-// GetGtkApplication returns the underlying GTK Application
-func (a *Application) GetGtkApplication() *gtk.Application {
-	return &a.Application.Application
+	a.AddMainOption(
+		optionSetup,
+		's',
+		glib.GOptionFlagNoneValue,
+		glib.GOptionArgNoneValue,
+		"Display the first-run onboarding assistant.",
+		"",
+	)
+	a.AddMainOption(
+		optionAgentMode,
+		0,
+		glib.GOptionFlagNoneValue,
+		glib.GOptionArgNoneValue,
+		"Open the Agent Mode page.",
+		"",
+	)
+	a.AddMainOption(
+		optionAskBluefin,
+		0,
+		glib.GOptionFlagNoneValue,
+		glib.GOptionArgNoneValue,
+		"Launch Ask Bluefin (Goose) or open Agent Mode.",
+		"",
+	)
+	a.AddMainOption(
+		optionPromptFile,
+		0,
+		glib.GOptionFlagNoneValue,
+		glib.GOptionArgStringValue,
+		"With --ask-bluefin, prefill Goose with the prompt in PATH.",
+		"PATH",
+	)
+	a.AddMainOption(
+		optionDXMode,
+		0,
+		glib.GOptionFlagNoneValue,
+		glib.GOptionArgNoneValue,
+		"Open the Developer Mode toggle screen.",
+		"",
+	)
 }

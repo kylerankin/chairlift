@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"regexp"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -16,11 +17,12 @@ import (
 // sampling a single page/group, per the repo's
 // regression-tests-must-cover-every-collection-entry skill.
 var pageNames = []string{
-	"system_page",
+	"agents_page",
 	"updates_page",
 	"applications_page",
 	"maintenance_page",
 	"features_page",
+	"livery_page",
 	"help_page",
 }
 
@@ -28,11 +30,12 @@ var pageNames = []string{
 // IsGroupEnabled/GetGroupConfig switch on, so tests can loop generically.
 func pagesOf(cfg *Config) map[string]PageConfig {
 	return map[string]PageConfig{
-		"system_page":       cfg.SystemPage,
+		"agents_page":       cfg.AgentsPage,
 		"updates_page":      cfg.UpdatesPage,
 		"applications_page": cfg.ApplicationsPage,
 		"maintenance_page":  cfg.MaintenancePage,
 		"features_page":     cfg.FeaturesPage,
+		"livery_page":       cfg.LiveryPage,
 		"help_page":         cfg.HelpPage,
 	}
 }
@@ -46,7 +49,13 @@ func groupsEqual(t *testing.T, page, name string, got, want GroupConfig) {
 
 func writeConfigFile(t *testing.T, content string) string {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "config.yml")
+	dir := t.TempDir()
+	// These tests exercise administrator/package-owned configuration
+	// semantics, so the temporary directory stands in for a trusted tier;
+	// otherwise validateEffectiveSudoProvenance would reject any example
+	// that enables a group carrying a privileged action.
+	trustConfigDirectory(t, dir)
+	path := filepath.Join(dir, "config.yml")
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatalf("writing test config file: %v", err)
 	}
@@ -63,6 +72,15 @@ func withConfigPaths(t *testing.T, paths []string) {
 	orig := configPaths
 	t.Cleanup(func() { configPaths = orig })
 	configPaths = paths
+}
+
+// withTrustedConfigPaths overrides the fixed candidates Load() treats as
+// trusted for the duration of the calling test.
+func withTrustedConfigPaths(t *testing.T, paths []string) {
+	t.Helper()
+	orig := trustedConfigPaths
+	t.Cleanup(func() { trustedConfigPaths = orig })
+	trustedConfigPaths = paths
 }
 
 // TestLoadFromPathUnreadablePathReturnsError confirms loadFromPath surfaces
@@ -106,6 +124,67 @@ func TestLoadAbsentFileFallsBackToDefaultConfig(t *testing.T) {
 	}
 }
 
+func TestDevelopmentConfigShadowsRepositoryDefault(t *testing.T) {
+	wantPaths := []string{
+		"/etc/chairlift/config.yml",
+		"/usr/share/chairlift/config.yml",
+		"config.dev.yml",
+		"config.yml",
+	}
+	if !reflect.DeepEqual(configPaths, wantPaths) {
+		t.Fatalf("configPaths = %v, want %v", configPaths, wantPaths)
+	}
+
+	root := t.TempDir()
+	exeDir := filepath.Join(root, "bin")
+	cwd := filepath.Join(root, "checkout")
+	if err := os.MkdirAll(exeDir, 0o755); err != nil {
+		t.Fatalf("creating executable directory: %v", err)
+	}
+	if err := os.MkdirAll(cwd, 0o755); err != nil {
+		t.Fatalf("creating checkout directory: %v", err)
+	}
+	withConfigPaths(t, []string{
+		filepath.Join(root, "etc", "chairlift", "config.yml"),
+		filepath.Join(root, "usr", "share", "chairlift", "config.yml"),
+		"config.dev.yml",
+		"config.yml",
+	})
+	withPathResolutionSeams(t,
+		func() (string, error) { return filepath.Join(exeDir, "chairlift"), nil },
+		func() (string, error) { return cwd, nil },
+	)
+
+	devPath := filepath.Join(cwd, "config.dev.yml")
+	if err := os.WriteFile(devPath, []byte("maintenance_page:\n  maintenance_cleanup_group:\n    actions:\n      - title: Clean Up Boot Old Entries\n        script: /usr/libexec/bls-gc\n"), 0o600); err != nil {
+		t.Fatalf("writing development config: %v", err)
+	}
+	repoPath := filepath.Join(cwd, "config.yml")
+	if err := os.WriteFile(repoPath, []byte("maintenance_page:\n  maintenance_cleanup_group:\n    actions:\n      - title: Clean Up Boot Old Entries\n        script: /usr/libexec/bls-gc\n        sudo: true\n"), 0o600); err != nil {
+		t.Fatalf("writing repository config: %v", err)
+	}
+
+	var reads []string
+	withReadFile(t, func(path string) ([]byte, error) {
+		reads = append(reads, path)
+		return os.ReadFile(path)
+	})
+
+	cfg, loadErr := Load()
+	if loadErr != nil {
+		t.Fatalf("Load() error = %v, want nil", loadErr)
+	}
+	got := cfg.MaintenancePage["maintenance_cleanup_group"].Actions
+	want := []ActionConfig{{Title: "Clean Up Boot Old Entries", Script: "/usr/libexec/bls-gc", Sudo: false}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("maintenance_cleanup_group.Actions = %+v, want %+v", got, want)
+	}
+	wantReads := []string{configPaths[0], configPaths[1], devPath}
+	if !reflect.DeepEqual(reads, wantReads) {
+		t.Fatalf("read paths = %v, want %v", reads, wantReads)
+	}
+}
+
 // TestMaintenanceCleanupGroupDefaultConsistentAcrossAbsentAndOmitted pins
 // down that maintenance_cleanup_group resolves to the identical
 // GroupConfig{Enabled:false, Actions:[bls-gc entry]} whether the config file
@@ -141,7 +220,7 @@ func TestMaintenanceCleanupGroupDefaultConsistentAcrossAbsentAndOmitted(t *testi
 
 	// Partial-file case: mentions maintenance_page and a sibling group, but
 	// omits maintenance_cleanup_group entirely.
-	path := writeConfigFile(t, "maintenance_page:\n  maintenance_brew_group:\n    enabled: false\n")
+	path := writeConfigFile(t, "maintenance_page:\n  maintenance_freespace_group:\n    enabled: false\n")
 	partialCfg, err := loadFromPath(path)
 	if err != nil {
 		t.Fatalf("loadFromPath(%q): %v", path, err)
@@ -151,7 +230,7 @@ func TestMaintenanceCleanupGroupDefaultConsistentAcrossAbsentAndOmitted(t *testi
 }
 
 // defaultBearingGroups lists every group in defaultConfig() that defines a
-// non-Enabled default field (AppID, Website/Issues/Chat, Actions, or
+// non-Enabled default field (Website/Issues/Chat, Actions, or
 // BundlesPaths). Enabled-only-overlay coverage loops over all of them, not
 // just one, per the repo's regression-tests-must-cover-every-collection-entry
 // skill.
@@ -159,8 +238,6 @@ var defaultBearingGroups = []struct {
 	page  string
 	group string
 }{
-	{"system_page", "health_group"},
-	{"applications_page", "applications_installed_group"},
 	{"help_page", "help_resources_group"},
 	{"maintenance_page", "maintenance_cleanup_group"},
 	{"applications_page", "brew_bundles_group"},
@@ -203,22 +280,22 @@ func TestOmittedEnabledInheritsDocumentedDefault(t *testing.T) {
 	def := defaultConfig()
 
 	t.Run("ordinary group inherits default enabled=true", func(t *testing.T) {
-		if !def.SystemPage["health_group"].Enabled {
-			t.Fatal("test setup assumption violated: health_group default is not enabled")
+		if !def.AgentsPage["agents_group"].Enabled {
+			t.Fatal("test setup assumption violated: agents_group default is not enabled")
 		}
 
-		path := writeConfigFile(t, "system_page:\n  health_group:\n    app_id: com.example.Other\n")
+		path := writeConfigFile(t, "agents_page:\n  agents_group:\n    app_id: com.example.Other\n")
 		cfg, err := loadFromPath(path)
 		if err != nil {
 			t.Fatalf("loadFromPath(%q): %v", path, err)
 		}
 
-		got := cfg.SystemPage["health_group"]
+		got := cfg.AgentsPage["agents_group"]
 		if !got.Enabled {
-			t.Errorf("health_group: omitted `enabled` got %v, want true (default)", got.Enabled)
+			t.Errorf("agents_group: omitted `enabled` got %v, want true (default)", got.Enabled)
 		}
 		if got.AppID != "com.example.Other" {
-			t.Errorf("health_group: AppID override not applied, got %q", got.AppID)
+			t.Errorf("agents_group: AppID override not applied, got %q", got.AppID)
 		}
 	})
 
@@ -231,19 +308,17 @@ func TestOmittedEnabledInheritsDocumentedDefault(t *testing.T) {
 			"  maintenance_cleanup_group:\n" +
 			"    actions:\n" +
 			"      - title: Custom\n" +
-			"        script: /usr/libexec/custom\n" +
-			"        sudo: true\n"
+			"        script: /usr/libexec/custom\n"
 		path := writeConfigFile(t, content)
 		cfg, err := loadFromPath(path)
 		if err != nil {
 			t.Fatalf("loadFromPath(%q): %v", path, err)
 		}
-
 		got := cfg.MaintenancePage["maintenance_cleanup_group"]
 		if got.Enabled {
 			t.Errorf("maintenance_cleanup_group: omitted `enabled` got %v, want false (default, not the Go zero-value coincidence)", got.Enabled)
 		}
-		wantActions := []ActionConfig{{Title: "Custom", Script: "/usr/libexec/custom", Sudo: true}}
+		wantActions := []ActionConfig{{Title: "Custom", Script: "/usr/libexec/custom", Sudo: false}}
 		if !reflect.DeepEqual(got.Actions, wantActions) {
 			t.Errorf("maintenance_cleanup_group: Actions override not applied, got %+v, want %+v", got.Actions, wantActions)
 		}
@@ -323,6 +398,18 @@ func TestNonEmptySliceOverlayReplacesDefaultContents(t *testing.T) {
 	})
 }
 
+func TestDefaultConfigBrewBundlesPaths(t *testing.T) {
+	want := []string{
+		"/usr/share/ublue-os/homebrew",
+		"/usr/share/chairlift/bundles",
+		"/etc/chairlift/bundles",
+	}
+	got := defaultConfig().ApplicationsPage["brew_bundles_group"].BundlesPaths
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("defaultConfig().ApplicationsPage[\"brew_bundles_group\"].BundlesPaths = %+v, want %+v", got, want)
+	}
+}
+
 // TestGroupEnabledMatchesExpectedForEveryGroup calls IsGroupEnabled for
 // every (page, group) pair defaultConfig() defines, both for the
 // absent-file fallback config and for a partial-file config that overrides
@@ -348,8 +435,8 @@ func TestGroupEnabledMatchesExpectedForEveryGroup(t *testing.T) {
 	})
 
 	t.Run("partial file overrides several groups", func(t *testing.T) {
-		content := "system_page:\n" +
-			"  health_group:\n" +
+		content := "agents_page:\n" +
+			"  agents_group:\n" +
 			"    enabled: false\n" +
 			"updates_page:\n" +
 			"  brew_trust_group:\n" +
@@ -368,7 +455,7 @@ func TestGroupEnabledMatchesExpectedForEveryGroup(t *testing.T) {
 
 		type pageGroup struct{ page, group string }
 		overrides := map[pageGroup]bool{
-			{"system_page", "health_group"}:                   false,
+			{"agents_page", "agents_group"}:                   false,
 			{"updates_page", "brew_trust_group"}:              false,
 			{"maintenance_page", "maintenance_cleanup_group"}: true,
 			{"help_page", "help_resources_group"}:             false,
@@ -402,19 +489,20 @@ func repoRoot() string {
 }
 
 // TestUpdatesPageDefaultGroupSetIsExact asserts that defaultConfig()'s
-// updates_page group set is exactly the six groups the Updates page view
+// updates_page group set is exactly the eight groups the Updates page view
 // still builds. This is an exact-set equality check (length plus every
 // expected key present), not a single named-key absence lookup, so it fails
 // loudly whether a formerly-shipped, now-removed group is silently
 // re-added under its old name or under any new one.
 func TestUpdatesPageDefaultGroupSetIsExact(t *testing.T) {
 	want := map[string]bool{
-		"update_all_group":        true,
+		"automatic_updates_group": true,
 		"bootc_updates_group":     true,
-		"sysupdate_updates_group": true,
 		"flatpak_updates_group":   true,
 		"brew_updates_group":      true,
 		"brew_trust_group":        true,
+		"channel_group":           true,
+		"bootc_status_group":      true,
 	}
 
 	got := defaultConfig().UpdatesPage
@@ -436,69 +524,148 @@ func groupKeys(page PageConfig) []string {
 	return keys
 }
 
-// isGroupEnabledCallPattern matches config.IsGroupEnabled("updates_page",
-// "<name>") calls in Go source text, capturing the group-name argument.
-var isGroupEnabledCallPattern = regexp.MustCompile(`IsGroupEnabled\(\s*"updates_page"\s*,\s*"([^"]+)"\s*\)`)
+// Both provider policies and secondary widget groups gate Updates controls.
+// The unified shell's policies live in the window; remaining rows are in views.
+var groupEnabledCallPattern = regexp.MustCompile(`(?:groupEnabled|sourcePolicy)\(\s*"updates_page"\s*,\s*"([^"]+)"\s*\)`)
 
-// TestUpdatesPageDefaultGroupsHaveBuilders reads internal/views/updates_page.go
-// as plain text (internal/config must never import internal/views or the
-// GTK bindings package, directly or transitively, per
-// docs/agents/skills/gtk-headless-tests.md) and asserts every group
-// defaultConfig() defines for updates_page is gated by a real
-// config.IsGroupEnabled("updates_page", ...) call in that view file. This is
-// the regression test that would have caught a group being
-// declared/defaulted/shipped/documented with no view ever checking it: a
-// group with no matching IsGroupEnabled call fails this test.
+// TestUpdatesPageDefaultGroupsHaveBuilders checks every shipped group against
+// the complete page composition without importing GTK bindings.
 func TestUpdatesPageDefaultGroupsHaveBuilders(t *testing.T) {
-	path := filepath.Join(repoRoot(), "internal", "views", "updates_page.go")
-	src, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("reading %s: %v", path, err)
-	}
-
-	matches := isGroupEnabledCallPattern.FindAllStringSubmatch(string(src), -1)
-	if len(matches) == 0 {
-		t.Fatalf("found zero IsGroupEnabled(\"updates_page\", ...) calls in %s; regex may no longer match the source", path)
-	}
-
-	gated := make(map[string]bool, len(matches))
-	for _, m := range matches {
-		gated[m[1]] = true
+	gated := make(map[string]bool)
+	for _, relative := range []string{"internal/views/updates_page.go", "internal/window/window.go"} {
+		path := filepath.Join(repoRoot(), relative)
+		src, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("reading %s: %v", path, err)
+		}
+		for _, match := range groupEnabledCallPattern.FindAllStringSubmatch(string(src), -1) {
+			gated[match[1]] = true
+		}
 	}
 
 	for name := range defaultConfig().UpdatesPage {
 		if !gated[name] {
-			t.Errorf("defaultConfig().UpdatesPage group %q has no matching config.IsGroupEnabled(\"updates_page\", ...) call in %s", name, path)
+			t.Errorf("defaultConfig().UpdatesPage group %q has no page composition policy", name)
 		}
 	}
 }
 
-// TestAIOverridesMergeLikeEveryOtherGroupField covers the two settings the
-// local-AI group adds: a per-vendor image map and the served model.
-func TestAIOverridesMergeLikeEveryOtherGroupField(t *testing.T) {
-	path := writeConfigFile(t, "features_page:\n"+
-		"  ai_group:\n"+
-		"    ai_images:\n"+
-		"      nvidia: registry.example.internal/ramalama/cuda:pinned\n"+
-		"    ai_model: ollama://qwen2.5:7b\n")
+// TestUntrustedConfigCannotEnableInheritedSudoAction covers the merged-config
+// provenance gate: a config in an untrusted location that only flips
+// maintenance_cleanup_group on inherits defaultConfig()'s privileged bls-gc
+// action without ever spelling out sudo: true, so the node-level gate never
+// sees it. Loading must fail closed instead.
+func TestUntrustedConfigCannotEnableInheritedSudoAction(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yml")
+	if err := os.WriteFile(path, []byte("maintenance_page:\n  maintenance_cleanup_group:\n    enabled: true\n"), 0o600); err != nil {
+		t.Fatalf("writing config: %v", err)
+	}
+
+	cfg, err := loadFromPath(path)
+	if err == nil {
+		t.Fatalf("loadFromPath(%q) err = nil, want provenance failure (cfg = %+v)", path, cfg)
+	}
+	if err.Kind != KindSchema {
+		t.Fatalf("err.Kind = %v, want %v", err.Kind, KindSchema)
+	}
+	if !strings.Contains(err.Detail, "sudo actions are only permitted in trusted configurations") {
+		t.Fatalf("err.Detail = %q, want provenance error", err.Detail)
+	}
+}
+
+// TestUntrustedConfigKeepingSudoGroupDisabledLoads pins the other half of the
+// merged-config gate: the privileged default ships disabled, so an untrusted
+// config that leaves it alone still loads.
+func TestUntrustedConfigKeepingSudoGroupDisabledLoads(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yml")
+	if err := os.WriteFile(path, []byte("maintenance_page:\n  maintenance_freespace_group:\n    enabled: true\n"), 0o600); err != nil {
+		t.Fatalf("writing config: %v", err)
+	}
 
 	cfg, err := loadFromPath(path)
 	if err != nil {
-		t.Fatalf("loadFromPath: %v", err)
+		t.Fatalf("loadFromPath(%q) err = %v, want nil", path, err)
+	}
+	if cfg.MaintenancePage["maintenance_cleanup_group"].Enabled {
+		t.Fatal("maintenance_cleanup_group = enabled, want disabled default")
+	}
+}
+
+// TestTrustedConfigMayEnableInheritedSudoAction confirms the merged-config
+// gate keys on provenance, not on the action itself: the same file under a
+// trusted directory loads with the privileged default intact.
+func TestTrustedConfigMayEnableInheritedSudoAction(t *testing.T) {
+	dir := t.TempDir()
+	withTrustedConfigDirectories(t, []string{dir})
+	path := filepath.Join(dir, "config.yml")
+	if err := os.WriteFile(path, []byte("maintenance_page:\n  maintenance_cleanup_group:\n    enabled: true\n"), 0o600); err != nil {
+		t.Fatalf("writing config: %v", err)
 	}
 
-	group := cfg.GetGroupConfig("features_page", "ai_group")
-	if group == nil {
-		t.Fatal("ai_group is missing from the merged config")
+	cfg, err := loadFromPath(path)
+	if err != nil {
+		t.Fatalf("loadFromPath(%q) err = %v, want nil", path, err)
 	}
-	if got := group.AIImages["nvidia"]; got != "registry.example.internal/ramalama/cuda:pinned" {
-		t.Errorf("AIImages[nvidia] = %q", got)
+	group := cfg.MaintenancePage["maintenance_cleanup_group"]
+	if !group.Enabled || len(group.Actions) != 1 || !group.Actions[0].Sudo {
+		t.Fatalf("maintenance_cleanup_group = %+v, want enabled with the privileged default action", group)
 	}
-	if group.AIModel != "ollama://qwen2.5:7b" {
-		t.Errorf("AIModel = %q", group.AIModel)
+}
+
+// TestRepoConfigYmlLoadsCleanlyUnderStrictValidation verifies that the shipped
+// repository config.yml passes strict schema validation when loaded directly
+// from disk via loadFromPath. This ensures that groups and keys defined in
+// config.yml stay in sync with defaultConfig() and cannot silently fail closed
+// in production.
+func TestRepoConfigYmlLoadsCleanlyUnderStrictValidation(t *testing.T) {
+	root := repoRoot()
+	trustConfigDirectory(t, root)
+	path := filepath.Join(root, "config.yml")
+	cfg, err := loadFromPath(path)
+	if err != nil {
+		t.Fatalf("loadFromPath(%q): %v", path, err)
 	}
-	// Overriding one vendor must not disturb the group's own default state.
-	if !group.Enabled {
-		t.Error("ai_group was disabled by an unrelated override")
+	if cfg == nil {
+		t.Fatalf("loadFromPath(%q): returned nil config without error", path)
+	}
+}
+
+func TestWSLBackendDefaultAndOverride(t *testing.T) {
+	def := defaultConfig()
+	if def.FeaturesPage["dx_group"].WSLBackend != "nsl" {
+		t.Fatalf("default dx_group.WSLBackend = %q, want %q", def.FeaturesPage["dx_group"].WSLBackend, "nsl")
+	}
+
+	t.Run("override to lima", func(t *testing.T) {
+		path := writeConfigFile(t, "features_page:\n  dx_group:\n    wsl_backend: lima\n")
+		cfg, err := loadFromPath(path)
+		if err != nil {
+			t.Fatalf("loadFromPath(%q): %v", path, err)
+		}
+		if got := cfg.FeaturesPage["dx_group"].WSLBackend; got != "lima" {
+			t.Errorf("dx_group.WSLBackend = %q, want %q", got, "lima")
+		}
+	})
+
+	t.Run("explicit nsl", func(t *testing.T) {
+		path := writeConfigFile(t, "features_page:\n  dx_group:\n    wsl_backend: nsl\n")
+		cfg, err := loadFromPath(path)
+		if err != nil {
+			t.Fatalf("loadFromPath(%q): %v", path, err)
+		}
+		if got := cfg.FeaturesPage["dx_group"].WSLBackend; got != "nsl" {
+			t.Errorf("dx_group.WSLBackend = %q, want %q", got, "nsl")
+		}
+	})
+}
+
+func TestWSLBackendRejectsUnknownValue(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yml")
+	if err := os.WriteFile(path, []byte("features_page:\n  dx_group:\n    enabled: true\n    wsl_backend: lmia\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, loadErr := loadFromPath(path); loadErr == nil {
+		t.Fatal("wsl_backend \"lmia\" loaded without error")
 	}
 }

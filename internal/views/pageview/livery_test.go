@@ -1,0 +1,202 @@
+package pageview
+
+import (
+	"strings"
+	"testing"
+
+	"github.com/projectbluefin/chairlift/internal/livery"
+)
+
+// TestChoicesRoundTripForEveryFoundation covers the whole catalog plus the
+// custom sentinel, so an entry whose index did not survive the round trip
+// could not pass.
+func TestChoicesRoundTripForEveryFoundation(t *testing.T) {
+	for _, f := range livery.Foundations() {
+		choice := LiveryChoices(f.ID)
+		if got := LiveryIDForIndex(choice.Selected); got != f.ID {
+			t.Errorf("LiveryChoices(%q) selected %d, which maps back to %q", f.ID, choice.Selected, got)
+		}
+	}
+	custom := LiveryChoices(livery.CustomID)
+	if got := LiveryIDForIndex(custom.Selected); got != livery.CustomID {
+		t.Errorf("custom selection mapped back to %q", got)
+	}
+}
+
+// TestFoundationTilesMarkExactlyTheSelection holds the gallery's model to
+// the grid it drives: every foundation, in catalog order (tile i is grid
+// child i), with the confirmed selection — and only it — marked, for every
+// entry in the catalog (W3-12).
+func TestFoundationTilesMarkExactlyTheSelection(t *testing.T) {
+	catalog := livery.Foundations()
+	for _, want := range catalog {
+		tiles := LiveryFoundationTiles(want.ID)
+		if len(tiles) != len(catalog) {
+			t.Fatalf("LiveryFoundationTiles(%q) has %d tiles, catalog has %d", want.ID, len(tiles), len(catalog))
+		}
+		for i, tile := range tiles {
+			if tile.ID != catalog[i].ID {
+				t.Errorf("tile %d is %q, catalog position %d is %q", i, tile.ID, i, catalog[i].ID)
+			}
+			if tile.Selected != (tile.ID == want.ID) {
+				t.Errorf("selection %q: tile %q selected=%v", want.ID, tile.ID, tile.Selected)
+			}
+		}
+	}
+	for _, none := range []string{livery.CustomID, "", "no-such-foundation"} {
+		for _, tile := range LiveryFoundationTiles(none) {
+			if tile.Selected {
+				t.Errorf("selection %q marked tile %q", none, tile.ID)
+			}
+		}
+	}
+}
+
+// TestChooserEscapeClearsAQueryThenCloses pins the chooser's Escape: the
+// search field consumes the key, so an empty field must close the dialog —
+// the state it opens in — and a typed query is cleared first (W3-03).
+func TestChooserEscapeClearsAQueryThenCloses(t *testing.T) {
+	if !LiveryChooserEscapeCloses("") {
+		t.Error("Escape in an empty chooser search did not close the chooser")
+	}
+	for _, query := range []string{"gnome", " "} {
+		if LiveryChooserEscapeCloses(query) {
+			t.Errorf("Escape with query %q closed the chooser instead of clearing it", query)
+		}
+	}
+}
+
+// TestUnknownSelectionFallsBackToTheDefault asserts a stale dconf value lands
+// the combo somewhere valid rather than leaving it unselected.
+func TestUnknownSelectionFallsBackToTheDefault(t *testing.T) {
+	choice := LiveryChoices("retired-foundation")
+	if got := LiveryIDForIndex(choice.Selected); got != livery.DefaultID {
+		t.Errorf("unknown selection resolved to %q, want %q", got, livery.DefaultID)
+	}
+}
+
+// TestDockRowNamesItsFullReach is a wording regression test with teeth: the
+// Files mark is shared by every surface GNOME draws that application on, and
+// a subtitle mentioning only the dock would understate what the switch does.
+func TestAppGridTextCoversGNOMEAndPlasmaAvailability(t *testing.T) {
+	if got := LiveryAppGridRow().Title; got != "Customize the App Launcher Icon" {
+		t.Errorf("app-grid title = %q, want %q", got, "Customize the App Launcher Icon")
+	}
+	if LiveryAppGridRow().Subtitle == "" {
+		t.Error("app-grid row has no subtitle")
+	}
+	if got := LiveryAppGridGroupDescription(true); got != LiveryAppGridFragment {
+		t.Errorf("available app-grid description = %q, want %q", got, LiveryAppGridFragment)
+	}
+	if got := LiveryAppGridGroupDescription(false); !strings.Contains(strings.ToLower(got), "not available") {
+		t.Errorf("unavailable app-grid description = %q, want it to say the icon is not available", got)
+	}
+}
+
+func TestDockRowNamesItsFullReach(t *testing.T) {
+	if got := LiveryPanelRow().Title; got != "Customize the Top Bar Icon" {
+		t.Errorf("panel title = %q, want %q", got, "Customize the Top Bar Icon")
+	}
+	if strings.Contains(LiveryPanelRow().Subtitle, "colour") {
+		t.Errorf("panel subtitle contains British spelling 'colour': %q", LiveryPanelRow().Subtitle)
+	}
+	if strings.Contains(LiveryDockRow().Subtitle, "colour") {
+		t.Errorf("dock subtitle contains British spelling 'colour': %q", LiveryDockRow().Subtitle)
+	}
+	subtitle := strings.ToLower(LiveryDockRow().Subtitle)
+	for _, surface := range []string{"dock", "app grid", "window switcher"} {
+		if !strings.Contains(subtitle, surface) {
+			t.Errorf("dock subtitle %q does not mention %q", subtitle, surface)
+		}
+	}
+}
+
+// TestRotationRowWarnsForASourceBuild asserts the switch says when the unit
+// it writes is tied to a disposable path, rather than failing silently at
+// some future login.
+func TestRotationRowWarnsForASourceBuild(t *testing.T) {
+	installed := LiveryRotationRow(true).Subtitle
+	source := LiveryRotationRow(false).Subtitle
+	if installed == source {
+		t.Fatal("a source build gets the same promise as an installed one")
+	}
+	if !strings.Contains(strings.ToLower(source), "moved or reinstalled") {
+		t.Errorf("source-build subtitle %q does not explain the dependency", source)
+	}
+}
+
+// TestRotationIsUnavailableForACustomMark holds the UI half of the rotation
+// guard: livery.Rotate refuses to advance a section pinned to the user's own
+// SVG, so the switch that arms it must not stay operable for that selection.
+func TestRotationIsUnavailableForACustomMark(t *testing.T) {
+	if LiveryRotationAvailable(true, livery.CustomID) {
+		t.Error("rotation offered for a custom mark, which livery.Rotate will not advance")
+	}
+	if !LiveryRotationAvailable(true, livery.DefaultID) {
+		t.Error("rotation refused for a catalog mark in an available section")
+	}
+	if LiveryRotationAvailable(false, livery.DefaultID) {
+		t.Error("rotation offered for a section that is not available")
+	}
+}
+
+// TestNoResultsRowNamesTheCatalogItSearched holds issue #350: the brand and
+// mark choosers search Simple Icons and the foundation marks, so their empty
+// result must neither blame cncf/artwork nor call the missing item a project.
+func TestNoResultsRowNamesTheCatalogItSearched(t *testing.T) {
+	cases := []struct {
+		surface livery.Surface
+		title   string
+		catalog string
+	}{
+		{livery.AppGrid, "No Matching Brand", "No brand matches"},
+		{livery.Panel, "No Matching Mark", "No mark matches"},
+		{livery.Dock, "No Matching Project", "No project matches"},
+	}
+	for _, tc := range cases {
+		row := LiveryNoResultsRow(tc.surface, "zzq")
+		if row.Title != tc.title {
+			t.Errorf("surface %d: title %q, want %q", tc.surface, row.Title, tc.title)
+		}
+		if !strings.Contains(row.Subtitle, tc.catalog) || !strings.Contains(row.Subtitle, `"zzq"`) {
+			t.Errorf("surface %d: subtitle %q does not name %q and the query", tc.surface, row.Subtitle, tc.catalog)
+		}
+		if tc.surface != livery.Dock && strings.Contains(row.Subtitle, "cncf/artwork") {
+			t.Errorf("surface %d: subtitle %q blames cncf/artwork", tc.surface, row.Subtitle)
+		}
+	}
+}
+
+// TestSelectedRowsNameTheCustomFileOnEverySurface holds that a custom
+// selection still names its file after a reload, as it does right after the
+// pick. The brand and project rows once answered "Your own file" on load
+// while the panel row kept the path.
+func TestSelectedRowsNameTheCustomFileOnEverySurface(t *testing.T) {
+	const path = "/home/u/mark.svg"
+	want := LiveryCustomRow(path).Subtitle
+	rows := map[string]Row{
+		"brand":      LiverySelectedBrandRow(livery.CustomID, path),
+		"project":    LiverySelectedProjectRow(livery.CustomID, path),
+		"foundation": LiverySelectedFoundationRow(livery.CustomID, path),
+	}
+	for name, row := range rows {
+		if row.Subtitle != want {
+			t.Errorf("%s row subtitle %q, want %q", name, row.Subtitle, want)
+		}
+	}
+	if got := LiverySelectedProjectRow(livery.DefaultCNCFID, path).Subtitle; got == want {
+		t.Errorf("a catalog project row shows the custom path %q", got)
+	}
+}
+
+// A failed Livery step is logged in full; the toast stays plain.
+func TestLiveryFailureIsPlain(t *testing.T) {
+	download := LiveryFailure("fetching that brand mark")
+	if !strings.Contains(download, "internet connection") {
+		t.Errorf("download failure %q does not point at the connection", download)
+	}
+	other := LiveryFailure("saving the selection")
+	if other == download || !strings.HasPrefix(other, "Couldn't") {
+		t.Errorf("non-download failure %q is not a plain retry message", other)
+	}
+}

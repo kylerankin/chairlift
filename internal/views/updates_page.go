@@ -1,24 +1,23 @@
 package views
 
 import (
-	"errors"
 	"fmt"
 	"log"
 	"sync"
-	"time"
 
 	"github.com/projectbluefin/chairlift/internal/bootc"
 	"github.com/projectbluefin/chairlift/internal/dryrun"
-	"github.com/projectbluefin/chairlift/internal/flatpak"
 	"github.com/projectbluefin/chairlift/internal/homebrew"
-	"github.com/projectbluefin/chairlift/internal/sysupdate"
+	"github.com/projectbluefin/chairlift/internal/imageinfo"
+	"github.com/projectbluefin/chairlift/internal/stageexec"
 	"github.com/projectbluefin/chairlift/internal/ublue"
+	"github.com/projectbluefin/chairlift/internal/ubluehelper"
+	"github.com/projectbluefin/chairlift/internal/updateflow"
 	"github.com/projectbluefin/chairlift/internal/views/actionmsg"
-	"github.com/projectbluefin/chairlift/internal/views/actionstate"
-	"github.com/projectbluefin/chairlift/internal/views/badgestate"
-	"github.com/projectbluefin/chairlift/internal/views/flatpakstatus"
+	"github.com/projectbluefin/chairlift/internal/views/activity"
 	"github.com/projectbluefin/chairlift/internal/views/pageview"
-	"github.com/projectbluefin/chairlift/internal/views/trustmsg"
+	"github.com/projectbluefin/chairlift/internal/views/progresslog"
+	"github.com/projectbluefin/chairlift/internal/views/rowset"
 
 	sgtk "github.com/frostyard/snowkit/gtk"
 
@@ -26,535 +25,393 @@ import (
 	"codeberg.org/puregotk/puregotk/v4/gtk"
 )
 
-// buildUpdatesPage builds the Updates page content
+// buildUpdatesPage builds the Updates page content. The page owns the whole
+// update story for this machine: what it is running now, what is waiting,
+// the applications and tools that update separately, and — at the bottom,
+// where a person looks only when they mean to — the two choices that
+// replace the operating system itself.
 func (uh *UserHome) buildUpdatesPage() {
 	page := uh.updatesPrefsPage
 	if page == nil {
 		return
 	}
-
-	// Update All leads the page: one action covering every provider this
-	// host can update. The per-provider groups below it stay available for
-	// anything it does not cover.
-	if uh.config.IsGroupEnabled("updates_page", "update_all_group") {
-		uh.buildUpdateAllGroup(page)
+	// Whether this machine updates itself on a schedule. The act of
+	// updating now belongs to the status-first shell above this page
+	// (internal/updateflow); this is the preference about the future.
+	if uh.groupEnabled("updates_page", "automatic_updates_group") {
+		uh.buildAutomaticUpdatesGroup(page)
 	}
 
-	// bootc System Updates group - built hidden, shown asynchronously on
+	// What this machine is running, in words. Built hidden and revealed
+	// asynchronously, because reading it requires an exec.
+	if uh.groupEnabled("updates_page", "bootc_status_group") {
+		uh.buildSystemVersionGroup(page)
+	}
+
+	// bootc system updates group - built hidden, shown asynchronously on
 	// bootc hosts that ship the update-stage script.
-	if uh.config.IsGroupEnabled("updates_page", "bootc_updates_group") {
+	if uh.groupEnabled("updates_page", "bootc_updates_group") {
 		group := adw.NewPreferencesGroup()
-		group.SetTitle("System Updates")
-		group.SetDescription("Download and stage system image updates; staged updates apply on restart")
+		group.SetTitle("System Update Details")
+		group.SetDescription("Download a system update on its own, or see what it changes.")
 		group.SetVisible(false)
 
 		uh.bootcStageExpander = adw.NewExpanderRow()
-		uh.bootcStageExpander.SetTitle("System Update")
-		uh.bootcStageExpander.SetSubtitle("Checking status...")
+		// Subtitles include the wrapped bootc error from a failed stage
+		// (statusErr at onBootcStageClicked) and the version reported by
+		// BootcUpdateSubtitle. AdwExpanderRow parses its subtitle as
+		// Pango markup by default, so a '<' or '&' would garble the row
+		// with a GTK warning (issue #437).
+		uh.bootcStageExpander.SetUseMarkup(false)
+		uh.bootcStageExpander.SetTitle("Download System Update")
+		uh.bootcStageExpander.SetSubtitle("Checking…")
 
-		uh.bootcStageBtn = gtk.NewButtonWithLabel("Check for Updates")
+		uh.bootcStageBtn = gtk.NewButtonWithLabel(pageview.BootcStageButtonLabel)
 		uh.bootcStageBtn.SetValign(gtk.AlignCenterValue)
-		uh.bootcStageBtn.AddCssClass("suggested-action")
 		stageClickedCb := func(btn gtk.Button) {
 			uh.onBootcStageClicked()
 		}
 		uh.bootcStageBtn.ConnectClicked(&stageClickedCb)
 		uh.bootcStageExpander.AddSuffix(&uh.bootcStageBtn.Widget)
 
-		uh.buildChangelogRow(uh.bootcStageExpander)
+		uh.buildChangelogRow(group)
 
 		group.Add(&uh.bootcStageExpander.Widget)
-
-		// Roll Back returns to the deployment bootc already records as the
-		// rollback target. It is hidden until that deployment is confirmed
-		// to exist, so a fresh install never offers a rollback to nothing.
-		uh.bootcRollbackRow = adw.NewActionRow()
-		rollbackPresentation := pageview.BootcRollbackRow("", "")
-		uh.bootcRollbackRow.SetTitle(rollbackPresentation.Title)
-		uh.bootcRollbackRow.SetSubtitle(rollbackPresentation.Subtitle)
-		uh.bootcRollbackBtn = gtk.NewButtonWithLabel("Roll Back")
-		uh.bootcRollbackBtn.SetValign(gtk.AlignCenterValue)
-		rollbackClickedCb := func(gtk.Button) {
-			uh.onBootcRollbackClicked()
-		}
-		uh.bootcRollbackBtn.ConnectClicked(&rollbackClickedCb)
-		uh.bootcRollbackRow.AddSuffix(&uh.bootcRollbackBtn.Widget)
-		uh.bootcRollbackRow.SetVisible(false)
-		group.Add(&uh.bootcRollbackRow.Widget)
 
 		page.Add(group)
 
 		go uh.loadBootcUpdateStatus(group)
-		go uh.loadBootcRollbackStatus()
 	}
 
-	// Native A/B (systemd-sysupdate) System Updates group - built hidden,
-	// shown asynchronously on native A/B hosts that ship the snosi stager.
-	// Mutually exclusive with the bootc group at runtime: the bootc gate
-	// requires the bootc binary (absent on native A/B images) and this gate
-	// requires the native-ab marker (absent on bootc images), so at most one
-	// "System Updates" group ever becomes visible.
-	if uh.config.IsGroupEnabled("updates_page", "sysupdate_updates_group") {
-		group := adw.NewPreferencesGroup()
-		group.SetTitle("System Updates")
-		group.SetDescription("Download and stage system image updates; staged updates apply on restart")
-		group.SetVisible(false)
-
-		uh.sysupdateStageExpander = adw.NewExpanderRow()
-		uh.sysupdateStageExpander.SetTitle("System Update")
-		uh.sysupdateStageExpander.SetSubtitle("Checking status...")
-
-		uh.sysupdateStageBtn = gtk.NewButtonWithLabel("Check for Updates")
-		uh.sysupdateStageBtn.SetValign(gtk.AlignCenterValue)
-		uh.sysupdateStageBtn.AddCssClass("suggested-action")
-		sysupdateClickedCb := func(btn gtk.Button) {
-			uh.onSysupdateStageClicked()
-		}
-		uh.sysupdateStageBtn.ConnectClicked(&sysupdateClickedCb)
-		uh.sysupdateStageExpander.AddSuffix(&uh.sysupdateStageBtn.Widget)
-
-		uh.sysupdateRollbackRow = adw.NewActionRow()
-		uh.sysupdateRollbackRow.SetTitle("Previous Version")
-		uh.sysupdateRollbackRow.SetSubtitle("Checking status...")
-
-		group.Add(&uh.sysupdateStageExpander.Widget)
-		group.Add(&uh.sysupdateRollbackRow.Widget)
-		page.Add(group)
-
-		go uh.loadSysupdateUpdateStatus(group)
-	}
-
-	// Flatpak Updates group
-	if uh.config.IsGroupEnabled("updates_page", "flatpak_updates_group") {
-		group := adw.NewPreferencesGroup()
-		group.SetTitle("Flatpak Updates")
-		group.SetDescription("Available updates for Flatpak applications")
-
-		uh.flatpakUpdatesExpander = adw.NewExpanderRow()
-		uh.flatpakUpdatesExpander.SetTitle("Available Updates")
-		uh.flatpakUpdatesExpander.SetSubtitle("Loading...")
-		group.Add(&uh.flatpakUpdatesExpander.Widget)
-
-		page.Add(group)
-
-		// Load flatpak updates asynchronously
-		go uh.loadFlatpakUpdates()
-	}
-
-	// Homebrew Updates group
-	if uh.config.IsGroupEnabled("updates_page", "brew_updates_group") {
-		group := adw.NewPreferencesGroup()
-		group.SetTitle("Homebrew Updates")
-		group.SetDescription("Check for and install Homebrew package updates")
-
-		// Update button row
-		updateRow := adw.NewActionRow()
-		updateRow.SetTitle("Update Homebrew")
-		updateRow.SetSubtitle("Update Homebrew itself and all formulae definitions")
-
-		updateBtn := gtk.NewButtonWithLabel("Update")
-		updateBtn.SetValign(gtk.AlignCenterValue)
-		updateBtn.AddCssClass("suggested-action")
-		updateGate := &actionstate.Gate{}
-		updateClickedCb := func(btn gtk.Button) {
-			if !updateGate.TryStart() {
-				return
-			}
-			btn.SetSensitive(false)
-			btn.SetLabel("Updating...")
-			go uh.updateHomebrew(btn, updateGate)
-		}
-		updateBtn.ConnectClicked(&updateClickedCb)
-
-		updateRow.AddSuffix(&updateBtn.Widget)
-		group.Add(&updateRow.Widget)
-
-		// Outdated packages expander
-		uh.outdatedExpander = adw.NewExpanderRow()
-		uh.outdatedExpander.SetTitle("Outdated Packages")
-		uh.outdatedExpander.SetSubtitle("Loading...")
-		group.Add(&uh.outdatedExpander.Widget)
-
-		page.Add(group)
-
-		// Load outdated packages asynchronously
-		uh.loadOutdatedPackages()
-	}
-
-	// Untrusted Homebrew Taps group - hidden unless untrusted taps with
-	// installed packages exist (Homebrew 6 tap trust).
-	if uh.config.IsGroupEnabled("updates_page", "brew_trust_group") {
+	// Sources whose updates Homebrew has paused - hidden unless there is
+	// something a person can act on (Homebrew 6 tap trust).
+	if uh.groupEnabled("updates_page", "brew_trust_group") {
 		uh.brewTrustGroup = adw.NewPreferencesGroup()
-		uh.brewTrustGroup.SetTitle("Untrusted Homebrew Taps")
-		uh.brewTrustGroup.SetDescription("Homebrew ignores packages from untrusted taps during upgrades. Trust a tap to resume updates for its packages.")
+		uh.brewTrustGroup.SetTitle("Manage Source Trust")
+		uh.brewTrustGroup.SetDescription("Some software came from a source you have not said you trust, so it stays at the version you have. Trust the source to let all its software update, or open it to trust a specific program.")
 		uh.brewTrustGroup.SetVisible(false)
 		page.Add(uh.brewTrustGroup)
 
 		go uh.loadUntrustedTaps()
 	}
+
+	// The two choices that replace the operating system sit last: a person
+	// reaches them deliberately, never on the way to something else. Hidden
+	// entirely on a host with no image descriptor, like every other
+	// Bluefin-family group.
+	if uh.groupEnabled("updates_page", "channel_group") {
+		uh.buildImageIdentityGroup(page)
+	}
 }
 
-// loadUntrustedTaps populates the Untrusted Taps group. Runs in a
+// loadUntrustedTaps populates the Manage source trust group. Runs in a
 // goroutine; the group stays hidden when there is nothing actionable.
+//
+// Each untrusted tap is an ExpanderRow: the title names the tap, the
+// subtitle says how many of its programs are stuck, and the suffix is a
+// "Trust Tap" button that trusts every installed package from the tap at
+// once. Inside the expander, one row per installed formula and cask carries
+// its own "Trust" button so a person can trust one program without trusting
+// its siblings. This is the issue #537 shape: the broad path stays, the
+// per-program path is no longer hidden behind a tap-wide decision.
 func (uh *UserHome) loadUntrustedTaps() {
-	if !homebrew.IsInstalledCached() {
+	if uh.brewTrustGroup == nil {
 		return
 	}
-
 	taps, err := homebrew.ListUntrustedTaps()
 	if err != nil {
 		log.Printf("untrusted tap check failed: %v", err)
-		return
 	}
-	if len(taps) == 0 {
-		return
-	}
-
 	sgtk.RunOnMainThread(func() {
-		uh.brewTrustRows = make(map[string]*adw.ActionRow)
-		for _, tap := range taps {
-			t := tap // capture
-			presentation := pageview.UntrustedTap(t.Name, t.Formulae, t.Casks)
-			row := adw.NewActionRow()
-			row.SetTitle(presentation.Title)
-			row.SetSubtitle(presentation.Subtitle)
-
-			trustBtn := gtk.NewButtonWithLabel("Trust")
-			trustBtn.SetValign(gtk.AlignCenterValue)
-			btn := trustBtn
-			clickedCb := func(_ gtk.Button) {
-				uh.confirmTrustTap(t, btn)
-			}
-			trustBtn.ConnectClicked(&clickedCb)
-			row.AddSuffix(&trustBtn.Widget)
-
-			uh.brewTrustGroup.Add(&row.Widget)
-			uh.brewTrustRows[t.Name] = row
+		for _, entry := range uh.brewTrustTaps {
+			uh.brewTrustGroup.Remove(&entry.expander.Widget)
 		}
-		uh.brewTrustGroup.SetVisible(true)
+		if uh.brewTrustError != nil {
+			uh.brewTrustGroup.Remove(&uh.brewTrustError.Widget)
+			uh.brewTrustError = nil
+		}
+		uh.brewTrustTaps = make(map[string]*untrustedTapEntry)
+		uh.trustButtons.clear()
+		if err != nil {
+			// The failure stays a top-level row of the group, not a child
+			// of an expander: a collapsed expander would hide both the
+			// message and its Retry button from a sighted user.
+			row := adw.NewActionRow()
+			// err.Error() is the message returned by the untrusted-tap
+			// check; AdwActionRow parses its subtitle as Pango markup by
+			// default, so a '<' or '&' in that text would garble or drop
+			// the row with a GTK warning (issue #437).
+			row.SetUseMarkup(false)
+			row.SetTitle("Couldn't Check for Paused Updates")
+			row.SetSubtitle("Check your internet connection and try again.")
+			button := gtk.NewButtonWithLabel("Retry")
+			button.SetValign(gtk.AlignCenterValue)
+			uh.trustButtons.connect(button, func(btn gtk.Button) {
+				btn.SetSensitive(false)
+				go uh.loadUntrustedTaps()
+			})
+			row.AddSuffix(&button.Widget)
+			uh.brewTrustGroup.Add(&row.Widget)
+			uh.brewTrustError = row
+		}
+		for _, tap := range taps {
+			presentation := pageview.UntrustedTap(tap.Name, tap.Formulae, tap.Casks)
+			entry := &untrustedTapEntry{
+				tap:      tap,
+				expander: adw.NewExpanderRow(),
+				packages: make(map[trustPackageKey]*adw.ActionRow),
+			}
+			entry.expander.SetTitle(presentation.Title)
+			entry.expander.SetSubtitle(presentation.Subtitle)
+
+			// "Trust Tap" suffix: the broad path. Trusts every installed
+			// package from this tap at once, and is the only option when
+			// the tap has more than one installed package a person might
+			// rather trust individually. Naming it "Trust Tap" makes the
+			// wider scope visible so a click cannot read as a narrower
+			// action than it actually is.
+			trustBtn := gtk.NewButtonWithLabel("Trust Tap…")
+			trustBtn.SetValign(gtk.AlignCenterValue)
+			describeFor(trustBtn, presentation.Title)
+			uh.trustButtons.connect(trustBtn, func(gtk.Button) {
+				uh.confirmTrustTap(entry, trustBtn)
+			})
+			entry.expander.AddSuffix(&trustBtn.Widget)
+			entry.buttons = append(entry.buttons, trustBtn)
+
+			// One row per installed package, with its own "Trust" button.
+			// That is the per-program path issue #537 asks for: a tap with
+			// two installed formulae and one cask shows three rows, each
+			// trustable on its own. The Trust Tap path stays as the
+			// tap-wide shortcut for trusting every installed program from
+			// the tap. Rows are keyed by kind as well as name: a tap may
+			// ship a formula and a cask under the same qualified name.
+			for _, formula := range tap.Formulae {
+				pkgRow, pkgBtn := uh.buildUntrustedPackageRow(formula, homebrew.Formula, tap.Name)
+				entry.buttons = append(entry.buttons, pkgBtn)
+				entry.expander.AddRow(&pkgRow.Widget)
+				entry.packages[trustPackageKey{homebrew.Formula, formula}] = pkgRow
+			}
+			for _, cask := range tap.Casks {
+				pkgRow, pkgBtn := uh.buildUntrustedPackageRow(cask, homebrew.Cask, tap.Name)
+				entry.buttons = append(entry.buttons, pkgBtn)
+				entry.expander.AddRow(&pkgRow.Widget)
+				entry.packages[trustPackageKey{homebrew.Cask, cask}] = pkgRow
+			}
+
+			uh.brewTrustGroup.Add(&entry.expander.Widget)
+			uh.brewTrustTaps[tap.Name] = entry
+		}
+		uh.brewTrustGroup.SetVisible(len(uh.brewTrustTaps) > 0 || uh.brewTrustError != nil)
 	})
 }
 
-// confirmTrustTap shows a confirmation dialog before trusting a tap's packages.
-func (uh *UserHome) confirmTrustTap(tap homebrew.UntrustedTap, button *gtk.Button) {
-	dialog := adw.NewAlertDialog(
-		fmt.Sprintf("Trust packages from %s?", tap.Name),
-		"Trusting allows this tap's package definitions to run code during installs and upgrades. Only trust taps you recognize.",
-	)
-	dialog.AddResponse("cancel", "Cancel")
-	dialog.AddResponse("trust", "Trust")
-	dialog.SetResponseAppearance("trust", adw.ResponseSuggestedValue)
+// trustPackageKey identifies one installed package inside a tap's expander.
+// Homebrew's formula and cask namespaces are separate, so the name alone is
+// not unique.
+type trustPackageKey struct {
+	kind homebrew.PackageKind
+	name string
+}
 
-	responseCb := func(_ adw.AlertDialog, response string) {
+// untrustedTapEntry is one source in the Manage source trust group. tap holds
+// the packages still untrusted: a per-package trust removes its package
+// there as well as its row, so the expander's count and the Trust Tap
+// dialog always describe what is left rather than what was first loaded.
+type untrustedTapEntry struct {
+	tap      homebrew.UntrustedTap
+	expander *adw.ExpanderRow
+	packages map[trustPackageKey]*adw.ActionRow
+	// buttons are the Trust Tap and per-package buttons bound in
+	// uh.trustButtons, forgotten together when the expander is removed.
+	buttons []*gtk.Button
+}
+
+// removeTrustEntry drops a tap's expander from the group and forgets every
+// button bound inside it, not just the one that was clicked.
+func (uh *UserHome) removeTrustEntry(tapName string, entry *untrustedTapEntry) {
+	uh.brewTrustGroup.Remove(&entry.expander.Widget)
+	delete(uh.brewTrustTaps, tapName)
+	for _, b := range entry.buttons {
+		uh.trustButtons.forget(b)
+	}
+}
+
+// buildUntrustedPackageRow returns one ActionRow for an installed package
+// inside a tap's expander, with a "Trust" button wired to confirmTrustPackage.
+// The tap argument is the parent tap's name and is what the per-package
+// confirmation dialog names as the source the package comes from.
+func (uh *UserHome) buildUntrustedPackageRow(qualifiedName string, kind homebrew.PackageKind, tapName string) (*adw.ActionRow, *gtk.Button) {
+	row := adw.NewActionRow()
+	presentation := pageview.UntrustedTapPackage(qualifiedName, kind)
+	row.SetTitle(presentation.Title)
+	row.SetSubtitle(presentation.Subtitle)
+
+	btn := gtk.NewButtonWithLabel("Trust…")
+	btn.SetValign(gtk.AlignCenterValue)
+	describeFor(btn, presentation.Title)
+	uh.trustButtons.connect(btn, func(gtk.Button) {
+		uh.confirmTrustPackage(qualifiedName, kind, tapName, btn)
+	})
+	row.AddSuffix(&btn.Widget)
+	return row, btn
+}
+
+// confirmTrustTap shows a confirmation dialog before trusting a source. The
+// consequence is third-party code running on this machine, which is exactly
+// the kind of thing a person must agree to rather than discover. It reads
+// the entry's remaining packages when shown and again when confirmed, so a
+// program trusted on its own in between is neither counted nor re-trusted.
+func (uh *UserHome) confirmTrustTap(entry *untrustedTapEntry, button *gtk.Button) {
+	title, body := pageview.TapTrustConfirmation(entry.tap.Name, entry.tap.Count())
+	dialog := adw.NewAlertDialog(title, body)
+	dialog.AddResponse("cancel", "Cancel")
+	dialog.AddResponse("trust", "Trust Tap")
+	dialog.SetResponseAppearance("trust", adw.ResponseSuggestedValue)
+	// Escape and the default both cancel: nothing happens unless asked.
+	dialog.SetDefaultResponse("cancel")
+	dialog.SetCloseResponse("cancel")
+
+	uh.confirmations.connect(dialog, func(response string) {
 		if response != "trust" {
 			return
 		}
 		button.SetSensitive(false)
-		button.SetLabel("Trusting...")
-		go uh.trustTap(tap, button)
-	}
-	dialog.ConnectResponse(&responseCb)
+		button.SetLabel("Trusting Tap…")
+		go uh.trustTap(entry.tap, button)
+	})
 	dialog.Present(&uh.updatesPrefsPage.Widget)
 }
 
-// trustTap runs brew trust and updates the UI on completion.
+// trustTap runs `brew trust` for every installed package in the tap and
+// updates the UI on completion. The whole tap's expander is removed; the
+// group is hidden when no taps remain.
 func (uh *UserHome) trustTap(tap homebrew.UntrustedTap, button *gtk.Button) {
 	err := homebrew.TrustPackages(tap)
+	if err != nil {
+		log.Printf("trusting %s failed: %v", tap.Name, err)
+	}
 
 	sgtk.RunOnMainThread(func() {
 		if err != nil {
 			button.SetSensitive(true)
-			button.SetLabel("Trust")
-			uh.toastAdder.ShowErrorToast(fmt.Sprintf("Failed to trust %s: %v", tap.Name, err))
+			button.SetLabel("Trust Tap…")
+			uh.toastAdder.ShowErrorToast(fmt.Sprintf("Couldn't trust %s", tap.Name))
 			return
 		}
 
 		decision := actionmsg.TapTrust(dryrun.Enabled(), tap.Name)
 		if decision.MutateUI {
-			if row, ok := uh.brewTrustRows[tap.Name]; ok {
-				uh.brewTrustGroup.Remove(&row.Widget)
-				delete(uh.brewTrustRows, tap.Name)
+			if entry, ok := uh.brewTrustTaps[tap.Name]; ok {
+				uh.removeTrustEntry(tap.Name, entry)
 			}
-			if len(uh.brewTrustRows) == 0 {
+			if len(uh.brewTrustTaps) == 0 && uh.brewTrustError == nil {
 				uh.brewTrustGroup.SetVisible(false)
 			}
 			uh.toastAdder.ShowToast(decision.Toast)
 
-			// Newly trusted packages may now appear as outdated.
-			uh.loadOutdatedPackages()
+			// Newly trusted software may now appear in the unified inventory.
+			if uh.updateShell != nil {
+				uh.updateShell.StartCheck()
+			}
 		} else {
 			// Dry-run: nothing was actually trusted, so the row must not
-			// disappear from the Untrusted Taps list. Reset the button
-			// instead of leaving it stuck on "Trusting...".
+			// disappear from the unverified-sources list. Reset the button
+			// instead of leaving it stuck on "Trusting Tap…".
 			button.SetSensitive(true)
-			button.SetLabel("Trust")
+			button.SetLabel("Trust Tap…")
 			uh.toastAdder.ShowToast(decision.Toast)
 		}
 	})
 }
 
-// loadOutdatedPackages loads outdated Homebrew packages asynchronously.
-// It is reachable from trustTap (a newly-trusted tap's packages may now be
-// outdated) as well as from buildUpdatesPage, so it must stay nil-safe
-// against brew_updates_group being disabled — trustTap only depends on
-// brew_trust_group and has no way to know whether outdatedExpander exists.
-func (uh *UserHome) loadOutdatedPackages() {
-	uh.loadOutdatedPackagesWithDone(nil)
-}
-
-// loadOutdatedPackagesWithDone starts a versioned refresh. Only the newest
-// request may replace rows/count, while every supplied completion callback
-// still runs so a superseded action cannot remain disabled.
-func (uh *UserHome) loadOutdatedPackagesWithDone(done func(bool)) {
-	generation := uh.brewRefresh.Begin()
-	go uh.loadOutdatedPackagesGeneration(generation, done)
-}
-
-func (uh *UserHome) loadOutdatedPackagesGeneration(generation uint64, done func(bool)) {
-	if uh.outdatedExpander == nil {
-		if done != nil {
-			sgtk.RunOnMainThread(func() {
-				done(false)
-			})
-		}
-		return
+// confirmTrustPackage shows a confirmation dialog before trusting a single
+// package from an untrusted tap. The broader tap stays untrusted so its
+// other programs keep pausing — this is the per-program path issue #537 asks
+// for: trust only the one program you installed, no wider.
+func (uh *UserHome) confirmTrustPackage(qualifiedName string, kind homebrew.PackageKind, tapName string, button *gtk.Button) {
+	noun := "program"
+	if kind == homebrew.Cask {
+		noun = "app"
 	}
+	displayName := pageview.UntrustedTapPackage(qualifiedName, kind).Title
+	dialog := adw.NewAlertDialog(
+		fmt.Sprintf("Trust %s from %s?", displayName, tapName),
+		fmt.Sprintf("This trusts only this one %s from %s. Other programs from that source will still need trust before they update.", noun, tapName),
+	)
+	dialog.AddResponse("cancel", "Cancel")
+	dialog.AddResponse("trust", "Trust")
+	dialog.SetResponseAppearance("trust", adw.ResponseSuggestedValue)
+	// Escape and the default both cancel: nothing happens unless asked.
+	dialog.SetDefaultResponse("cancel")
+	dialog.SetCloseResponse("cancel")
 
-	if !homebrew.IsInstalledCached() {
-		sgtk.RunOnMainThread(func() {
-			if !uh.brewRefresh.IsCurrent(generation) {
-				if done != nil {
-					done(false)
-				}
-				return
-			}
-			uh.updateCounts.Set(badgestate.Homebrew, 0)
-			uh.updateBadgeCount()
-			uh.outdatedRows.Clear(func(row *adw.ActionRow) {
-				uh.outdatedExpander.Remove(&row.Widget)
-			})
-			uh.outdatedExpander.SetSubtitle("Homebrew not installed")
-			uh.outdatedExpander.SetEnableExpansion(false)
-			if done != nil {
-				done(false)
-			}
-		})
-		return
-	}
-
-	packages, err := homebrew.ListOutdated()
-	currentCount := uh.updateCounts.Get(badgestate.Homebrew)
-	refresh := actionstate.OutdatedRefresh(err == nil, currentCount, len(packages))
-	if err != nil {
-		sgtk.RunOnMainThread(func() {
-			if !uh.brewRefresh.IsCurrent(generation) {
-				if done != nil {
-					done(false)
-				}
-				return
-			}
-			uh.outdatedExpander.SetSubtitle(fmt.Sprintf("Error refreshing updates: %v", err))
-			if done != nil {
-				done(false)
-			}
-		})
-		return
-	}
-
-	sgtk.RunOnMainThread(func() {
-		if !uh.brewRefresh.IsCurrent(generation) {
-			if done != nil {
-				done(false)
-			}
+	uh.confirmations.connect(dialog, func(response string) {
+		if response != "trust" {
 			return
 		}
-		presentation := actionstate.OutdatedPresentation(refresh.Count)
-		uh.updateCounts.Set(badgestate.Homebrew, refresh.Count)
-		uh.updateBadgeCount()
-		if refresh.ReplaceRows {
-			uh.outdatedRows.Clear(func(row *adw.ActionRow) {
-				uh.outdatedExpander.Remove(&row.Widget)
-			})
-		}
-
-		uh.outdatedExpander.SetSubtitle(presentation.Subtitle)
-		uh.outdatedExpander.SetEnableExpansion(presentation.Expandable)
-		for _, pkg := range packages {
-			row := adw.NewActionRow()
-			row.SetTitle(pkg.Name)
-			row.SetSubtitle(pkg.Version)
-
-			upgradeBtn := gtk.NewButtonWithLabel("Upgrade")
-			upgradeBtn.SetValign(gtk.AlignCenterValue)
-			upgradeGate := &actionstate.Gate{}
-			pkgName := pkg.Name
-			clickedCb := func(btn gtk.Button) {
-				if !upgradeGate.TryStart() {
-					return
-				}
-				btn.SetSensitive(false)
-				btn.SetLabel("Upgrading...")
-				go func() {
-					err := homebrew.Upgrade(pkgName)
-					dryRun := dryrun.Enabled()
-					decision := actionstate.PackageUpgrade(err == nil, dryRun)
-					if err != nil {
-						var trustErr *homebrew.UntrustedTapError
-						msg := fmt.Sprintf("Upgrade failed: %v", err)
-						if errors.As(err, &trustErr) {
-							// uh.brewTrustGroup is only ever assigned once, in
-							// buildUpdatesPage on the main thread before this
-							// goroutine (or any goroutine) starts, so reading
-							// it here is race-free.
-							msg = trustmsg.UpgradeMessage(pkgName, uh.brewTrustGroup != nil)
-						}
-						sgtk.RunOnMainThread(func() {
-							if decision.RestoreControl {
-								upgradeGate.Reset()
-								btn.SetSensitive(true)
-								btn.SetLabel("Upgrade")
-							}
-							uh.toastAdder.ShowErrorToast(msg)
-						})
-						return
-					}
-					sgtk.RunOnMainThread(func() {
-						uh.toastAdder.ShowToast(actionmsg.Upgrade(dryRun, pkgName))
-						if decision.RemoveRow {
-							upgradeGate.Complete()
-						}
-						if decision.RemoveRow && uh.outdatedRows.Remove(row, func(row *adw.ActionRow) {
-							uh.outdatedExpander.Remove(&row.Widget)
-						}) {
-							remaining := uh.updateCounts.Add(badgestate.Homebrew, -1).Count
-							presentation := actionstate.OutdatedPresentation(remaining)
-							uh.outdatedExpander.SetSubtitle(presentation.Subtitle)
-							uh.outdatedExpander.SetEnableExpansion(presentation.Expandable)
-							uh.updateBadgeCount()
-						}
-						if decision.RestoreControl {
-							upgradeGate.Reset()
-							btn.SetSensitive(true)
-							btn.SetLabel("Upgrade")
-						}
-						if decision.Refresh {
-							uh.loadOutdatedPackages()
-						}
-					})
-				}()
-			}
-			upgradeBtn.ConnectClicked(&clickedCb)
-
-			row.AddSuffix(&upgradeBtn.Widget)
-			uh.outdatedExpander.AddRow(&row.Widget)
-			uh.outdatedRows.Add(row)
-		}
-		if done != nil {
-			done(true)
-		}
+		button.SetSensitive(false)
+		button.SetLabel("Trusting…")
+		go uh.trustPackage(qualifiedName, kind, tapName, button)
 	})
+	dialog.Present(&uh.updatesPrefsPage.Widget)
 }
 
-// loadFlatpakUpdates loads available Flatpak updates asynchronously
-func (uh *UserHome) loadFlatpakUpdates() {
-	if !flatpak.IsInstalledCached() {
-		uh.updateCounts.Set(badgestate.Flatpak, 0)
-		uh.updateBadgeCount()
-
-		sgtk.RunOnMainThread(func() {
-			if uh.flatpakUpdatesExpander != nil {
-				uh.flatpakUpdatesExpander.SetSubtitle("Flatpak not installed")
-			}
-		})
-		return
-	}
-
-	// Collect updates from both user and system installations
-	var allUpdates []flatpak.UpdateInfo
-
-	// Load user updates. The error is kept as a value, not just logged: the
-	// expander subtitle has to say that half the picture is missing.
-	userUpdates, userErr := flatpak.ListUpdates(true)
-	if userErr != nil {
-		log.Printf("Error loading user flatpak updates: %v", userErr)
+// trustPackage trusts one package from an untrusted tap. On a live run it
+// removes the package's row from the parent expander; when that expander
+// has no remaining packages the tap itself is also removed.
+func (uh *UserHome) trustPackage(qualifiedName string, kind homebrew.PackageKind, tapName string, button *gtk.Button) {
+	var err error
+	if kind == homebrew.Cask {
+		err = homebrew.TrustCask(qualifiedName)
 	} else {
-		allUpdates = append(allUpdates, userUpdates...)
+		err = homebrew.TrustFormula(qualifiedName)
 	}
-
-	// Load system updates
-	systemUpdates, systemErr := flatpak.ListUpdates(false)
-	if systemErr != nil {
-		log.Printf("Error loading system flatpak updates: %v", systemErr)
-	} else {
-		allUpdates = append(allUpdates, systemUpdates...)
+	if err != nil {
+		log.Printf("trusting %s failed: %v", qualifiedName, err)
 	}
-
-	status := flatpakstatus.Subtitle(len(allUpdates), userErr != nil, systemErr != nil)
-
-	// Update the badge count
-	uh.updateCounts.Set(badgestate.Flatpak, len(allUpdates))
-	uh.updateBadgeCount()
 
 	sgtk.RunOnMainThread(func() {
-		if uh.flatpakUpdatesExpander == nil {
+		if err != nil {
+			button.SetSensitive(true)
+			button.SetLabel("Trust…")
+			uh.toastAdder.ShowErrorToast(fmt.Sprintf("Couldn't trust %s", qualifiedName))
 			return
 		}
 
-		// Clear existing rows
-		for _, row := range uh.flatpakUpdateRows {
-			uh.flatpakUpdatesExpander.Remove(&row.Widget)
-		}
-		uh.flatpakUpdateRows = nil
-
-		uh.flatpakUpdatesExpander.SetSubtitle(status.Subtitle)
-		uh.flatpakUpdatesExpander.SetEnableExpansion(status.Expandable)
-
-		if len(allUpdates) == 0 {
-			return
-		}
-
-		for _, update := range allUpdates {
-			presentation := pageview.FlatpakUpdate(
-				update.Name,
-				update.ApplicationID,
-				update.NewVersion,
-				update.Installation,
-			)
-			row := adw.NewActionRow()
-			row.SetTitle(presentation.Title)
-			row.SetSubtitle(presentation.Subtitle)
-
-			// Add update button
-			updateBtn := gtk.NewButtonWithLabel("Update")
-			updateBtn.SetValign(gtk.AlignCenterValue)
-			updateBtn.AddCssClass("suggested-action")
-
-			appID := update.ApplicationID
-			isUser := update.Installation == "user"
-			clickedCb := func(btn gtk.Button) {
-				btn.SetSensitive(false)
-				btn.SetLabel("Updating...")
-				go func() {
-					if err := flatpak.Update(appID, isUser); err != nil {
-						sgtk.RunOnMainThread(func() {
-							btn.SetSensitive(true)
-							btn.SetLabel("Update")
-							uh.toastAdder.ShowErrorToast(fmt.Sprintf("Update failed: %v", err))
-						})
-						return
-					}
-					sgtk.RunOnMainThread(func() {
-						uh.toastAdder.ShowToast(actionmsg.Update(dryrun.Enabled(), appID))
-						// Refresh the updates list
-						go uh.loadFlatpakUpdates()
-					})
-				}()
+		decision := actionmsg.PackageTrust(dryrun.Enabled(), qualifiedName)
+		if decision.MutateUI {
+			key := trustPackageKey{kind, qualifiedName}
+			if entry, ok := uh.brewTrustTaps[tapName]; ok {
+				if pkgRow, ok := entry.packages[key]; ok {
+					// The row lives in the tap's expander, not the group.
+					entry.expander.Remove(&pkgRow.Widget)
+					delete(entry.packages, key)
+					uh.trustButtons.forget(button)
+				}
+				entry.tap = entry.tap.Without(kind, qualifiedName)
+				if entry.tap.Count() == 0 {
+					// Nothing from the tap is left untrusted; drop the
+					// whole tap.
+					uh.removeTrustEntry(tapName, entry)
+				} else {
+					entry.expander.SetSubtitle(pageview.UntrustedTap(tapName, entry.tap.Formulae, entry.tap.Casks).Subtitle)
+				}
 			}
-			updateBtn.ConnectClicked(&clickedCb)
+			if len(uh.brewTrustTaps) == 0 && uh.brewTrustError == nil {
+				uh.brewTrustGroup.SetVisible(false)
+			}
+			uh.toastAdder.ShowToast(decision.Toast)
 
-			row.AddSuffix(&updateBtn.Widget)
-			uh.flatpakUpdatesExpander.AddRow(&row.Widget)
-			uh.flatpakUpdateRows = append(uh.flatpakUpdateRows, row)
+			// Refresh the inventory so the just-trusted package shows up
+			// as upgradable.
+			if uh.updateShell != nil {
+				uh.updateShell.StartCheck()
+			}
+		} else {
+			button.SetSensitive(true)
+			button.SetLabel("Trust…")
+			uh.toastAdder.ShowToast(decision.Toast)
 		}
 	})
 }
@@ -572,17 +429,12 @@ func (uh *UserHome) loadBootcUpdateStatus(group *adw.PreferencesGroup) {
 	status, err := bootc.GetStatus(ctx)
 
 	staged := err == nil && status.Status.Staged != nil
-	if staged {
-		uh.updateCounts.Set(badgestate.Bootc, 1)
-	} else {
-		uh.updateCounts.Set(badgestate.Bootc, 0)
-	}
-	uh.updateBadgeCount()
 
 	sgtk.RunOnMainThread(func() {
 		group.SetVisible(true)
 		if err != nil {
-			uh.bootcStageExpander.SetSubtitle(fmt.Sprintf("Error: %v", err))
+			log.Printf("reading system status failed: %v", err)
+			uh.bootcStageExpander.SetSubtitle("Couldn't check for system updates.")
 			return
 		}
 		version := ""
@@ -591,19 +443,118 @@ func (uh *UserHome) loadBootcUpdateStatus(group *adw.PreferencesGroup) {
 		}
 		uh.bootcStageExpander.SetSubtitle(pageview.BootcUpdateSubtitle(staged, version))
 		uh.refreshChangelogAvailability(status)
+		uh.applyStagedImage(status)
 	})
 }
 
+// stageProgressSink renders the streamed output of an OS staging run into a
+// bounded rolling log.
+//
+// It exists for the cost of the obvious alternative. Rendering each line as it
+// arrives queues one sgtk.RunOnMainThread callback per line and leaves one
+// permanent action row behind, so a verbose stage helper accumulates thousands
+// of heavyweight widgets and callbacks until the run ends — an unresponsive
+// window and unbounded memory. The sink coalesces a burst of lines into a
+// single main-thread callback and keeps only the most recent
+// progresslog.DefaultLimit rows, evicting older ones from the expander.
+//
+// The split of duties is the GTK main-thread rule: consume runs on the worker
+// goroutine and touches no widget, flush runs on the main thread and owns
+// every widget this type names. task is the run's Activity entry; it is safe
+// from any goroutine, so consume reports each line to it directly and the
+// step stays visible from every page while the bar stays indeterminate.
+type stageProgressSink struct {
+	task        *activity.Task
+	activityRow *adw.ActionRow
+	logExpander *adw.ExpanderRow
+	lines       *progresslog.Coalescer
+	rows        rowset.Tracker[*adw.ActionRow]
+}
+
+// newStageProgressSink returns a sink rendering into the run's activity row
+// and "Details" expander and reporting each line to the run's Activity task.
+func newStageProgressSink(activityRow *adw.ActionRow, logExpander *adw.ExpanderRow, task *activity.Task) *stageProgressSink {
+	return &stageProgressSink{
+		task:        task,
+		activityRow: activityRow,
+		logExpander: logExpander,
+		lines:       progresslog.New(progresslog.DefaultLimit),
+	}
+}
+
+// consume reads progressCh to closure and returns the last message the helper
+// printed, which the caller needs for its result subtitle. A line schedules a
+// flush only when no flush is already outstanding; the completion event always
+// flushes, so the final lines of a run are never left pending.
+func (s *stageProgressSink) consume(progressCh <-chan stageexec.ProgressEvent) string {
+	var lastMessage string
+	for event := range progressCh {
+		switch event.Type {
+		case stageexec.EventMessage:
+			lastMessage = event.Message
+			s.task.Working(event.Message)
+			if s.lines.Append(event.Message) {
+				sgtk.RunOnMainThread(s.flush)
+			}
+		case stageexec.EventComplete:
+			sgtk.RunOnMainThread(func() {
+				s.flush()
+				s.activityRow.SetSubtitle("Complete")
+			})
+		}
+	}
+	return lastMessage
+}
+
+// flush renders one coalesced batch on the GTK main thread, then trims the
+// expander back to the retention window so its row count stays bounded.
+func (s *stageProgressSink) flush() {
+	batch := s.lines.Drain()
+	if len(batch.Lines) == 0 {
+		return
+	}
+
+	for _, line := range batch.Lines {
+		msgRow := adw.NewActionRow()
+		// line.Text is streamed stage/llmman output, i.e. untrusted command
+		// output; AdwActionRow parses its title as Pango markup by default, so
+		// a '<' or '&' in that text would garble or drop the row with a
+		// GTK warning. SetUseMarkup(false) renders it literally.
+		msgRow.SetUseMarkup(false)
+		msgRow.SetTitle(line.Text)
+		msgRow.SetSubtitle(line.At.Format("15:04:05"))
+		s.logExpander.AddRow(&msgRow.Widget)
+		s.rows.Add(msgRow)
+	}
+	s.rows.TrimTo(s.lines.Limit(), func(row *adw.ActionRow) {
+		s.logExpander.Remove(&row.Widget)
+	})
+
+	s.activityRow.SetSubtitle(batch.Lines[len(batch.Lines)-1].Text)
+	s.logExpander.SetSubtitle(pageview.StagingLogSubtitle(s.rows.Len(), batch.Total))
+	// The expander is built hidden and revealed by its first line, so a run
+	// whose helper printed nothing never offers an expander that opens to
+	// nothing (on Dakota, bootc logged a stage to the journal, not the pipe).
+	s.logExpander.SetVisible(true)
+}
+
 // onBootcStageClicked runs the stage script with streamed log output.
-// The script checks, downloads, and stages in one idempotent operation.
+// The script checks, downloads, and stages in one idempotent operation, which
+// is why the action is labelled Download rather than as a check.
 func (uh *UserHome) onBootcStageClicked() {
+	// beginMutation refuses while a check, an update run, or a restart owns
+	// the system; say so instead of ignoring the click.
+	if !uh.updateShell.beginMutation("Downloading the system update") {
+		uh.toastAdder.ShowToast(pageview.UpdateBusyToast)
+		return
+	}
 	button := uh.bootcStageBtn
 	expander := uh.bootcStageExpander
 
 	button.SetSensitive(false)
-	button.SetLabel("Working...")
+	button.SetLabel("Working…")
 	expander.SetExpanded(true)
-	expander.SetSubtitle("Checking for updates...")
+	expander.SetSubtitle(pageview.BootcStageRunningSubtitle)
 
 	// Remove rows from any previous run before adding new ones, otherwise
 	// repeated clicks stack duplicate Progress/Details rows.
@@ -617,19 +568,29 @@ func (uh *UserHome) onBootcStageClicked() {
 	// Activity row with a spinner (the stage script emits no percentages,
 	// so progress is indeterminate).
 	activityRow := adw.NewActionRow()
+	// flush() sets this row's subtitle from the last streamed stage/llmman
+	// line, i.e. untrusted command output; AdwActionRow parses a subtitle as
+	// Pango markup unless use-markup is FALSE, so a '<' or '&' would garble
+	// the row with a GTK warning (issue #435).
+	activityRow.SetUseMarkup(false)
 	activityRow.SetTitle("Progress")
-	activityRow.SetSubtitle("Running...")
-	spinner := gtk.NewSpinner()
-	spinner.Start()
+	activityRow.SetSubtitle("Working…")
+	spinner := newActivitySpinner()
+	setActivitySpinner(spinner, true)
 	activityRow.AddSuffix(&spinner.Widget)
 	expander.AddRow(&activityRow.Widget)
 	uh.bootcActivityRow = activityRow
 
 	logExpander := adw.NewExpanderRow()
 	logExpander.SetTitle("Details")
-	logExpander.SetSubtitle("View output")
+	logExpander.SetSubtitle(pageview.StagingLogSubtitle(0, 0))
+	// Hidden until the helper prints a line; flush reveals it.
+	logExpander.SetVisible(false)
 	expander.AddRow(&logExpander.Widget)
 	uh.bootcLogExpander = logExpander
+	// Read on the main thread: finishMutation clears the field, and the
+	// worker below outlives this call.
+	task := uh.updateShell.mutationTask
 
 	go func() {
 		ctx, cancel := bootc.DefaultContext()
@@ -645,296 +606,449 @@ func (uh *UserHome) onBootcStageClicked() {
 			stageErr = bootc.StageUpdate(ctx, progressCh)
 		}()
 
-		var lastMessage string
-		for event := range progressCh {
-			evt := event
-			if evt.Type == bootc.EventMessage {
-				lastMessage = evt.Message
-			}
-			sgtk.RunOnMainThread(func() {
-				switch evt.Type {
-				case bootc.EventMessage:
-					msgRow := adw.NewActionRow()
-					msgRow.SetTitle(evt.Message)
-					msgRow.SetSubtitle(time.Now().Format("15:04:05"))
-					logExpander.AddRow(&msgRow.Widget)
-					activityRow.SetSubtitle(evt.Message)
-				case bootc.EventComplete:
-					activityRow.SetSubtitle("Complete")
-				}
-			})
-		}
+		// The sink's return value is the stage helper's own last line. Only
+		// whether there was one is used: the text is terminal output that
+		// can name paths a person has no use for, which is why
+		// pageview.BootcStageResultSubtitle takes no such argument.
+		hadOutput := newStageProgressSink(activityRow, logExpander, task).consume(progressCh) != ""
 
 		wg.Wait()
 
 		// Re-read status so the subtitle and badge reflect reality
 		// (staged vs already-current) rather than guessing from output.
+		// The System version readout is re-rendered from the same read.
 		statusCtx, statusCancel := bootc.DefaultContext()
 		status, statusErr := bootc.GetStatus(statusCtx)
 		statusCancel()
 
 		staged := statusErr == nil && status.Status.Staged != nil
+		version := ""
 		if staged {
-			uh.updateCounts.Set(badgestate.Bootc, 1)
-		} else {
-			uh.updateCounts.Set(badgestate.Bootc, 0)
+			version = status.Status.Staged.Version()
 		}
-		uh.updateBadgeCount()
 
 		sgtk.RunOnMainThread(func() {
+			uh.updateShell.finishMutation()
 			spinner.Stop()
 			button.SetSensitive(true)
-			button.SetLabel("Check for Updates")
+			button.SetLabel(pageview.BootcStageButtonLabel)
 
 			if stageErr != nil {
-				expander.SetSubtitle(fmt.Sprintf("Update failed: %v", stageErr))
-				uh.toastAdder.ShowErrorToast(fmt.Sprintf("Update failed: %v", stageErr))
-				return
-			}
-
-			version := ""
-			if staged {
-				version = status.Status.Staged.Version()
-			}
-			expander.SetSubtitle(pageview.BootcStageResultSubtitle(staged, version, lastMessage))
-			uh.toastAdder.ShowToast(actionmsg.BootcStage(dryrun.Enabled(), staged))
-		})
-	}()
-}
-
-// loadSysupdateUpdateStatus gates the native A/B updates group and reflects
-// the /run/snosi state files in the expander subtitle, rollback row, and
-// update badge. The reads are unprivileged: the stager's state files are
-// world-readable and the rollback candidate comes from partition labels.
-func (uh *UserHome) loadSysupdateUpdateStatus(group *adw.PreferencesGroup) {
-	if !sysupdate.IsNativeABCached() || !sysupdate.StageScriptAvailable() {
-		return // group stays hidden
-	}
-
-	ctx, cancel := sysupdate.DefaultContext()
-	defer cancel()
-
-	status := sysupdate.GetStatus()
-	rollbackVersion, _ := sysupdate.RollbackVersion(ctx)
-
-	if status.IsStaged() {
-		uh.updateCounts.Set(badgestate.Sysupdate, 1)
-	} else {
-		uh.updateCounts.Set(badgestate.Sysupdate, 0)
-	}
-	uh.updateBadgeCount()
-
-	outcome, version, checkedAt := status.Presentation()
-	sgtk.RunOnMainThread(func() {
-		group.SetVisible(true)
-		uh.sysupdateStageExpander.SetSubtitle(pageview.SysupdateUpdateSubtitle(outcome, version, checkedAt))
-		uh.sysupdateRollbackRow.SetSubtitle(pageview.SysupdateRollbackSubtitle(rollbackVersion))
-	})
-}
-
-// onSysupdateStageClicked runs the snosi stager with streamed log output.
-// The script checks, downloads, and stages in one idempotent operation; the
-// staged version applies at the next reboot.
-func (uh *UserHome) onSysupdateStageClicked() {
-	button := uh.sysupdateStageBtn
-	expander := uh.sysupdateStageExpander
-
-	button.SetSensitive(false)
-	button.SetLabel("Working...")
-	expander.SetExpanded(true)
-	expander.SetSubtitle("Checking for updates...")
-
-	// Remove rows from any previous run before adding new ones, otherwise
-	// repeated clicks stack duplicate Progress/Details rows.
-	if uh.sysupdateActivityRow != nil {
-		expander.Remove(&uh.sysupdateActivityRow.Widget)
-	}
-	if uh.sysupdateLogExpander != nil {
-		expander.Remove(&uh.sysupdateLogExpander.Widget)
-	}
-
-	// Activity row with a spinner (the stage script emits no percentages,
-	// so progress is indeterminate).
-	activityRow := adw.NewActionRow()
-	activityRow.SetTitle("Progress")
-	activityRow.SetSubtitle("Running...")
-	spinner := gtk.NewSpinner()
-	spinner.Start()
-	activityRow.AddSuffix(&spinner.Widget)
-	expander.AddRow(&activityRow.Widget)
-	uh.sysupdateActivityRow = activityRow
-
-	logExpander := adw.NewExpanderRow()
-	logExpander.SetTitle("Details")
-	logExpander.SetSubtitle("View output")
-	expander.AddRow(&logExpander.Widget)
-	uh.sysupdateLogExpander = logExpander
-
-	go func() {
-		ctx, cancel := sysupdate.DefaultContext()
-		defer cancel()
-
-		progressCh := make(chan sysupdate.ProgressEvent)
-
-		var stageErr error
-		var wg sync.WaitGroup
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			stageErr = sysupdate.StageUpdate(ctx, progressCh)
-		}()
-
-		var lastMessage string
-		for event := range progressCh {
-			evt := event
-			if evt.Type == sysupdate.EventMessage {
-				lastMessage = evt.Message
-			}
-			sgtk.RunOnMainThread(func() {
-				switch evt.Type {
-				case sysupdate.EventMessage:
-					msgRow := adw.NewActionRow()
-					msgRow.SetTitle(evt.Message)
-					msgRow.SetSubtitle(time.Now().Format("15:04:05"))
-					logExpander.AddRow(&msgRow.Widget)
-					activityRow.SetSubtitle(evt.Message)
-				case sysupdate.EventComplete:
-					activityRow.SetSubtitle("Complete")
+				log.Printf("staging the system update failed: %v", stageErr)
+				toast, isError := pageview.PrivilegedFailureToast(stageErr, "The system update couldn't be downloaded")
+				if !isError {
+					// Authentication was dismissed: nothing ran, so the row
+					// reads as it did before the click.
+					expander.SetSubtitle(pageview.BootcUpdateSubtitle(staged, version))
+					uh.toastAdder.ShowToast(toast)
+					return
 				}
-			})
-		}
-
-		wg.Wait()
-
-		// Re-read the state files so the subtitle, rollback row, and badge
-		// reflect reality (staged vs already-current) rather than guessing
-		// from output. A stage fills the inactive slot with the newer
-		// version, so the rollback candidate must be recomputed too.
-		status := sysupdate.GetStatus()
-		rollbackCtx, rollbackCancel := sysupdate.DefaultContext()
-		rollbackVersion, _ := sysupdate.RollbackVersion(rollbackCtx)
-		rollbackCancel()
-
-		staged := status.IsStaged()
-		if staged {
-			uh.updateCounts.Set(badgestate.Sysupdate, 1)
-		} else {
-			uh.updateCounts.Set(badgestate.Sysupdate, 0)
-		}
-		uh.updateBadgeCount()
-
-		_, version, _ := status.Presentation()
-		sgtk.RunOnMainThread(func() {
-			spinner.Stop()
-			button.SetSensitive(true)
-			button.SetLabel("Check for Updates")
-			uh.sysupdateRollbackRow.SetSubtitle(pageview.SysupdateRollbackSubtitle(rollbackVersion))
-
-			if stageErr != nil {
-				expander.SetSubtitle(fmt.Sprintf("Update failed: %v", stageErr))
-				uh.toastAdder.ShowErrorToast(fmt.Sprintf("Update failed: %v", stageErr))
+				expander.SetSubtitle(pageview.BootcStageFailureSubtitle(hadOutput))
+				uh.toastAdder.ShowErrorToast(toast)
 				return
 			}
 
-			expander.SetSubtitle(pageview.SysupdateStageResultSubtitle(staged, version, lastMessage))
-			uh.toastAdder.ShowToast(actionmsg.SysupdateStage(dryrun.Enabled(), staged))
+			if statusErr == nil {
+				uh.refreshChangelogAvailability(status)
+				versionGeneration := uh.systemVersionRefresh.Begin()
+				uh.renderSystemVersion(versionGeneration, status)
+			}
+			if statusErr != nil {
+				log.Printf("reading status after staging failed: %v", statusErr)
+				message := "Couldn't confirm the update is ready. Try again."
+				expander.SetSubtitle(message)
+				if dryrun.Enabled() {
+					uh.toastAdder.ShowToast(actionmsg.SystemStage(true, false))
+				} else {
+					uh.toastAdder.ShowErrorToast(message)
+				}
+				return
+			}
+
+			expander.SetSubtitle(pageview.BootcStageResultSubtitle(staged, version))
+			uh.toastAdder.ShowToast(actionmsg.SystemStage(dryrun.Enabled(), staged))
+			if !dryrun.Enabled() {
+				uh.updateShell.StartCheck()
+			}
 		})
 	}()
 }
 
-// updateHomebrew updates Homebrew metadata, then refreshes the outdated list
-// before restoring the top-level action.
-func (uh *UserHome) updateHomebrew(button gtk.Button, gate *actionstate.Gate) {
-	err := homebrew.Update()
-	dryRun := dryrun.Enabled()
-	decision := actionstate.MetadataUpdate(err == nil, dryRun)
-	if err != nil {
-		sgtk.RunOnMainThread(func() {
-			if decision.RestoreControl {
-				gate.Reset()
-				button.SetSensitive(true)
-				button.SetLabel("Update")
-			}
-			uh.toastAdder.ShowErrorToast(fmt.Sprintf("Update failed: %v", err))
-		})
-		return
-	}
+// buildSystemVersionGroup builds the read-only "System Version" group: one
+// plain-language row saying what this machine runs, and a Details row
+// holding the identifiers a support request asks for. It is built hidden
+// and revealed asynchronously, because reading the version requires an exec
+// and this host may not be image-based at all.
+func (uh *UserHome) buildSystemVersionGroup(page *adw.PreferencesPage) {
+	group := adw.NewPreferencesGroup()
+	group.SetTitle("Your System")
+	group.SetVisible(false)
 
-	sgtk.RunOnMainThread(func() {
-		uh.toastAdder.ShowToast(actionmsg.SelfUpdate(dryRun, "Homebrew"))
-		if decision.RestoreControl {
-			gate.Reset()
-			button.SetSensitive(true)
-			button.SetLabel("Update")
-		}
-		if decision.Refresh {
-			uh.loadOutdatedPackagesWithDone(func(bool) {
-				gate.Reset()
-				button.SetSensitive(true)
-				button.SetLabel("Update")
-			})
-		}
-	})
+	versionRow := adw.NewActionRow()
+	versionRow.SetTitle("System Version")
+	versionRow.SetSubtitle("Checking…")
+	group.Add(&versionRow.Widget)
+
+	details := adw.NewExpanderRow()
+	details.SetTitle("Details")
+	details.SetSubtitle("Share these when asking for help.")
+	group.Add(&details.Widget)
+
+	page.Add(group)
+
+	uh.systemVersionGroup = group
+	uh.systemVersionRow = versionRow
+	uh.systemVersionDetails = details
+
+	go uh.loadSystemVersion(uh.systemVersionRefresh.Begin())
 }
 
-// loadBootcRollbackStatus reveals the Roll Back row when bootc records a
-// rollback deployment. A host with no previous image — a fresh install, or
-// one whose rollback slot has been pruned — leaves the row hidden rather
-// than showing an inert control.
-func (uh *UserHome) loadBootcRollbackStatus() {
+// loadSystemVersion reads the booted and staged deployments for the System
+// version group's first render. Runs in a goroutine; the group stays hidden
+// on a host whose version cannot be read. Later renders come from the
+// status a staging or update run already re-read (renderSystemVersion).
+func (uh *UserHome) loadSystemVersion(generation uint64) {
+	if !bootc.IsBootcBootedCached() {
+		return // group stays hidden on hosts with no system image
+	}
+
 	ctx, cancel := bootc.DefaultContext()
 	defer cancel()
 
 	status, err := bootc.GetStatus(ctx)
+	if err != nil {
+		log.Printf("views: reading the system version failed: %v", err)
+		return // an unreadable version is not worth a row that says so
+	}
 
 	sgtk.RunOnMainThread(func() {
-		if uh.bootcRollbackRow == nil {
-			return
-		}
-		if err != nil || status.Status.Rollback == nil {
-			uh.bootcRollbackRow.SetVisible(false)
-			return
-		}
-
-		deployment := status.Status.Rollback
-		presentation := pageview.BootcRollbackRow(deployment.Version(), deployment.Timestamp())
-		uh.bootcRollbackRow.SetSubtitle(presentation.Subtitle)
-		uh.bootcRollbackRow.SetVisible(true)
-		log.Printf("views: bootc rollback available version=%q", deployment.Version())
+		uh.renderSystemVersion(generation, status)
+		uh.applyStagedImage(status)
 	})
 }
 
-// onBootcRollbackClicked stages a rollback to the previous deployment. It
-// does not restart: rolling back and restarting are separate decisions.
-func (uh *UserHome) onBootcRollbackClicked() {
-	if !uh.bootcRollbackGate.TryStart() {
+// renderSystemVersion fills the System version group from one observed
+// bootc status. It runs on the GTK main thread, after the startup read and
+// again after every staging or update run that re-read the status, so a
+// version staged in this session is named without a restart. generation
+// comes from systemVersionRefresh.Begin, claimed before the status was read:
+// a slower, older read must not overwrite a newer one. The group belongs to
+// bootc_status_group, which may be disabled while the paths that call this
+// are not, so every widget is nil-guarded.
+func (uh *UserHome) renderSystemVersion(generation uint64, status *bootc.Status) {
+	if uh.systemVersionRow == nil || uh.systemVersionDetails == nil || uh.systemVersionGroup == nil || status == nil {
+		return
+	}
+	if !uh.systemVersionRefresh.IsCurrent(generation) {
 		return
 	}
 
-	button := uh.bootcRollbackBtn
-	row := uh.bootcRollbackRow
+	booted := status.Status.Booted
+	staged := status.Status.Staged
+	presentation := pageview.SystemVersionRow(booted.Version(), booted.Timestamp(), staged != nil, staged.Version())
+	detailRows := pageview.SystemVersionDetails(
+		booted.Version(),
+		booted.Timestamp(),
+		booted.ImageRef(),
+		booted.Digest(),
+	)
+
+	uh.systemVersionRow.SetTitle(presentation.Title)
+	uh.systemVersionRow.SetSubtitle(presentation.Subtitle)
+
+	details := uh.systemVersionDetails
+	uh.systemVersionRows.Clear(func(row *adw.ActionRow) {
+		details.Remove(&row.Widget)
+	})
+	for _, detail := range detailRows {
+		row := adw.NewActionRow()
+		// The image reference and digest are registry output; render them
+		// literally rather than as Pango markup (issue #437).
+		row.SetUseMarkup(false)
+		row.SetTitle(detail.Title)
+		row.SetSubtitle(detail.Subtitle)
+		// These are the identifiers a person is told to quote, so they
+		// must be selectable and copyable.
+		row.SetSubtitleSelectable(true)
+		details.AddRow(&row.Widget)
+		uh.systemVersionRows.Add(row)
+	}
+	details.SetVisible(len(detailRows) > 0)
+
+	uh.systemVersionGroup.SetVisible(true)
+}
+
+// buildImageIdentityGroup builds the two controls that decide which
+// operating system boots: early updates and the graphics driver. Both
+// replace the running system and take effect at the next restart, so they
+// share one group at the foot of the Updates page rather than sitting among
+// the things a person changes casually.
+func (uh *UserHome) buildImageIdentityGroup(page *adw.PreferencesPage) {
+	status := ublue.StatusCached()
+	if !status.Available {
+		return
+	}
+
+	// Fail closed on a broken authoritative channel table: render a
+	// diagnostic instead of the two controls, so no replacement can be
+	// requested against a table the privileged helper rejects. See
+	// imageinfo.SystemTableError.
+	if status.ChannelTableError != "" {
+		uh.buildChannelErrorGroup(page)
+		log.Printf("views: image identity group failed closed channel_table_error=%q", status.ChannelTableError)
+		return
+	}
+
+	uh.buildChannelGroup(page, status)
+	uh.buildDriverRow(status)
+
+	log.Printf("views: image identity group built variant=%s tag=%s channel=%s switchable=%v driver=%s",
+		status.Variant, status.Tag, status.Channel,
+		status.CanSwitchTo != imageinfo.ChannelUnknown, status.Driver)
+}
+
+// buildChannelErrorGroup replaces the early-updates switch and the graphics
+// driver row with a single read-only row when the authoritative channel
+// table could not be applied. Both actions resolve their target through that
+// table, and the privileged helper re-reads it and refuses after
+// authentication, so keeping the controls enabled would only ask a person to
+// authenticate for an error. The underlying fault names a file, so it goes
+// to the log rather than to the row.
+func (uh *UserHome) buildChannelErrorGroup(page *adw.PreferencesPage) {
+	group := adw.NewPreferencesGroup()
+	group.SetTitle("Advanced")
+
+	row := adw.NewActionRow()
+	row.SetTitle("Unavailable Right Now")
+	row.SetSubtitle("These options are off because of a problem with this computer's update settings.")
+	group.Add(&row.Widget)
+
+	page.Add(group)
+	uh.channelGroup = group
+	uh.channelRow = row
+}
+
+// buildChannelGroup builds the early-updates switch. The switch is
+// insensitive when the running system publishes no counterpart to switch to
+// — every Bluefin Stable host, for one — because there is nothing to switch
+// to. See internal/imageinfo's channel table.
+func (uh *UserHome) buildChannelGroup(page *adw.PreferencesPage, status ublue.Status) {
+	group := adw.NewPreferencesGroup()
+	group.SetTitle("Advanced")
+	group.SetDescription("These change the whole operating system. Each needs your administrator password, a large download, and a restart.")
+
+	onTesting := status.Channel == imageinfo.ChannelTesting
+	// Nothing to switch to, or an image that does not provide the helper
+	// command, both leave the switch inert.
+	switchable := status.CanSwitchTo != imageinfo.ChannelUnknown && status.Supports(ubluehelper.CommandChannelSwitch)
+	uh.channelSwitchable = switchable
+	presentation := pageview.ChannelRow(onTesting, switchable)
+
+	row := adw.NewActionRow()
+	row.SetTitle(presentation.Title)
+	row.SetSubtitle(presentation.Subtitle)
+
+	// guardedSwitch, because gtk_switch_set_active emits ::state-set by the
+	// same path a person's click does: an unmarked revert after a failure or
+	// a dry run would ask the helper to switch back, for real.
+	var toggle *guardedSwitch
+	channelRow := row
+	toggle = newGuardedSwitch(onTesting, func(state bool) {
+		uh.onChannelToggled(state, toggle, channelRow)
+	})
+	toggle.widget.SetSensitive(switchable && uh.stagedImageLoaded && uh.pendingImage == "")
+
+	row.AddSuffix(&toggle.widget.Widget)
+	if switchable {
+		row.SetActivatableWidget(&toggle.widget.Widget)
+	}
+	group.Add(&row.Widget)
+
+	page.Add(group)
+	uh.channelGroup = group
+	uh.channelRow = row
+	uh.channelSwitch = toggle.widget
+}
+
+// buildDriverRow adds the graphics-driver row to the Advanced group. The row
+// is always informational and only offers an action when the hardware wants
+// a different driver than the one running and that driver is actually
+// published for the current stream.
+func (uh *UserHome) buildDriverRow(status ublue.Status) {
+	if uh.channelGroup == nil {
+		return
+	}
+
+	// Recommend a switch only when the image provides the command that
+	// performs it; otherwise the row describes the current driver.
+	recommended := ""
+	if status.RecommendedDriver != "" && status.Supports(ubluehelper.CommandDriverSwitch) {
+		recommended = status.RecommendedDriver.DisplayName()
+	}
+	presentation := pageview.GraphicsDriverRow(status.Driver.DisplayName(), status.GPU, recommended)
+
+	row := adw.NewActionRow()
+	row.SetTitle(presentation.Title)
+	row.SetSubtitle(presentation.Subtitle)
+
+	if status.RecommendedDriver != "" && status.Supports(ubluehelper.CommandDriverSwitch) {
+		driver := status.RecommendedDriver
+		driverRow := row
+		uh.driverSwitchable = true
+		button := gtk.NewButtonWithLabel("Switch")
+		button.SetValign(gtk.AlignCenterValue)
+		button.SetSensitive(uh.stagedImageLoaded && uh.pendingImage == "")
+		clickedCb := func(gtk.Button) {
+			uh.onDriverSwitchClicked(driver, button, driverRow)
+		}
+		button.ConnectClicked(&clickedCb)
+		row.AddSuffix(&button.Widget)
+		uh.driverButton = button
+	}
+
+	uh.channelGroup.Add(&row.Widget)
+	uh.driverRow = row
+	log.Printf("views: graphics driver row built current=%s recommended=%q gpu=%q",
+		status.Driver, status.RecommendedDriver, status.GPU)
+}
+
+// onDriverSwitchClicked asks for the recommended graphics driver. Only the
+// driver word crosses the privileged boundary; the helper derives the
+// operating system to install from its own read-only table. The switch
+// replaces the operating system, so it is admitted through the update shell
+// like a stage: it must not race an update run's own staging.
+func (uh *UserHome) onDriverSwitchClicked(driver imageinfo.Driver, button *gtk.Button, row *adw.ActionRow) {
+	if uh.pendingImage != "" {
+		uh.toastAdder.ShowToast("A system switch is already waiting for a restart")
+		return
+	}
+	if !uh.driverGate.TryStart() {
+		return
+	}
+	if !uh.updateShell.beginMutation("Switching graphics drivers") {
+		uh.driverGate.Reset()
+		uh.toastAdder.ShowToast(pageview.UpdateBusyToast)
+		return
+	}
+
 	button.SetSensitive(false)
+	button.SetLabel("Switching…")
 
 	go func() {
-		ctx, cancel := ublue.DefaultContext()
+		ctx, cancel := ublue.ImageSwitchContext()
 		defer cancel()
 
-		err := ublue.Rollback(ctx)
+		err := ublue.SwitchDriver(ctx, driver)
 
 		sgtk.RunOnMainThread(func() {
-			uh.bootcRollbackGate.Complete()
+			// Ends the admission before refreshAfterOSSwitch, whose check
+			// the shell refuses while a mutation is in flight.
+			uh.updateShell.finishMutation()
+			uh.driverGate.Reset()
 			button.SetSensitive(true)
+			button.SetLabel("Switch")
 
 			if err != nil {
-				uh.toastAdder.ShowErrorToast(fmt.Sprintf("Rollback failed: %v", err))
+				log.Printf("switching the graphics driver failed: %v", err)
+				uh.showPrivilegedFailure(err, "Couldn't switch the graphics driver")
 				return
 			}
 
-			decision := actionmsg.Rollback(dryrun.Enabled())
+			decision := actionmsg.DriverSwitch(dryrun.Enabled(), driver.DisplayName())
 			if decision.Confirm {
-				row.SetSubtitle(pageview.BootcRollbackResultSubtitle())
+				uh.pendingImage = driver.DisplayName()
+				row.SetSubtitle(pageview.GraphicsDriverResultSubtitle(driver.DisplayName()))
+				button.SetVisible(false)
+				uh.refreshAfterOSSwitch()
 			}
 			uh.toastAdder.ShowToast(decision.Toast)
 		})
 	}()
+}
+
+// onChannelToggled asks for the other release channel. Only the channel word
+// crosses the privileged boundary. Like a driver switch it replaces the
+// operating system, so the update shell admits it.
+func (uh *UserHome) onChannelToggled(toTesting bool, toggle *guardedSwitch, row *adw.ActionRow) {
+	if uh.pendingImage != "" {
+		sgtk.RunOnMainThread(func() { toggle.set(!toTesting) })
+		uh.toastAdder.ShowToast("A system switch is already waiting for a restart")
+		return
+	}
+	channel := imageinfo.ChannelStable
+	if toTesting {
+		channel = imageinfo.ChannelTesting
+	}
+
+	title := "Switching back to tested updates"
+	if toTesting {
+		title = "Switching to early updates"
+	}
+	if !uh.updateShell.beginMutation(title) {
+		// This runs inside the switch's state-set emission, where moving
+		// the switch is overridden when the emission finishes; revert on
+		// the next main-loop turn instead.
+		sgtk.RunOnMainThread(func() { toggle.set(!toTesting) })
+		uh.toastAdder.ShowToast(pageview.UpdateBusyToast)
+		return
+	}
+
+	toggle.widget.SetSensitive(false)
+
+	go func() {
+		ctx, cancel := ublue.ImageSwitchContext()
+		defer cancel()
+
+		err := ublue.SwitchChannel(ctx, channel)
+
+		sgtk.RunOnMainThread(func() {
+			uh.updateShell.finishMutation()
+			toggle.widget.SetSensitive(true)
+
+			if err != nil {
+				toggle.set(!toTesting)
+				log.Printf("switching the release channel failed: %v", err)
+				uh.showPrivilegedFailure(err, "Couldn't change when this system gets updates")
+				return
+			}
+
+			decision := actionmsg.ChannelSwitch(dryrun.Enabled(), toTesting)
+			if decision.Confirm {
+				uh.pendingImage = string(channel)
+				toggle.set(toTesting)
+				toggle.widget.SetSensitive(false)
+				row.SetSubtitle(pageview.ChannelSwitchResultSubtitle(toTesting))
+				uh.refreshAfterOSSwitch()
+			} else {
+				toggle.set(!toTesting)
+				toggle.widget.SetSensitive(true)
+			}
+			uh.toastAdder.ShowToast(decision.Toast)
+		})
+	}()
+}
+
+// showPrivilegedFailure reports a failed privileged switch: a persistent
+// error toast, or the brief cancellation toast when the user dismissed the
+// authentication prompt and nothing ran.
+func (uh *UserHome) showPrivilegedFailure(err error, failure string) {
+	toast, isError := pageview.PrivilegedFailureToast(err, failure)
+	if isError {
+		uh.toastAdder.ShowErrorToast(toast)
+		return
+	}
+	uh.toastAdder.ShowToast(toast)
+}
+
+// refreshAfterOSSwitch re-reads what a live channel or driver switch staged,
+// the way a dedicated stage does: the Operating system row learns a restart
+// is due and offers Restart now, and Compare learns the new pending image.
+// Without it both kept describing the system before the switch until the
+// next manual check.
+func (uh *UserHome) refreshAfterOSSwitch() {
+	if dryrun.Enabled() {
+		return
+	}
+	uh.updateShell.StartCheck()
+	uh.OnUpdateFinished(updateflow.Snapshot{CompletedSources: []updateflow.SourceID{updateflow.OperatingSystem}})
 }

@@ -1,0 +1,78 @@
+name: "Feature request"
+description: "Describe a ChairLift capability or improvement with a clear outcome."
+title: "feat: "
+labels: ["needs-human", "kind/feature"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## What happens next
+
+        A maintainer reads every request and may ask you to clarify the scope. A
+        suggestion is not a commitment. Once a maintainer accepts it, a contributor
+        or agent can pick it up.
+
+        You do not need labels or commands. Just reply normally in the comments.
+        See [how issues and PRs work here](https://github.com/projectbluefin/common/blob/main/docs/skills/label-workflow.md).
+
+        ChairLift is Homebrew-only and publishes stable `vYY.MM.N` releases.
+        Image-installed helpers are delivered by the OS image, separately from
+        the Homebrew app.
+
+        Keep [Common reports](https://github.com/projectbluefin/common/issues)
+        in Common. Link related work instead of transferring it or assuming
+        ChairLift owns an OS/image change. Redact private data before submitting.
+  - type: dropdown
+    id: automation_preference
+    attributes:
+      label: "Automation preference"
+      description: "Choose \"Human interaction only\" if you do not want agents working on this request: maintainers keep the needs-human label on it, so agents never pick it up."
+      options:
+        - "Human interaction only"
+        - "Machine analysis is welcome"
+        - "No preference"
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: "Problem to solve"
+      description: "Who is affected, what task cannot be completed, and why is the current behavior insufficient?"
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: "Proposed outcome"
+      description: "Describe the visible result and how someone would verify it. Name the affected page or action and important constraints."
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: "Alternatives considered"
+      description: "Include existing tools or workarounds and why they do not meet the need."
+    validations:
+      required: false
+  - type: input
+    id: chairlift_version
+    attributes:
+      label: "ChairLift version"
+      description: "If this concerns existing behavior, copy the About dialog or installed Homebrew package version."
+      placeholder: "26.10.1 (stable release v26.10.1)"
+    validations:
+      required: false
+  - type: textarea
+    id: image
+    attributes:
+      label: "Host OS image and version"
+      description: "If relevant, identify the booted image/channel/version, architecture and desktop."
+    validations:
+      required: false
+  - type: textarea
+    id: context
+    attributes:
+      label: "Additional context"
+      description: "Link related reports in their original repositories, mockups or source-backed constraints."
+    validations:
+      required: false

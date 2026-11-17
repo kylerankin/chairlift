@@ -16,6 +16,22 @@ func isImmutableActionReference(ref string) bool {
 	return strings.HasPrefix(ref, "./") || commitActionPattern.MatchString(ref)
 }
 
+func isAllowedWorkflowActionReference(ref string) bool {
+	if isImmutableActionReference(ref) {
+		return true
+	}
+	return strings.HasPrefix(ref, "projectbluefin/actions/") && strings.HasSuffix(ref, "@v1")
+}
+
+func TestFirstPartyActionsRequireManagedV1(t *testing.T) {
+	if !isAllowedWorkflowActionReference("projectbluefin/actions/.github/workflows/example.yml@v1") {
+		t.Error("managed v1 first-party reference must be allowed")
+	}
+	if isAllowedWorkflowActionReference("projectbluefin/actions/.github/workflows/example.yml@candidate") {
+		t.Error("candidate first-party reference must not be allowed")
+	}
+}
+
 func TestActionReferenceClassification(t *testing.T) {
 	sha := strings.Repeat("a", 40)
 	for _, tc := range []struct {
@@ -77,8 +93,8 @@ func TestWorkflowActionsUseImmutableCommitSHAs(t *testing.T) {
 					if key.Kind == yaml.ScalarNode && key.Tag == "!!str" && key.Value == "uses" {
 						if value.Kind != yaml.ScalarNode || value.Tag != "!!str" {
 							t.Errorf("%s:%d: uses value must be a string", entry.Name(), value.Line)
-						} else if !isImmutableActionReference(value.Value) {
-							t.Errorf("%s:%d: external action %q must use a full 40-character commit SHA", entry.Name(), value.Line, value.Value)
+						} else if !isAllowedWorkflowActionReference(value.Value) {
+							t.Errorf("%s:%d: action %q violates immutable-third-party or managed-first-party authority", entry.Name(), value.Line, value.Value)
 						}
 					}
 					inspectUses(value)
@@ -114,12 +130,14 @@ func TestWorkflowUsesLeastPrivilege(t *testing.T) {
 	}
 
 	expected := map[string]map[string]string{
-		"lint":      {"contents": "read"},
-		"unit-test": {"contents": "read", "id-token": "write"},
-		"race-test": {"contents": "read"},
-		"e2e":       {"contents": "read"},
-		"verify":    {"contents": "read"},
-		"build":     {"contents": "read"},
+		"lint":         {"contents": "read"},
+		"unit-test":    {"contents": "read"},
+		"race-test":    {"contents": "read"},
+		"e2e":          {"contents": "read"},
+		"atspi":        {"contents": "read"},
+		"verify":       {"contents": "read"},
+		"build":        {"contents": "read"},
+		"tests-passed": {},
 	}
 	if len(config.Jobs) != len(expected) {
 		t.Errorf("workflow has %d jobs, want %d", len(config.Jobs), len(expected))
@@ -138,6 +156,451 @@ func TestWorkflowUsesLeastPrivilege(t *testing.T) {
 			if job.Permissions[permission] != access {
 				t.Errorf("%s permissions = %v, want %v", name, job.Permissions, want)
 				break
+			}
+		}
+	}
+}
+
+func TestCIWalkthroughLoadsItsCompiledSchema(t *testing.T) {
+	for _, file := range []string{"test.yml", "release.yml"} {
+		t.Run(file, func(t *testing.T) {
+			var workflow struct {
+				Jobs map[string]struct {
+					Steps []struct {
+						Run string            `yaml:"run"`
+						Env map[string]string `yaml:"env"`
+					} `yaml:"steps"`
+				} `yaml:"jobs"`
+			}
+			if err := yaml.Unmarshal([]byte(readRepoFile(t, filepath.Join(".github", "workflows", file))), &workflow); err != nil {
+				t.Fatal(err)
+			}
+			for _, step := range workflow.Jobs["e2e"].Steps {
+				if strings.TrimSpace(step.Run) != "make e2e" {
+					continue
+				}
+				if got := step.Env["CHAIRLIFT_SCHEMA_DIR"]; got != "${{ github.workspace }}/build/schemas" {
+					t.Errorf("%s walkthrough schema directory = %q, want the compiled source schema", file, got)
+				}
+				return
+			}
+			t.Fatal("CI has no make e2e step")
+		})
+	}
+}
+
+// The live fixture is intentionally separate from the required merge-queue
+// checks. Its schedule must execute the real gate, not another dry-run suite.
+func TestLiveDockerWorkflowRunsTheRealGate(t *testing.T) {
+	path := filepath.Join(".github", "workflows", "docker-system.yml")
+	var workflow struct {
+		On          map[string]yaml.Node `yaml:"on"`
+		Permissions *map[string]string   `yaml:"permissions"`
+		Jobs        map[string]struct {
+			RunsOn          string            `yaml:"runs-on"`
+			If              string            `yaml:"if"`
+			TimeoutMinutes  int               `yaml:"timeout-minutes"`
+			ContinueOnError bool              `yaml:"continue-on-error"`
+			Permissions     map[string]string `yaml:"permissions"`
+			Steps           []struct {
+				Run             string `yaml:"run"`
+				Uses            string `yaml:"uses"`
+				If              string `yaml:"if"`
+				ContinueOnError bool   `yaml:"continue-on-error"`
+				With            struct {
+					Path string `yaml:"path"`
+				} `yaml:"with"`
+			} `yaml:"steps"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal([]byte(readRepoFile(t, path)), &workflow); err != nil {
+		t.Fatalf("parse %s: %v", path, err)
+	}
+	if workflow.Permissions == nil || len(*workflow.Permissions) != 0 {
+		t.Errorf("live Docker workflow must default to explicit empty permissions")
+	}
+	if _, ok := workflow.On["workflow_dispatch"]; !ok {
+		t.Error("live Docker workflow has no manual trigger")
+	}
+	schedule, ok := workflow.On["schedule"]
+	if !ok || schedule.Kind != yaml.SequenceNode || len(schedule.Content) == 0 {
+		t.Error("live Docker workflow has no scheduled runs")
+	}
+	if len(workflow.On) != 2 {
+		t.Errorf("live Docker triggers = %v, want only schedule and workflow_dispatch", workflow.On)
+	}
+	job, ok := workflow.Jobs["docker-system"]
+	if !ok || len(workflow.Jobs) != 1 {
+		t.Fatal("live Docker workflow must define its one docker-system job")
+	}
+	if job.RunsOn != "ubuntu-24.04" {
+		t.Errorf("live Docker runner = %q, want the explicit Ubuntu kernel/module environment", job.RunsOn)
+	}
+	if job.TimeoutMinutes <= 0 || job.If != "" || job.ContinueOnError {
+		t.Error("live Docker job must run unconditionally with a finite timeout and propagate failure")
+	}
+	if len(job.Permissions) != 1 || job.Permissions["contents"] != "read" {
+		t.Errorf("live Docker permissions = %v, want contents: read only", job.Permissions)
+	}
+
+	liveGate, venv, evidence := false, false, false
+	for _, step := range job.Steps {
+		if step.ContinueOnError {
+			t.Error("live Docker steps must propagate failure")
+		}
+		if strings.TrimSpace(step.Run) == "make e2e-docker" {
+			liveGate = true
+			if step.If != "" {
+				t.Error("the live Docker command must not be conditional")
+			}
+		}
+		if step.Uses == "./.github/actions/dakota-venv" && step.If == "" {
+			venv = true
+		}
+		if !strings.HasPrefix(step.Uses, "actions/upload-artifact@") {
+			continue
+		}
+		evidence = true
+		if strings.ReplaceAll(step.If, " ", "") != "always()" {
+			t.Error("live Docker evidence must upload even after failure")
+		}
+		patterns := strings.Fields(step.With.Path)
+		if len(patterns) == 0 {
+			t.Error("live Docker evidence upload has no paths")
+		}
+		for _, pattern := range patterns {
+			ext := filepath.Ext(pattern)
+			allowed := ext == ".log" || ext == ".json" || ext == ".jsonl" || ext == ".txt" || ext == ".png"
+			if filepath.Dir(pattern) != "build/docker-system" || filepath.Base(pattern) != "*"+ext || !allowed {
+				t.Errorf("unsafe live Docker artifact pattern %q: upload only flat evidence, never HOME/runtime or daemon data", pattern)
+			}
+		}
+	}
+	if !liveGate {
+		t.Error("live Docker workflow must execute make e2e-docker without suppressing its exit status")
+	}
+	if !venv {
+		t.Error("live Docker workflow must reuse the Dakota suite environment")
+	}
+	if !evidence {
+		t.Error("live Docker workflow must upload its evidence")
+	}
+}
+
+func TestReleaseWorkflowGatedOnRequiredChecks(t *testing.T) {
+	path := filepath.Join(".github", "workflows", "release.yml")
+	workflow := readRepoFile(t, path)
+
+	var config struct {
+		Permissions *map[string]string `yaml:"permissions"`
+		Jobs        map[string]struct {
+			Needs       any               `yaml:"needs"`
+			Permissions map[string]string `yaml:"permissions"`
+			Steps       []struct {
+				Name string            `yaml:"name"`
+				Run  string            `yaml:"run"`
+				Uses string            `yaml:"uses"`
+				Env  map[string]string `yaml:"env"`
+				With struct {
+					Cache *bool `yaml:"cache"`
+				} `yaml:"with"`
+			} `yaml:"steps"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal([]byte(workflow), &config); err != nil {
+		t.Fatalf("parse %s: %v", path, err)
+	}
+	if config.Permissions == nil || len(*config.Permissions) != 0 {
+		t.Errorf("top-level permissions = %v, want explicit empty permissions", config.Permissions)
+	}
+
+	gateJob, ok := config.Jobs["gate"]
+	if !ok {
+		t.Fatal("release.yml must define a 'gate' job")
+	}
+	if len(gateJob.Permissions) != 1 || gateJob.Permissions["contents"] != "read" {
+		t.Errorf("gate job permissions = %v, want contents: read", gateJob.Permissions)
+	}
+	gateRunsMakeCI := false
+	for _, step := range gateJob.Steps {
+		if strings.Contains(step.Run, "make ci") {
+			gateRunsMakeCI = true
+			break
+		}
+	}
+	if !gateRunsMakeCI {
+		t.Errorf("gate job steps must execute 'make ci'")
+	}
+
+	e2eJob, ok := config.Jobs["e2e"]
+	if !ok {
+		t.Fatal("release.yml must define an 'e2e' job")
+	}
+	if len(e2eJob.Permissions) != 1 || e2eJob.Permissions["contents"] != "read" {
+		t.Errorf("e2e job permissions = %v, want contents: read", e2eJob.Permissions)
+	}
+	e2eRunsMakeE2E := false
+	for _, step := range e2eJob.Steps {
+		if strings.Contains(step.Run, "make e2e") {
+			e2eRunsMakeE2E = true
+			break
+		}
+	}
+	if !e2eRunsMakeE2E {
+		t.Errorf("e2e job steps must execute 'make e2e'")
+	}
+
+	atspiJob, ok := config.Jobs["atspi"]
+	if !ok {
+		t.Fatal("release.yml must define an 'atspi' job")
+	}
+	if len(atspiJob.Permissions) != 1 || atspiJob.Permissions["contents"] != "read" {
+		t.Errorf("atspi job permissions = %v, want contents: read", atspiJob.Permissions)
+	}
+	atspiRunsShard := false
+	for _, step := range atspiJob.Steps {
+		if step.Run == "make e2e-atspi" && step.Env["ATSPI_TAGS"] == "${{ matrix.tags }}" {
+			atspiRunsShard = true
+		}
+	}
+	if !atspiRunsShard {
+		t.Error("atspi job must run each matrix tag expression")
+	}
+
+	goreleaserJob, ok := config.Jobs["goreleaser"]
+	if !ok {
+		t.Fatal("release.yml must define a 'goreleaser' job")
+	}
+	if len(goreleaserJob.Permissions) != 2 || goreleaserJob.Permissions["contents"] != "write" || goreleaserJob.Permissions["id-token"] != "write" {
+		t.Errorf("goreleaser job permissions = %v, want contents: write and id-token: write", goreleaserJob.Permissions)
+	}
+
+	var needsList []string
+	switch v := goreleaserJob.Needs.(type) {
+	case string:
+		needsList = []string{v}
+	case []any:
+		for _, item := range v {
+			if s, ok := item.(string); ok {
+				needsList = append(needsList, s)
+			}
+		}
+	}
+	hasGate := false
+	hasE2E := false
+	hasATSPI := false
+	for _, n := range needsList {
+		if n == "gate" {
+			hasGate = true
+		}
+		if n == "e2e" {
+			hasE2E = true
+		}
+		if n == "atspi" {
+			hasATSPI = true
+		}
+	}
+	if !hasGate || !hasE2E || !hasATSPI {
+		t.Errorf("goreleaser job needs = %v, want [gate, e2e, atspi]", needsList)
+	}
+
+	// A tag push publishes signed binaries: no job in release.yml may restore
+	// a Go cache another workflow could have written (#644).
+	for name, job := range config.Jobs {
+		for _, step := range job.Steps {
+			if !strings.HasPrefix(step.Uses, "actions/setup-go@") {
+				continue
+			}
+			if step.With.Cache == nil || *step.With.Cache {
+				t.Errorf("release.yml job %q must set cache: false on actions/setup-go to isolate release builds from test caches", name)
+			}
+		}
+	}
+}
+
+// Tag validation must use the same reviewed linter as the merge-queue gate;
+// "latest" can block an unchanged commit only after its release tag is pushed.
+func TestReleaseLintVersionMatchesCIGate(t *testing.T) {
+	version := func(file string) string {
+		var workflow struct {
+			Jobs map[string]struct {
+				Steps []struct {
+					Uses string `yaml:"uses"`
+					With struct {
+						Version string `yaml:"version"`
+					} `yaml:"with"`
+				} `yaml:"steps"`
+			} `yaml:"jobs"`
+		}
+		if err := yaml.Unmarshal([]byte(readRepoFile(t, filepath.Join(".github", "workflows", file))), &workflow); err != nil {
+			t.Fatal(err)
+		}
+		found := ""
+		for _, job := range workflow.Jobs {
+			for _, step := range job.Steps {
+				if strings.HasPrefix(step.Uses, "golangci/golangci-lint-action@") {
+					if found != "" {
+						t.Fatalf("%s has multiple linter installations", file)
+					}
+					found = step.With.Version
+				}
+			}
+		}
+		if found == "" || found == "latest" {
+			t.Fatalf("%s linter version %q is not pinned", file, found)
+		}
+		return found
+	}
+	if release, ci := version("release.yml"), version("test.yml"); release != ci {
+		t.Errorf("release linter %q differs from CI linter %q", release, ci)
+	}
+}
+
+// mergeQueueGateJob is the aggregating job in test.yml, and
+// mergeQueueGateContext is the check-run name it publishes. That name is the
+// single required status check on the default-branch ruleset, so renaming
+// either one means editing the ruleset in the same change.
+const (
+	mergeQueueGateJob     = "tests-passed"
+	mergeQueueGateContext = "Tests Passed"
+)
+
+// testWorkflowTrigger is the subset of one `on:` entry these tests read. A
+// bare `merge_group:` parses as null and leaves every field zero, so trigger
+// presence is decided by the map key rather than by a non-nil value.
+type testWorkflowTrigger struct {
+	Types          []string `yaml:"types"`
+	Branches       []string `yaml:"branches"`
+	BranchesIgnore []string `yaml:"branches-ignore"`
+}
+
+// testWorkflowDocument names `on` directly: yaml.v3 resolves the YAML 1.2 core
+// schema, in which `on` is an ordinary string rather than a spelling of true,
+// so the key survives unmarshaling unchanged.
+type testWorkflowDocument struct {
+	On   map[string]testWorkflowTrigger `yaml:"on"`
+	Jobs map[string]struct {
+		Name  string   `yaml:"name"`
+		If    string   `yaml:"if"`
+		Needs []string `yaml:"needs"`
+	} `yaml:"jobs"`
+}
+
+func readTestWorkflow(t *testing.T) testWorkflowDocument {
+	t.Helper()
+	path := filepath.Join(".github", "workflows", "test.yml")
+	var document testWorkflowDocument
+	if err := yaml.Unmarshal([]byte(readRepoFile(t, path)), &document); err != nil {
+		t.Fatalf("parse %s: %v", path, err)
+	}
+	return document
+}
+
+func TestTestsWorkflowRunsForTheMergeQueue(t *testing.T) {
+	document := readTestWorkflow(t)
+
+	mergeGroup, ok := document.On["merge_group"]
+	if !ok {
+		t.Fatal("test.yml declares no merge_group trigger; a queued pull request would merge with no validation of its merge-group head")
+	}
+	// github.ref for merge_group is refs/heads/gh-readonly-queue/main/pr-<n>-<sha>
+	// and never refs/heads/main, so a branch filter naming main matches
+	// nothing — it does not narrow this trigger, it removes it.
+	if len(mergeGroup.Branches) != 0 || len(mergeGroup.BranchesIgnore) != 0 {
+		t.Errorf("merge_group declares branches=%v branches-ignore=%v; filters run against the gh-readonly-queue ref, so this trigger must stay unfiltered",
+			mergeGroup.Branches, mergeGroup.BranchesIgnore)
+	}
+
+	// Adding the queue must not cost the existing signals.
+	for _, trigger := range []string{"push", "pull_request"} {
+		existing, ok := document.On[trigger]
+		if !ok {
+			t.Errorf("test.yml no longer declares the %s trigger", trigger)
+			continue
+		}
+		if len(existing.Branches) != 1 || existing.Branches[0] != "main" {
+			t.Errorf("%s branches = %v, want [main]", trigger, existing.Branches)
+		}
+	}
+}
+
+func TestMergeQueueGateWaitsForEveryTestJob(t *testing.T) {
+	document := readTestWorkflow(t)
+
+	gate, ok := document.Jobs[mergeQueueGateJob]
+	if !ok {
+		t.Fatalf("test.yml defines no %s job", mergeQueueGateJob)
+	}
+	if gate.Name != mergeQueueGateContext {
+		t.Errorf("%s name = %q, want %q: the ruleset requires that exact context", mergeQueueGateJob, gate.Name, mergeQueueGateContext)
+	}
+	// GitHub counts a skipped required check as a passing one, so a gate that
+	// runs only when its dependencies succeed reports success for a run whose
+	// tests failed.
+	if strings.ReplaceAll(gate.If, " ", "") != "always()" {
+		t.Errorf("%s if = %q, want always()", mergeQueueGateJob, gate.If)
+	}
+
+	needed := make(map[string]bool, len(gate.Needs))
+	for _, need := range gate.Needs {
+		needed[need] = true
+		if _, ok := document.Jobs[need]; !ok {
+			t.Errorf("%s needs %q, which test.yml does not define", mergeQueueGateJob, need)
+		}
+	}
+	for name := range document.Jobs {
+		if name == mergeQueueGateJob {
+			continue
+		}
+		if !needed[name] {
+			t.Errorf("%s does not need job %q, so the queue would merge while %q is failing", mergeQueueGateJob, name, name)
+		}
+	}
+
+	quality := readRepoFile(t, filepath.Join("docs", "quality.md"))
+	if !strings.Contains(quality, mergeQueueGateContext) {
+		t.Errorf("docs/quality.md does not name the required %q check", mergeQueueGateContext)
+	}
+}
+
+// TestAppTokensAreScoped keeps every GitHub App installation token minted in
+// a workflow limited to named permissions, so a compromised job never
+// inherits the app's full installation permission set.
+func TestAppTokensAreScoped(t *testing.T) {
+	entries, err := os.ReadDir(filepath.Join(RepoRoot(), ".github", "workflows"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || (!strings.HasSuffix(entry.Name(), ".yml") && !strings.HasSuffix(entry.Name(), ".yaml")) {
+			continue
+		}
+		path := filepath.Join(".github", "workflows", entry.Name())
+		var workflow struct {
+			Jobs map[string]struct {
+				Steps []struct {
+					Uses string                 `yaml:"uses"`
+					With map[string]interface{} `yaml:"with"`
+				} `yaml:"steps"`
+			} `yaml:"jobs"`
+		}
+		if err := yaml.Unmarshal([]byte(readRepoFile(t, path)), &workflow); err != nil {
+			t.Fatalf("parse %s: %v", path, err)
+		}
+		for job, spec := range workflow.Jobs {
+			for _, step := range spec.Steps {
+				if !strings.HasPrefix(step.Uses, "actions/create-github-app-token@") {
+					continue
+				}
+				scoped := false
+				for key := range step.With {
+					if strings.HasPrefix(key, "permission-") {
+						scoped = true
+					}
+				}
+				if !scoped {
+					t.Errorf("%s job %s mints an app token without any permission-* input", path, job)
+				}
 			}
 		}
 	}

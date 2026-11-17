@@ -10,11 +10,12 @@ import (
 
 // Config represents the application configuration
 type Config struct {
-	SystemPage       PageConfig `yaml:"system_page"`
+	AgentsPage       PageConfig `yaml:"agents_page"`
 	UpdatesPage      PageConfig `yaml:"updates_page"`
 	ApplicationsPage PageConfig `yaml:"applications_page"`
 	MaintenancePage  PageConfig `yaml:"maintenance_page"`
 	FeaturesPage     PageConfig `yaml:"features_page"`
+	LiveryPage       PageConfig `yaml:"livery_page"`
 	HelpPage         PageConfig `yaml:"help_page"`
 }
 
@@ -30,15 +31,26 @@ type GroupConfig struct {
 	Issues       string         `yaml:"issues,omitempty"`
 	Chat         string         `yaml:"chat,omitempty"`
 	BundlesPaths []string       `yaml:"bundles_paths,omitempty"`
-	// AIImages overrides the local-AI container image per GPU vendor
-	// ("nvidia", "amd", "intel", "none"). It lives in the ordinary config
-	// file rather than the root-only channels.yml because the AI stack
-	// crosses no privilege boundary: the container runs rootless in the
-	// invoking account, so a user pointing it at their own image can do
-	// nothing they could not do by running podman directly.
-	AIImages map[string]string `yaml:"ai_images,omitempty"`
-	// AIModel overrides the model the stack serves.
-	AIModel string `yaml:"ai_model,omitempty"`
+	// InstallPulp and StageFeeds are the optional developer feed onboarding
+	// steps `dx_group` may run after a confirmed Developer Mode enable. Both
+	// default to false: they have side effects (a system-scope Flatpak install
+	// and a file written into the user's data directory), so the same
+	// conservative posture as reset_group applies — an administrator opts in
+	// explicitly rather than every enable performing them. Neither is
+	// consulted when Developer Mode is switched off, which is a clean no-op
+	// for Pulp, the staged file, and any subscriptions already imported from
+	// it.
+	InstallPulp bool `yaml:"install_pulp,omitempty"`
+	StageFeeds  bool `yaml:"stage_feeds,omitempty"`
+	// InstallDevApps is `dx_group`'s optional follow-on that installs the
+	// dakota-dev-flatpaks app collection after a confirmed Developer Mode
+	// enable. Defaults to false for the same reason as InstallPulp: it is a
+	// separate install, not what the switch itself says it does.
+	InstallDevApps bool `yaml:"install_dev_apps,omitempty"`
+
+	// WSLBackend is the virtual-machine backend for WSL Mode ("nsl" or "lima").
+	// Defaults to "nsl".
+	WSLBackend string `yaml:"wsl_backend,omitempty"`
 }
 
 // ActionConfig represents a configurable action
@@ -54,11 +66,12 @@ type ActionConfig struct {
 // file; loadFromPath merges it onto defaultConfig() to produce the *Config
 // callers see.
 type rawConfig struct {
-	SystemPage       rawPageConfig `yaml:"system_page"`
+	AgentsPage       rawPageConfig `yaml:"agents_page"`
 	UpdatesPage      rawPageConfig `yaml:"updates_page"`
 	ApplicationsPage rawPageConfig `yaml:"applications_page"`
 	MaintenancePage  rawPageConfig `yaml:"maintenance_page"`
 	FeaturesPage     rawPageConfig `yaml:"features_page"`
+	LiveryPage       rawPageConfig `yaml:"livery_page"`
 	HelpPage         rawPageConfig `yaml:"help_page"`
 }
 
@@ -71,23 +84,41 @@ type rawPageConfig map[string]rawGroupConfig
 // string/slice, means the file set that field explicitly and it replaces the
 // default outright.
 type rawGroupConfig struct {
-	Enabled      *bool              `yaml:"enabled"`
-	AppID        *string            `yaml:"app_id"`
-	Actions      *[]ActionConfig    `yaml:"actions"`
-	Website      *string            `yaml:"website"`
-	Issues       *string            `yaml:"issues"`
-	Chat         *string            `yaml:"chat"`
-	BundlesPaths *[]string          `yaml:"bundles_paths"`
-	AIImages     *map[string]string `yaml:"ai_images"`
-	AIModel      *string            `yaml:"ai_model"`
+	Enabled        *bool           `yaml:"enabled"`
+	AppID          *string         `yaml:"app_id"`
+	Actions        *[]ActionConfig `yaml:"actions"`
+	Website        *string         `yaml:"website"`
+	Issues         *string         `yaml:"issues"`
+	Chat           *string         `yaml:"chat"`
+	BundlesPaths   *[]string       `yaml:"bundles_paths"`
+	InstallPulp    *bool           `yaml:"install_pulp"`
+	StageFeeds     *bool           `yaml:"stage_feeds"`
+	InstallDevApps *bool           `yaml:"install_dev_apps"`
+	WSLBackend     *string         `yaml:"wsl_backend"`
 }
 
-// configPaths are the locations to search for the config file
-var configPaths = []string{
+// trustedConfigPaths are the fixed administrator- and package-owned candidates
+// permitted to define sudo actions. Membership in this list — not a filesystem
+// lookup performed after the file has been read — decides a search candidate's
+// provenance.
+var trustedConfigPaths = []string{
 	"/etc/chairlift/config.yml",
 	"/usr/share/chairlift/config.yml",
+}
+
+// untrustedConfigPaths are the relative candidates resolved against the
+// executable directory or the working directory. config.dev.yml is a
+// repository-only development override that keeps source checkouts usable
+// while package/install paths ship the privileged default at
+// /usr/share/chairlift/config.yml. Neither may define sudo actions.
+var untrustedConfigPaths = []string{
+	"config.dev.yml",
 	"config.yml",
 }
+
+// configPaths are the locations to search for the config file, trusted
+// candidates first.
+var configPaths = append(append([]string{}, trustedConfigPaths...), untrustedConfigPaths...)
 
 // readFile is an injection seam for deterministic read-failure tests. Its
 // production value is always os.ReadFile.
@@ -99,13 +130,19 @@ var readFile = os.ReadFile
 // together with the actionable error.
 func Load() (*Config, *LoadError) {
 	for _, candidate := range configPaths {
-		path := resolveCandidatePath(candidate)
-		cfg, err := loadResolvedPath(path)
+		// Provenance comes from which fixed candidate matched, decided
+		// before the file is read, so nothing on disk can change the answer
+		// afterwards.
+		src := configSource{
+			path:    resolveCandidatePath(candidate),
+			trusted: isTrustedCandidate(candidate),
+		}
+		cfg, err := loadResolvedPath(src)
 		if err == nil {
-			log.Printf("Loaded config from %s", path)
+			log.Printf("Loaded config from %s", src.path)
 			return cfg, nil
 		}
-		if err.Kind == KindRead && errors.Is(err, fs.ErrNotExist) {
+		if err.Kind == KindRead && errors.Is(err, fs.ErrNotExist) && !danglingAuthoritativeSymlink(src.path) {
 			continue
 		}
 
@@ -118,30 +155,73 @@ func Load() (*Config, *LoadError) {
 	return defaultConfig(), nil
 }
 
-// loadFromPath attempts to load config from a specific path
+// loadFromPath attempts to load config from a specific path. The path is not
+// one of Load()'s fixed candidates, so provenance is decided by inspecting it —
+// but still before the read, so the decision cannot be swapped out underneath
+// the bytes that were loaded.
 func loadFromPath(path string) (*Config, *LoadError) {
-	return loadResolvedPath(resolveCandidatePath(path))
+	resolved := resolveCandidatePath(path)
+	return loadResolvedPath(configSource{
+		path:    resolved,
+		trusted: isTrustedConfigPath(resolved),
+	})
 }
 
 // loadResolvedPath reads and strictly validates one already-resolved
-// candidate, then overlays it onto the built-in defaults.
-func loadResolvedPath(path string) (*Config, *LoadError) {
-	data, err := readFile(path)
+// candidate, then overlays it onto the built-in defaults. src carries the
+// provenance decision made before the read; nothing here re-derives it.
+func loadResolvedPath(src configSource) (*Config, *LoadError) {
+	data, err := readFile(src.path)
 	if err != nil {
 		return nil, &LoadError{
-			Path:   path,
+			Path:   src.path,
 			Kind:   KindRead,
 			Detail: "reading configuration file",
 			Err:    err,
 		}
 	}
 
-	raw, loadErr := parseAndValidate(path, data)
+	raw, loadErr := parseAndValidate(src, data)
 	if loadErr != nil {
 		return nil, loadErr
 	}
 
-	return mergeConfig(defaultConfig(), raw), nil
+	merged := mergeConfig(defaultConfig(), raw)
+	if loadErr := validateEffectiveSudoProvenance(src, merged); loadErr != nil {
+		return nil, loadErr
+	}
+
+	return merged, nil
+}
+
+// configPages returns cfg's pages in a fixed order so any whole-config walk
+// visits the same pages the rest of the package knows about.
+func configPages(cfg *Config) []PageConfig {
+	return []PageConfig{
+		cfg.AgentsPage,
+		cfg.UpdatesPage,
+		cfg.ApplicationsPage,
+		cfg.MaintenancePage,
+		cfg.FeaturesPage,
+		cfg.LiveryPage,
+		cfg.HelpPage,
+	}
+}
+
+// danglingAuthoritativeSymlink reports whether path is a symlink whose target
+// is missing. os.ReadFile follows the link and fails with ENOENT for such a
+// link exactly as it does for an absent path, so an Lstat on the candidate is
+// the only way to tell a present-but-unreadable authoritative symlink apart
+// from a genuinely missing candidate. A missing directory entry returns false
+// here (Lstat also fails ENOENT), so Load() still advances to the next
+// candidate for it; a regular file that exists is never read as ENOENT, so
+// the non-ENOENT branch already fails it closed.
+func danglingAuthoritativeSymlink(path string) bool {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return false
+	}
+	return info.Mode()&os.ModeSymlink != 0
 }
 
 // disabledConfig retains the canonical pages, groups, and non-visibility
@@ -149,14 +229,7 @@ func loadResolvedPath(path string) (*Config, *LoadError) {
 // returned for an authoritative read, parse/type, or schema failure.
 func disabledConfig() *Config {
 	cfg := defaultConfig()
-	pages := []PageConfig{
-		cfg.SystemPage,
-		cfg.UpdatesPage,
-		cfg.ApplicationsPage,
-		cfg.MaintenancePage,
-		cfg.FeaturesPage,
-		cfg.HelpPage,
-	}
+	pages := configPages(cfg)
 	for _, page := range pages {
 		for name, group := range page {
 			group.Enabled = false
@@ -173,11 +246,12 @@ func disabledConfig() *Config {
 // def's outright.
 func mergeConfig(def *Config, raw *rawConfig) *Config {
 	return &Config{
-		SystemPage:       mergePage(def.SystemPage, raw.SystemPage),
+		AgentsPage:       mergePage(def.AgentsPage, raw.AgentsPage),
 		UpdatesPage:      mergePage(def.UpdatesPage, raw.UpdatesPage),
 		ApplicationsPage: mergePage(def.ApplicationsPage, raw.ApplicationsPage),
 		MaintenancePage:  mergePage(def.MaintenancePage, raw.MaintenancePage),
 		FeaturesPage:     mergePage(def.FeaturesPage, raw.FeaturesPage),
+		LiveryPage:       mergePage(def.LiveryPage, raw.LiveryPage),
 		HelpPage:         mergePage(def.HelpPage, raw.HelpPage),
 	}
 }
@@ -230,14 +304,20 @@ func mergeGroup(def GroupConfig, raw rawGroupConfig) GroupConfig {
 	if raw.Chat != nil {
 		result.Chat = *raw.Chat
 	}
-	if raw.AIImages != nil {
-		result.AIImages = *raw.AIImages
-	}
-	if raw.AIModel != nil {
-		result.AIModel = *raw.AIModel
-	}
 	if raw.BundlesPaths != nil {
 		result.BundlesPaths = *raw.BundlesPaths
+	}
+	if raw.InstallPulp != nil {
+		result.InstallPulp = *raw.InstallPulp
+	}
+	if raw.StageFeeds != nil {
+		result.StageFeeds = *raw.StageFeeds
+	}
+	if raw.InstallDevApps != nil {
+		result.InstallDevApps = *raw.InstallDevApps
+	}
+	if raw.WSLBackend != nil {
+		result.WSLBackend = *raw.WSLBackend
 	}
 
 	return result
@@ -246,42 +326,37 @@ func mergeGroup(def GroupConfig, raw rawGroupConfig) GroupConfig {
 // defaultConfig returns the default configuration
 func defaultConfig() *Config {
 	return &Config{
-		SystemPage: PageConfig{
-			"system_info_group":  GroupConfig{Enabled: true},
-			"bootc_status_group": GroupConfig{Enabled: true},
-			// Which image this machine runs, and the graphics driver that
-			// image carries. Both describe the system's identity, so they
-			// belong beside the rest of it rather than among the features
-			// you switch on.
-			"channel_group": GroupConfig{Enabled: true},
-			"health_group": GroupConfig{
-				Enabled: true,
-				AppID:   "io.missioncenter.MissionCenter",
-			},
+		// Agent Mode is a systemd user unit in the invoking account, so it
+		// crosses no privilege boundary and needs no administrator route.
+		AgentsPage: PageConfig{
+			"agents_group": GroupConfig{Enabled: true},
+			// Troubleshooting: Goose on the Agent Mode model, with
+			// read-only tools. Installs nothing until Set Up, and is
+			// accepted under help_page too, its old home (legacy.go).
+			"troubleshooting_group": GroupConfig{Enabled: true},
 		},
 		UpdatesPage: PageConfig{
-			// Update All leads the page: it is the one action most users
-			// need, with the per-provider groups below it for the cases it
-			// does not cover.
-			"update_all_group":        GroupConfig{Enabled: true},
+			// Whether this system updates itself on a schedule. Updating
+			// now is the Updates page's own action and needs no key.
+			"automatic_updates_group": GroupConfig{Enabled: true},
 			"bootc_updates_group":     GroupConfig{Enabled: true},
-			"sysupdate_updates_group": GroupConfig{Enabled: true},
 			"flatpak_updates_group":   GroupConfig{Enabled: true},
 			"brew_updates_group":      GroupConfig{Enabled: true},
 			"brew_trust_group":        GroupConfig{Enabled: true},
+			// Which release stream this machine follows, and the graphics
+			// driver the image carries. Both replace the operating system
+			// and need a restart, so they sit with updates rather than in a
+			// separate place describing the machine.
+			"channel_group": GroupConfig{Enabled: true},
+			// The compact system-version readout. Technical identity stays
+			// behind a details row.
+			"bootc_status_group": GroupConfig{Enabled: true},
 		},
 		ApplicationsPage: PageConfig{
-			"applications_installed_group": GroupConfig{
-				Enabled: true,
-				AppID:   "io.github.kolunmi.Bazaar",
-			},
-			"flatpak_user_group":   GroupConfig{Enabled: true},
-			"flatpak_system_group": GroupConfig{Enabled: true},
-			"brew_group":           GroupConfig{Enabled: true},
-			"brew_search_group":    GroupConfig{Enabled: true},
+			"brew_group": GroupConfig{Enabled: true},
 			"brew_bundles_group": GroupConfig{
 				Enabled:      true,
-				BundlesPaths: []string{"/usr/share/snow/bundles"},
+				BundlesPaths: []string{"/usr/share/ublue-os/homebrew", "/usr/share/chairlift/bundles", "/etc/chairlift/bundles"},
 			},
 		},
 		MaintenancePage: PageConfig{
@@ -295,9 +370,11 @@ func defaultConfig() *Config {
 					},
 				},
 			},
-			"maintenance_brew_group":         GroupConfig{Enabled: true},
-			"maintenance_flatpak_group":      GroupConfig{Enabled: true},
-			"maintenance_optimization_group": GroupConfig{Enabled: true},
+			// One routine cleanup action, composing the existing typed
+			// post-update maintenance runner. Enabled because it is safe:
+			// it removes cached downloads and unused supporting software,
+			// never installed apps, documents or containers.
+			"maintenance_freespace_group": GroupConfig{Enabled: true},
 			// Powerwash and Factory Reset. Disabled by default, the same as
 			// maintenance_cleanup_group: both are irreversible, so an
 			// administrator opts in explicitly rather than exposing them on
@@ -305,21 +382,45 @@ func defaultConfig() *Config {
 			"reset_group": GroupConfig{Enabled: false},
 		},
 		FeaturesPage: PageConfig{
-			"features_group": GroupConfig{Enabled: true},
+			"bluefin_cli_group":          GroupConfig{Enabled: true},
+			"features_group":             GroupConfig{Enabled: true},
+			"desktop_integrations_group": GroupConfig{Enabled: true},
 			// Capabilities you turn on. Both hide themselves when
 			// internal/ublue reports no /usr/share/ublue-os/image-info.json,
-			// which is every non-Bluefin host including Snow Linux.
-			"dx_group":              GroupConfig{Enabled: true},
-			"gaming_group":          GroupConfig{Enabled: true},
-			"ai_group":              GroupConfig{Enabled: true},
-			"troubleshooting_group": GroupConfig{Enabled: true},
+			// which is every non-Bluefin host.
+			//
+			// dx_group's optional onboarding (InstallPulp, StageFeeds,
+			// InstallDevApps) is left at its zero value here on purpose: enabling developer
+			// access and installing a feed reader for the account are
+			// separate decisions, and only the first one is what the switch
+			// says it does. WSLBackend defaults to "nsl".
+			"dx_group":     GroupConfig{Enabled: true, WSLBackend: "nsl"},
+			"gaming_group": GroupConfig{Enabled: true},
+			// Printer applications: one rootless quadlet per driver family,
+			// floored on Podman by internal/capability. Enabled because the
+			// group does nothing until a switch is turned on.
+			"printers_group": GroupConfig{Enabled: true},
+			// Compass, TunaOS's launcher, installed system-wide from the
+			// FlatPark remote the image ships; floored on Flatpak.
+			"compass_group": GroupConfig{Enabled: true},
+		},
+		// The panel mark and the Files application mark. Both write only
+		// into the user's own icon theme and dconf, so neither needs a
+		// privileged route; both ship enabled because neither changes
+		// anything until a selection is made.
+		LiveryPage: PageConfig{
+			"account_group":           GroupConfig{Enabled: true},
+			"wallpapers_group":        GroupConfig{Enabled: true},
+			"livery_app_grid_group":   GroupConfig{Enabled: true},
+			"livery_foundation_group": GroupConfig{Enabled: true},
+			"livery_dock_group":       GroupConfig{Enabled: true},
 		},
 		HelpPage: PageConfig{
 			"help_resources_group": GroupConfig{
 				Enabled: true,
-				Website: "https://github.com/frostyard/snosi",
-				Issues:  "https://github.com/frostyard/snosi/issues",
-				Chat:    "https://github.com/frostyard/snosi/discussions",
+				Website: "https://docs.projectbluefin.io/",
+				Issues:  "https://github.com/projectbluefin/dakota/issues",
+				Chat:    "https://ask.projectbluefin.io/",
 			},
 		},
 	}
@@ -329,8 +430,8 @@ func defaultConfig() *Config {
 func (c *Config) IsGroupEnabled(pageName, groupName string) bool {
 	var page PageConfig
 	switch pageName {
-	case "system_page":
-		page = c.SystemPage
+	case "agents_page":
+		page = c.AgentsPage
 	case "updates_page":
 		page = c.UpdatesPage
 	case "applications_page":
@@ -339,25 +440,58 @@ func (c *Config) IsGroupEnabled(pageName, groupName string) bool {
 		page = c.MaintenancePage
 	case "features_page":
 		page = c.FeaturesPage
+	case "livery_page":
+		page = c.LiveryPage
 	case "help_page":
 		page = c.HelpPage
 	default:
 		return true
 	}
 
-	group, ok := page[groupName]
-	if !ok {
-		return true // Default to enabled if not specified
+	if group, ok := page[groupName]; ok {
+		return group.Enabled
 	}
-	return group.Enabled
+	// Loading merges every file onto defaultConfig(), so a group absent from
+	// this Config is one the schema retired. Read it off the defaults when
+	// they still declare it, and never default a retired group to enabled:
+	// that would keep driving behavior after removal.
+	if defPage, ok := defaultConfig().pageConfig(pageName); ok {
+		if defGroup, ok := defPage[groupName]; ok {
+			return defGroup.Enabled
+		}
+	}
+	return false
+}
+
+// pageConfig returns the named page's groups, mirroring the page switch used
+// by IsGroupEnabled and GetGroupConfig.
+func (c *Config) pageConfig(pageName string) (PageConfig, bool) {
+	switch pageName {
+	case "agents_page":
+		return c.AgentsPage, true
+	case "updates_page":
+		return c.UpdatesPage, true
+	case "applications_page":
+		return c.ApplicationsPage, true
+	case "maintenance_page":
+		return c.MaintenancePage, true
+	case "features_page":
+		return c.FeaturesPage, true
+	case "livery_page":
+		return c.LiveryPage, true
+	case "help_page":
+		return c.HelpPage, true
+	default:
+		return nil, false
+	}
 }
 
 // GetGroupConfig returns the configuration for a specific group
 func (c *Config) GetGroupConfig(pageName, groupName string) *GroupConfig {
 	var page PageConfig
 	switch pageName {
-	case "system_page":
-		page = c.SystemPage
+	case "agents_page":
+		page = c.AgentsPage
 	case "updates_page":
 		page = c.UpdatesPage
 	case "applications_page":
@@ -366,6 +500,8 @@ func (c *Config) GetGroupConfig(pageName, groupName string) *GroupConfig {
 		page = c.MaintenancePage
 	case "features_page":
 		page = c.FeaturesPage
+	case "livery_page":
+		page = c.LiveryPage
 	case "help_page":
 		page = c.HelpPage
 	default:

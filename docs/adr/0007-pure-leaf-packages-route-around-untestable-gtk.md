@@ -20,18 +20,19 @@ The package layout routes all decidable logic around GTK:
 
 - Exactly three surfaces import puregotk: `internal/app`, `internal/window`,
   and the page builders at the top level of `internal/views`
-  (`applications_page.go`, `features_page.go`, `help_page.go`,
-  `maintenance_page.go`, `system_page.go`, `updates_page.go`, `views.go`).
+  (`applications_page.go`, `agents_page.go`, `features_page.go`, `help_page.go`,
+  `livery_page.go`, `maintenance_page.go`, `updates_page.go`, `views.go`).
   These packages contain **zero** `_test.go` files, by policy: any logic
   worth testing must not live there.
 - Every decidable computation lives in headless leaf packages that import no
-  GTK: `internal/views/actionmsg`, `actionstate`, `badgestate`,
-  `bundleview`, `featurestatus`, `flatpakstatus`, `pageview`, `rowset`, and
-  `trustmsg`, plus non-view peers like `internal/updexhelper`. Each leaf
+  GTK: `internal/views/actionmsg`, `actionstate`, `bundleview`,
+  `featurestatus`, `pageview`, `rowset`, `trustmsg`, `progresslog`,
+  `signalroute`, `liverystate`, `cleanupview`, and `updatepresent`, plus
+  non-view packages like `internal/updexhelper` and `internal/updateflow`. Each leaf
   ships table-driven unit tests that run on a GTK-less host.
 - Wiring tests keep the GTK layer honest without importing it:
   `TestPageBuildersUsePurePresentations`
-  (`internal/views/pageview/wiring_test.go:11`) reads the page builders'
+  (`internal/views/pageview/wiring_test.go`) reads all seven page builders'
   *source* and asserts every one calls its `pageview.*` presentation helpers
   and that retired inline presentation fragments do not reappear; the
   `actionstate` wiring tests (`internal/views/actionstate/wiring_test.go`,
@@ -65,9 +66,10 @@ is a pure function under test.
   stub GTK surface large enough to exercise page builders is a second
   implementation that drifts; the leaf split tests real logic instead of
   imitation widgets.
-- **Running unit tests under xvfb with GTK installed:** rejected as the
-  primary strategy — it makes every unit-test invocation host-dependent and
-  slow; reserved for the single E2E smoke test.
+- **Running unit tests under a headless display with GTK installed:**
+  rejected as the primary strategy — it makes every unit-test invocation
+  host-dependent and slow; reserved for the E2E suite, which runs the real
+  application under headless Mutter in the Dakota image.
 
 ## References
 
@@ -77,5 +79,5 @@ is a pure function under test.
   [ADR-0009](0009-dry-run-output-convention-and-single-decision-structs.md)
 - Enforced by: `internal/views/pageview/wiring_test.go`,
   `internal/views/actionstate/wiring_test.go`,
-  `internal/views/actionstate/applications_wiring_test.go`, and the per-leaf
-  unit tests in each `internal/views/*` package
+  the [historical Apps wiring test](https://github.com/projectbluefin/chairlift/blob/8c98e6f0878bd87de3e9e867fdbcddb28c8251a1/internal/views/actionstate/applications_wiring_test.go),
+  and the per-leaf unit tests in each `internal/views/*` package

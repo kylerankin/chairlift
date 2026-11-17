@@ -1,238 +1,611 @@
 package troubleshoot
 
 import (
+	"encoding/json"
 	"errors"
-	"github.com/projectbluefin/chairlift/internal/dryrun"
+	"net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/projectbluefin/chairlift/internal/dryrun"
+	"gopkg.in/yaml.v3"
 )
 
-// The configuration goose-mcp-setup writes on a fresh system.
-const freshConfig = `GEMINI_CLI_COMMAND: gemini
-GOOSE_PROVIDER: gemini-cli
-GOOSE_MODEL: gemini-3-flash-preview
-extensions:
-  linux-tools:
-    enabled: true
-    type: stdio
-    name: linux-tools
-    description: Linux system administration and diagnostics
-    cmd: /home/linuxbrew/.linuxbrew/bin/linux-mcp-server
-`
-
-func TestParseConfig(t *testing.T) {
-	tests := []struct {
-		name         string
-		data         string
-		wantWired    bool
-		wantProvider string
-	}{
-		{
-			name:         "what the setup script writes",
-			data:         freshConfig,
-			wantWired:    true,
-			wantProvider: "gemini-cli",
-		},
-		{
-			// The common case the setup script refuses to touch: a user who
-			// already ran `goose configure`. The extension is absent, so the
-			// feature is not wired up however many packages are installed.
-			name:         "configured by hand, no linux-tools",
-			data:         "GOOSE_PROVIDER: anthropic\nGOOSE_MODEL: claude-sonnet-4\n",
-			wantWired:    false,
-			wantProvider: "anthropic",
-		},
-		{
-			name:      "extension added by hand under another key order",
-			data:      "extensions:\n  something:\n    name: linux-tools\n",
-			wantWired: true,
-		},
-		{
-			name: "empty file",
-			data: "",
-		},
+// fakeHost points detection at a temporary Homebrew bin holding the named
+// executables, with nothing on $PATH.
+func fakeHost(t *testing.T, arch string, present ...string) string {
+	t.Helper()
+	bin := t.TempDir()
+	for _, name := range present {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
+	prevLook, prevBrew, prevArch := lookPath, brewExecutable, goarch
+	t.Cleanup(func() { lookPath, brewExecutable, goarch = prevLook, prevBrew, prevArch })
+	lookPath = func(string) (string, error) { return "", errors.New("not on PATH") }
+	brewExecutable = func() string { return filepath.Join(bin, "brew") }
+	goarch = arch
+	return bin
+}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			state := ParseConfig([]byte(tt.data))
+// recordBrew replaces the Homebrew seams and returns what they were asked
+// to do, in order.
+func recordBrew(t *testing.T, fail string) *[]string {
+	t.Helper()
+	prevTap, prevInstall, prevTrust := tapPackage, installPackage, trustPackage
+	t.Cleanup(func() { tapPackage, installPackage, trustPackage = prevTap, prevInstall, prevTrust })
+	var calls []string
+	tapPackage = func(name string) error {
+		calls = append(calls, "tap "+name)
+		return nil
+	}
+	trustPackage = func(name string, cask bool) error {
+		call := "trust --formula " + name
+		if cask {
+			call = "trust --cask " + name
+		}
+		calls = append(calls, call)
+		return nil
+	}
+	installPackage = func(name string, cask bool) error {
+		call := "install " + name
+		if cask {
+			call = "install --cask " + name
+		}
+		calls = append(calls, call)
+		if name == fail {
+			return errors.New("boom")
+		}
+		return nil
+	}
+	return &calls
+}
 
-			if state.Wired != tt.wantWired {
-				t.Errorf("Wired = %v, want %v", state.Wired, tt.wantWired)
-			}
-			if state.Provider != tt.wantProvider {
-				t.Errorf("Provider = %q, want %q", state.Provider, tt.wantProvider)
-			}
-		})
+// A direct launch has no Homebrew bin on $PATH; the pieces must still be
+// found beside brew, or an installed feature reads as missing.
+func TestDetectFindsPackagesBesideBrew(t *testing.T) {
+	bin := fakeHost(t, "amd64", "linux-mcp-server", "goose-desktop", "llmman")
+
+	state := Detect()
+
+	if state.ServerPath != filepath.Join(bin, "linux-mcp-server") || state.DesktopPath != filepath.Join(bin, "goose-desktop") {
+		t.Fatalf("Detect() = %+v, want both packages resolved beside brew", state)
+	}
+	if !state.Ready() {
+		t.Errorf("Ready() = false for a host with every piece: %+v", state)
 	}
 }
 
 func TestReadyNeedsEveryPiece(t *testing.T) {
-	tests := []struct {
-		name  string
-		state State
-		want  bool
-	}{
-		{
-			name:  "everything present",
-			state: State{ServerInstalled: true, AgentInstalled: true, Wired: true},
-			want:  true,
-		},
-		{
-			// The state goose-mcp-setup leaves behind when a config already
-			// existed: packages installed, nothing connected.
-			name:  "installed but not connected",
-			state: State{ServerInstalled: true, AgentInstalled: true},
-		},
-		{
-			name:  "connected but the server is gone",
-			state: State{AgentInstalled: true, Wired: true},
-		},
-		{
-			// The desktop app is a convenience for launching, not a
-			// requirement for the feature to work.
-			name:  "no desktop app",
-			state: State{ServerInstalled: true, AgentInstalled: true, Wired: true},
-			want:  true,
-		},
+	full := State{Supported: true, ServerPath: "/s", DesktopPath: "/d", LLMManPath: "/l"}
+	cases := map[string]func(*State){
+		"no server":      func(s *State) { s.ServerPath = "" },
+		"no desktop app": func(s *State) { s.DesktopPath = "" },
+		"no llmman":      func(s *State) { s.LLMManPath = "" },
+		"arm64":          func(s *State) { s.Supported = false },
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := tt.state.Ready(); got != tt.want {
-				t.Errorf("Ready() = %v, want %v", got, tt.want)
+	if !full.Ready() {
+		t.Fatal("Ready() = false with every piece present")
+	}
+	for name, strip := range cases {
+		t.Run(name, func(t *testing.T) {
+			state := full
+			strip(&state)
+			if state.Ready() {
+				t.Errorf("Ready() = true for %+v", state)
 			}
 		})
 	}
 }
 
-// stubEnvironment points the package at a fake host.
-func stubEnvironment(t *testing.T, config string, present map[string]bool) *[]string {
-	t.Helper()
+// The desktop cask pipes its RPM into cpio, which it does not declare and
+// Bluefin does not ship: cpio must be installed first, every time the cask is.
+// Each ublue-os/tap package is trusted right before its install, or Homebrew
+// refuses it from the untrusted tap (#482).
+func TestSetupInstallsTheExtractorBeforeTheCask(t *testing.T) {
+	fakeHost(t, "amd64")
+	calls := recordBrew(t, "")
 
-	previousLook, previousRead, previousSetup := lookPath, readConfig, runSetup
-	previousTap, previousInstall := tapPackage, installPackage
-	t.Cleanup(func() {
-		lookPath, readConfig, runSetup = previousLook, previousRead, previousSetup
-		tapPackage, installPackage = previousTap, previousInstall
-		dryrun.Set(false)
-	})
-
-	// Never reach real brew: a test that did would tap a repository on the
-	// machine running it.
-	tapPackage = func(string) error { return nil }
-	installPackage = func(string, bool) error { return nil }
-
-	lookPath = func(name string) bool { return present[name] }
-	readConfig = func() ([]byte, error) { return []byte(config), nil }
-
-	ran := []string{}
-	runSetup = func() error {
-		ran = append(ran, setupCommand)
-		present["linux-mcp-server"] = true
-		return nil
-	}
-	return &ran
-}
-
-func TestDetectCombinesConfigAndBinaries(t *testing.T) {
-	stubEnvironment(t, freshConfig, map[string]bool{
-		"linux-mcp-server": true,
-		"goose":            true,
-	})
-
-	state := Detect()
-
-	if !state.Ready() {
-		t.Errorf("Ready() = false for a fully set-up host: %+v", state)
-	}
-	if state.DesktopInstalled {
-		t.Error("DesktopInstalled = true with no goose-desktop on PATH")
-	}
-	if state.Provider != "gemini-cli" {
-		t.Errorf("Provider = %q", state.Provider)
-	}
-}
-
-func TestDetectTreatsAMissingConfigAsNotWired(t *testing.T) {
-	previousRead := readConfig
-	t.Cleanup(func() { readConfig = previousRead })
-	readConfig = func() ([]byte, error) { return nil, errors.New("no such file") }
-
-	if Detect().Wired {
-		t.Error("Wired = true with no configuration file")
-	}
-}
-
-func TestSetupSkipsStepsThatAreAlreadyDone(t *testing.T) {
-	// A host where everything is installed but the extension was never
-	// wired in — the case that matters, since the packages give no clue.
-	present := map[string]bool{
-		"linux-mcp-server": true,
-		"goose":            true,
-		"goose-desktop":    true,
-	}
-	ran := stubEnvironment(t, "GOOSE_PROVIDER: anthropic\n", present)
-
-	var steps []string
-	state := State{ServerInstalled: true, AgentInstalled: true, DesktopInstalled: true}
-	if _, err := Setup(state, func(name string) { steps = append(steps, name) }); err != nil {
+	if _, err := Setup(Detect(), nil); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
 
-	// The tap step always runs; the three installs are skipped; the wiring
-	// step runs because the configuration does not reference linux-tools.
-	if len(steps) != 2 {
-		t.Fatalf("ran %v, want the tap and the wiring step only", steps)
+	want := []string{
+		"tap " + Tap,
+		"trust --formula " + ServerFormula,
+		"install " + ServerFormula,
+		"install " + ExtractorFormula,
+		"trust --cask " + DesktopCask,
+		"install --cask " + DesktopCask,
 	}
-	if !strings.Contains(steps[1], "Connecting") {
-		t.Errorf("second step = %q, want the wiring step", steps[1])
+	if !reflect.DeepEqual(*calls, want) {
+		t.Errorf("brew calls = %v, want %v", *calls, want)
 	}
-	if len(*ran) != 1 {
-		t.Errorf("setup script ran %d times, want 1", len(*ran))
+}
+
+// Progress counts only the steps that still have work, so a resumed setup
+// reads "(1 of 2)" rather than skipping numbers.
+func TestSetupReportsStepProgressAgainstTheNeededSteps(t *testing.T) {
+	fakeHost(t, "amd64", "linux-mcp-server")
+	recordBrew(t, "")
+
+	var got []string
+	if _, err := Setup(Detect(), func(msg string) { got = append(got, msg) }); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	want := []string{
+		"Getting ready (1 of 2)",
+		"Installing the Goose app (2 of 2)",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Setup progress = %q, want %q", got, want)
+	}
+}
+
+func TestSetupResumesAHalfDoneInstall(t *testing.T) {
+	fakeHost(t, "amd64", "linux-mcp-server")
+	calls := recordBrew(t, "")
+
+	if _, err := Setup(Detect(), nil); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	if slices.Contains(*calls, "install "+ServerFormula) {
+		t.Errorf("reinstalled the server that was already present: %v", *calls)
+	}
+	if !slices.Contains(*calls, "install --cask "+DesktopCask) {
+		t.Errorf("did not install the missing desktop app: %v", *calls)
+	}
+}
+
+func TestSetupRefusesAnUnsupportedArchitecture(t *testing.T) {
+	fakeHost(t, "arm64")
+	calls := recordBrew(t, "")
+
+	_, err := Setup(Detect(), nil)
+	if !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("Setup error = %v, want ErrUnsupported", err)
+	}
+	if len(*calls) != 0 {
+		t.Errorf("ran brew on a host the app does not exist for: %v", *calls)
 	}
 }
 
 func TestSetupNamesTheStepThatFailed(t *testing.T) {
-	stubEnvironment(t, "", map[string]bool{"linux-mcp-server": true, "goose": true, "goose-desktop": true})
-	previousSetup := runSetup
-	t.Cleanup(func() { runSetup = previousSetup })
-	runSetup = func() error { return errors.New("permission denied") }
+	fakeHost(t, "amd64", "linux-mcp-server")
+	recordBrew(t, ExtractorFormula)
 
-	state := State{ServerInstalled: true, AgentInstalled: true, DesktopInstalled: true}
-	_, err := Setup(state, nil)
-	if err == nil {
-		t.Fatal("Setup succeeded with a failing setup script")
-	}
-	if !strings.Contains(err.Error(), "connecting it to this system") {
-		t.Errorf("error does not name the failing step: %v", err)
+	_, err := Setup(Detect(), nil)
+	if err == nil || !strings.Contains(err.Error(), "installing the goose app") {
+		t.Fatalf("Setup error = %v, want it to name the Goose app step", err)
 	}
 }
 
-// Setup must report the state it actually left behind, not the one it was
-// aiming for: goose-mcp-setup exits 0 without writing anything when a
-// configuration already exists.
-func TestSetupReturnsTheStateItActuallyLeft(t *testing.T) {
-	present := map[string]bool{"linux-mcp-server": true, "goose": true, "goose-desktop": true}
-	stubEnvironment(t, "GOOSE_PROVIDER: anthropic\n", present)
-	runSetup = func() error { return nil } // exits 0, changes nothing
-
-	after, err := Setup(State{ServerInstalled: true, AgentInstalled: true, DesktopInstalled: true}, nil)
+// The profile is the whole tool surface: read-only local inspection and the
+// knowledge search, nothing a model could use to change the machine, and no
+// provider — llmman supplies that through the environment.
+func TestRenderConfigIsTheCompleteReadOnlyToolSet(t *testing.T) {
+	data, err := RenderConfig("/home/linuxbrew/.linuxbrew/bin/linux-mcp-server", nil)
 	if err != nil {
-		t.Fatalf("Setup: %v", err)
+		t.Fatalf("RenderConfig: %v", err)
 	}
-	if after.Ready() {
-		t.Error("Setup reported the feature ready after a no-op setup script")
+	var cfg map[string]any
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("rendered config is not YAML: %v", err)
+	}
+	for _, key := range []string{"GOOSE_PROVIDER", "GOOSE_MODEL", "active_provider", "providers"} {
+		if _, ok := cfg[key]; ok {
+			t.Errorf("profile config sets %s; the provider must come from llmman", key)
+		}
+	}
+	exts, _ := cfg["extensions"].(map[string]any)
+	var enabled []string
+	for name, raw := range exts {
+		if ext, _ := raw.(map[string]any); ext["enabled"] == true {
+			enabled = append(enabled, name)
+		}
+	}
+	slices.Sort(enabled)
+	if !reflect.DeepEqual(enabled, []string{"bluefin-knowledge", "linux-tools"}) {
+		t.Fatalf("enabled extensions = %v, want exactly linux-tools and bluefin-knowledge", enabled)
+	}
+	// Goose adds a missing platform extension with its own default, and
+	// these two default to on: developer runs shell commands, and the
+	// extension manager could turn developer back on. They must be present
+	// and off, not merely absent.
+	for _, name := range []string{"developer", "extensionmanager"} {
+		ext, ok := exts[name].(map[string]any)
+		if !ok || ext["enabled"] != false {
+			t.Errorf("%s = %v, want present and disabled", name, exts[name])
+		}
+	}
+	tools, _ := exts["linux-tools"].(map[string]any)
+	args := strings.Join(toStrings(tools["args"]), " ")
+	for _, want := range []string{"--toolset FIXED", "--host-mode LOCAL_ONLY"} {
+		if !strings.Contains(args, want) {
+			t.Errorf("linux-tools args %q lack %q", args, want)
+		}
+	}
+	knowledge, _ := exts["bluefin-knowledge"].(map[string]any)
+	if knowledge["uri"] != KnowledgeURI || knowledge["type"] != "streamable_http" {
+		t.Errorf("bluefin-knowledge = %v", knowledge)
+	}
+	if got := toStrings(knowledge["available_tools"]); !reflect.DeepEqual(got, []string{"search_knowledge"}) {
+		t.Errorf("knowledge tools = %v, want only search_knowledge", got)
 	}
 }
 
-func TestDryRunRunsNothing(t *testing.T) {
-	previousSetup := runSetup
-	t.Cleanup(func() { runSetup = previousSetup; dryrun.Set(false) })
-	runSetup = defaultRunSetup
-	dryrun.Set(true)
+func TestRenderConfigRejectsARelativeServer(t *testing.T) {
+	if _, err := RenderConfig("linux-mcp-server", nil); err == nil {
+		t.Fatal("RenderConfig accepted a bare command name; Goose would resolve it against its own PATH")
+	}
+}
 
-	if err := runSetup(); err != nil {
-		t.Fatalf("dry-run setup: %v", err)
+// A later Goose may add a platform extension this package has never heard
+// of, enabled by default, and even turn one of ours off. The next launch
+// must disable the stranger and keep the two tools on.
+func TestRenderConfigDisablesExtensionsGooseAddedSince(t *testing.T) {
+	current := []byte(`extensions:
+  newshell:
+    enabled: true
+    type: platform
+    name: newshell
+  computercontroller:
+    enabled: true
+    type: builtin
+    name: computercontroller
+  linux-tools:
+    enabled: false
+    type: stdio
+    name: linux-tools
+    cmd: /old/linux-mcp-server
+`)
+	data, err := RenderConfig("/new/linux-mcp-server", current)
+	if err != nil {
+		t.Fatalf("RenderConfig: %v", err)
+	}
+	var cfg struct {
+		Extensions map[string]map[string]any `yaml:"extensions"`
+	}
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"newshell", "computercontroller"} {
+		ext := cfg.Extensions[name]
+		if ext == nil || ext["enabled"] != false || ext["type"] == nil {
+			t.Errorf("%s = %v, want kept with its type and disabled", name, ext)
+		}
+	}
+	tools := cfg.Extensions["linux-tools"]
+	if tools["enabled"] != true || tools["cmd"] != "/new/linux-mcp-server" {
+		t.Errorf("linux-tools = %v, want re-enabled at the current path", tools)
+	}
+}
+
+func toStrings(v any) []string {
+	items, _ := v.([]any)
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		s, _ := item.(string)
+		out = append(out, s)
+	}
+	return out
+}
+
+// withUserConfig points the user's config directory at dir for one test.
+func withUserConfig(t *testing.T, dir string) {
+	t.Helper()
+	prev := userConfigDir
+	t.Cleanup(func() { userConfigDir = prev })
+	userConfigDir = func() (string, error) { return dir, nil }
+}
+
+func TestProfileWriteStaysInsideTheProfile(t *testing.T) {
+	withUserConfig(t, t.TempDir())
+	data := t.TempDir()
+	profile := ProfileAt(data)
+
+	if err := profile.Write("/opt/linux-mcp-server"); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	var written []string
+	_ = filepath.WalkDir(data, func(path string, d os.DirEntry, err error) error {
+		if err == nil && !d.IsDir() {
+			written = append(written, path)
+		}
+		return nil
+	})
+	want := []string{profile.HintsPath(), profile.ConfigPath(), profile.DesktopSettingsPath()}
+	slices.Sort(written)
+	slices.Sort(want)
+	if !reflect.DeepEqual(written, want) {
+		t.Errorf("wrote %v, want exactly %v", written, want)
+	}
+	if got, _ := os.ReadFile(profile.HintsPath()); string(got) != Hints() {
+		t.Error("hints file does not hold the session instructions")
+	}
+}
+
+// GNOME Wayland asks the user to approve Electron global shortcuts at launch.
+// Missing or persisted Goose defaults are disabled; other choices are kept.
+func TestProfileWriteDisablesOnlyUnchosenGooseGlobalShortcuts(t *testing.T) {
+	cases := map[string]struct {
+		existing    string
+		focus       *string
+		quick       *string
+		legacy      *string
+		inWindowKey string
+	}{
+		"new profile": {},
+		"other settings": {
+			existing:    `{"theme":"dark","keyboardShortcuts":{"settings":"Ctrl+Shift+S"}}`,
+			inWindowKey: "Ctrl+Shift+S",
+		},
+		"chosen focus shortcut": {
+			existing: `{"keyboardShortcuts":{"focusWindow":"Ctrl+Alt+F"}}`,
+			focus:    new("Ctrl+Alt+F"),
+		},
+		"persisted defaults": {
+			existing:    `{"theme":"dark","keyboardShortcuts":{"focusWindow":"CommandOrControl+Alt+G","quickLauncher":"CommandOrControl+Alt+Shift+G","settings":"Ctrl+Shift+S"}}`,
+			inWindowKey: "Ctrl+Shift+S",
+		},
+		"legacy choice": {
+			existing: `{"globalShortcut":"Ctrl+Alt+L"}`,
+			legacy:   new("Ctrl+Alt+L"),
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			withUserConfig(t, t.TempDir())
+			profile := ProfileAt(t.TempDir())
+			if tc.existing != "" {
+				if err := os.MkdirAll(filepath.Dir(profile.DesktopSettingsPath()), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(profile.DesktopSettingsPath(), []byte(tc.existing), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := profile.Write("/opt/linux-mcp-server"); err != nil {
+				t.Fatalf("Write: %v", err)
+			}
+			data, err := os.ReadFile(profile.DesktopSettingsPath())
+			if err != nil {
+				t.Fatal(err)
+			}
+			var settings struct {
+				Theme             string             `json:"theme"`
+				GlobalShortcut    *string            `json:"globalShortcut"`
+				KeyboardShortcuts map[string]*string `json:"keyboardShortcuts"`
+			}
+			if err := json.Unmarshal(data, &settings); err != nil {
+				t.Fatalf("settings are not JSON: %v\n%s", err, data)
+			}
+			if tc.legacy != nil {
+				if settings.GlobalShortcut == nil || *settings.GlobalShortcut != *tc.legacy || settings.KeyboardShortcuts != nil {
+					t.Errorf("settings = %s, want the legacy choice untouched", data)
+				}
+				return
+			}
+			for key, want := range map[string]*string{"focusWindow": tc.focus, "quickLauncher": tc.quick} {
+				got, ok := settings.KeyboardShortcuts[key]
+				if !ok || !reflect.DeepEqual(got, want) {
+					t.Errorf("%s = %v, present %v; want %v", key, got, ok, want)
+				}
+			}
+			if tc.inWindowKey != "" {
+				if got := settings.KeyboardShortcuts["settings"]; settings.Theme != "dark" || got == nil || *got != tc.inWindowKey {
+					t.Errorf("settings = %s, want other settings preserved", data)
+				}
+			}
+		})
+	}
+}
+
+// The session instructions have to push small local models (Qwen3-8B by
+// default) to reach for the read-only linux-tools tools instead of answering
+// from training. The hint names the most common queries that get hallucinated
+// (hostname, kernel) with the matching tool name, and forbids inventing
+// system facts that the tool would have returned. Issue #523.
+func TestHintsDirectTheModelToCallLinuxTools(t *testing.T) {
+	hint := Hints()
+	mustContain := []string{
+		// Imperative language: a hint that says "look before you answer"
+		// is easy for a small model to skim over.
+		"You MUST inspect",
+		"get_system_information",
+		"get_disk_usage",
+		// The failure mode in the issue: the model invents the answer
+		// from training data instead of calling the tool.
+		"Do not invent",
+		"Do not answer",
+		// Tool names the model could forget exist; the hint has to call
+		// them out by name so they are advertised in the prompt.
+		"linux-tools",
+		"search_knowledge",
+	}
+	for _, fragment := range mustContain {
+		if !strings.Contains(hint, fragment) {
+			t.Errorf("session hint does not contain %q", fragment)
+		}
+	}
+}
+
+// Moving XDG_CONFIG_HOME isolates Goose's Electron profile but would also
+// hide the user's default browser and dconf from the session; both are
+// linked back, and a name already in the profile is never replaced.
+func TestProfileWriteLinksTheUsersDesktopSettings(t *testing.T) {
+	user := t.TempDir()
+	if err := os.WriteFile(filepath.Join(user, "mimeapps.list"), []byte("[Default Applications]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(user, "dconf"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	withUserConfig(t, user)
+	profile := ProfileAt(t.TempDir())
+	own := filepath.Join(profile.DesktopConfigHome(), "dconf")
+	if err := os.MkdirAll(own, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := profile.Write("/opt/linux-mcp-server"); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	if got, err := os.Readlink(filepath.Join(profile.DesktopConfigHome(), "mimeapps.list")); err != nil || got != filepath.Join(user, "mimeapps.list") {
+		t.Errorf("mimeapps.list link = %q, %v; want the user's file", got, err)
+	}
+	if info, err := os.Lstat(own); err != nil || info.Mode()&os.ModeSymlink != 0 {
+		t.Errorf("an existing dconf directory in the profile was replaced: %v", err)
+	}
+}
+
+func TestProfileWriteInDryRunWritesNothing(t *testing.T) {
+	dryrun.Set(true)
+	t.Cleanup(func() { dryrun.Set(false) })
+	data := t.TempDir()
+
+	if err := ProfileAt(data).Write("/opt/linux-mcp-server"); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	entries, _ := os.ReadDir(data)
+	if len(entries) != 0 {
+		t.Errorf("dry-run wrote %v", entries)
+	}
+}
+
+// The launch must isolate both halves of Goose: its own config root, and
+// the desktop app's Electron profile, whose single-instance lock would
+// otherwise hand this launch to a Goose window the user already has open.
+func TestCommandIsolatesTheSessionAndWrapsItInLLMMan(t *testing.T) {
+	state := State{Supported: true, ServerPath: "/s", DesktopPath: "/d", LLMManPath: "/bin/llmman"}
+	profile := ProfileAt("/data")
+
+	cmd, err := Command(state, profile, "bluefin-active", "")
+	if err != nil {
+		t.Fatalf("Command: %v", err)
+	}
+	if want := []string{"/bin/llmman", "launch", "goose-desktop", "--model", "bluefin-active"}; !reflect.DeepEqual(cmd.Args, want) {
+		t.Errorf("argv = %v, want %v", cmd.Args, want)
+	}
+	for _, want := range []string{"GOOSE_PATH_ROOT=" + profile.GooseRoot(), "XDG_CONFIG_HOME=" + profile.DesktopConfigHome()} {
+		if !slices.Contains(cmd.Env, want) {
+			t.Errorf("environment lacks %s", want)
+		}
+	}
+	if strings.HasPrefix(profile.GooseRoot(), profile.DesktopConfigHome()) || strings.HasPrefix(profile.DesktopConfigHome(), profile.GooseRoot()) {
+		t.Error("Goose root and desktop profile overlap")
+	}
+}
+
+func TestCommandRefusesAnIncompleteSetup(t *testing.T) {
+	ready := State{Supported: true, ServerPath: "/s", DesktopPath: "/d", LLMManPath: "/bin/llmman"}
+	if _, err := Command(State{}, ProfileAt("/data"), "bluefin-active", ""); err == nil {
+		t.Error("Command succeeded with nothing installed")
+	}
+	if _, err := Command(ready, ProfileAt("/data"), "", ""); err == nil {
+		t.Error("Command succeeded with no model")
+	}
+}
+
+// A supplied prompt reaches Goose only as a new-session link's query value:
+// text that looks like another link or another argument stays inside it.
+func TestNewSessionURLEscapesThePrompt(t *testing.T) {
+	prompt := "why?&recipe=x goose://extension?cmd=sh\n-- --model other"
+	link := NewSessionURL(prompt)
+	parsed, err := url.Parse(link)
+	if err != nil {
+		t.Fatalf("NewSessionURL(%q) = %q, not a URL: %v", prompt, link, err)
+	}
+	if parsed.Scheme != "goose" || parsed.Host != "new-session" || parsed.Path != "" {
+		t.Errorf("link = %q, want goose://new-session", link)
+	}
+	query := parsed.Query()
+	if len(query) != 1 || query.Get("prompt") != prompt {
+		t.Errorf("query = %v, want only prompt=%q", query, prompt)
+	}
+	if !strings.HasPrefix(link, NewSessionURLPrefix+"?") {
+		t.Errorf("link %q does not start with %q", link, NewSessionURLPrefix)
+	}
+}
+
+// llmman forwards everything after `--` to goose-desktop, so the prompt link
+// follows llmman's own arguments and cannot be read as one of them.
+func TestCommandsCarryAPromptAsANewSessionLink(t *testing.T) {
+	state := State{Supported: true, ServerPath: "/s", DesktopPath: "/d", LLMManPath: "/bin/llmman"}
+	profile := ProfileAt("/data")
+	link := NewSessionURL("check failed units")
+
+	fresh, err := Command(state, profile, "bluefin-active", "check failed units")
+	if err != nil {
+		t.Fatalf("Command: %v", err)
+	}
+	if want := []string{"/bin/llmman", "launch", "goose-desktop", "--model", "bluefin-active", "--", link}; !reflect.DeepEqual(fresh.Args, want) {
+		t.Errorf("Command argv = %v, want %v", fresh.Args, want)
+	}
+
+	reopen, err := ReopenCommand(state, profile, "check failed units")
+	if err != nil {
+		t.Fatalf("ReopenCommand: %v", err)
+	}
+	if want := []string{"/d", link}; !reflect.DeepEqual(reopen.Args, want) {
+		t.Errorf("ReopenCommand argv = %v, want %v", reopen.Args, want)
+	}
+}
+
+// Goose's own output is the only place a failed start says why (#544: Mesa
+// and Electron errors on a VM without 3D acceleration). Both launches must
+// hand it to ChairLift's stderr, which the session journals, not /dev/null.
+func TestLaunchCommandsKeepGooseOutput(t *testing.T) {
+	state := State{Supported: true, ServerPath: "/s", DesktopPath: "/d", LLMManPath: "/bin/llmman"}
+	profile := ProfileAt("/data")
+	fresh, err := Command(state, profile, "bluefin-active", "")
+	if err != nil {
+		t.Fatalf("Command: %v", err)
+	}
+	reopen, err := ReopenCommand(state, profile, "")
+	if err != nil {
+		t.Fatalf("ReopenCommand: %v", err)
+	}
+	for name, cmd := range map[string]*exec.Cmd{"Command": fresh, "ReopenCommand": reopen} {
+		if cmd.Stdout != os.Stderr || cmd.Stderr != os.Stderr {
+			t.Errorf("%s output = (%v, %v), want both os.Stderr", name, cmd.Stdout, cmd.Stderr)
+		}
+	}
+}
+
+// TestRunningIgnoresALockFromBeforeBoot pins the reboot case: the profile
+// keeps a lock Goose never removed, and its pid may now name an unrelated
+// live process. Handing the launch to it would skip the profile write and
+// llmman's environment, so only a lock written during this boot counts.
+func TestRunningIgnoresALockFromBeforeBoot(t *testing.T) {
+	profile := ProfileAt(t.TempDir())
+	dir := filepath.Join(profile.DesktopConfigHome(), "Goose")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("host-4242", filepath.Join(dir, "SingletonLock")); err != nil {
+		t.Fatal(err)
+	}
+	oldOwner, oldBoot := lockOwner, bootTime
+	t.Cleanup(func() { lockOwner, bootTime = oldOwner, oldBoot })
+	lockOwner = func(string) bool { return true }
+
+	bootTime = func() time.Time { return time.Now().Add(-time.Hour) }
+	if !profile.Running() {
+		t.Error("Running() = false for a live lock written this boot")
+	}
+	bootTime = func() time.Time { return time.Now().Add(time.Hour) }
+	if profile.Running() {
+		t.Error("Running() = true for a lock written before this boot")
 	}
 }

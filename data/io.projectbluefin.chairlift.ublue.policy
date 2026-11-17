@@ -16,7 +16,7 @@
       <allow_inactive>auth_admin</allow_inactive>
       <allow_active>auth_admin_keep</allow_active>
     </defaults>
-    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/chairlift-ublue-helper</annotate>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/chairlift-helper</annotate>
     <annotate key="org.freedesktop.policykit.exec.argv1">channel-switch</annotate>
   </action>
 
@@ -28,7 +28,7 @@
       <allow_inactive>auth_admin</allow_inactive>
       <allow_active>auth_admin_keep</allow_active>
     </defaults>
-    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/chairlift-ublue-helper</annotate>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/chairlift-helper</annotate>
     <annotate key="org.freedesktop.policykit.exec.argv1">dx-enable</annotate>
   </action>
 
@@ -40,7 +40,7 @@
       <allow_inactive>auth_admin</allow_inactive>
       <allow_active>auth_admin_keep</allow_active>
     </defaults>
-    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/chairlift-ublue-helper</annotate>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/chairlift-helper</annotate>
     <annotate key="org.freedesktop.policykit.exec.argv1">dx-disable</annotate>
   </action>
 
@@ -52,7 +52,7 @@
       <allow_inactive>auth_admin</allow_inactive>
       <allow_active>auth_admin_keep</allow_active>
     </defaults>
-    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/chairlift-ublue-helper</annotate>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/chairlift-helper</annotate>
     <annotate key="org.freedesktop.policykit.exec.argv1">restart</annotate>
   </action>
 
@@ -64,7 +64,7 @@
       <allow_inactive>auth_admin</allow_inactive>
       <allow_active>auth_admin_keep</allow_active>
     </defaults>
-    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/chairlift-ublue-helper</annotate>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/chairlift-helper</annotate>
     <annotate key="org.freedesktop.policykit.exec.argv1">rollback</annotate>
   </action>
 
@@ -76,7 +76,7 @@
       <allow_inactive>auth_admin</allow_inactive>
       <allow_active>auth_admin_keep</allow_active>
     </defaults>
-    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/chairlift-ublue-helper</annotate>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/chairlift-helper</annotate>
     <annotate key="org.freedesktop.policykit.exec.argv1">auto-updates-enable</annotate>
   </action>
 
@@ -88,7 +88,7 @@
       <allow_inactive>auth_admin</allow_inactive>
       <allow_active>auth_admin_keep</allow_active>
     </defaults>
-    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/chairlift-ublue-helper</annotate>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/chairlift-helper</annotate>
     <annotate key="org.freedesktop.policykit.exec.argv1">auto-updates-disable</annotate>
   </action>
 
@@ -100,8 +100,20 @@
       <allow_inactive>auth_admin</allow_inactive>
       <allow_active>auth_admin_keep</allow_active>
     </defaults>
-    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/chairlift-ublue-helper</annotate>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/chairlift-helper</annotate>
     <annotate key="org.freedesktop.policykit.exec.argv1">driver-switch</annotate>
+  </action>
+
+  <action id="io.projectbluefin.chairlift.ublue.gaming-switch">
+    <description>Switch the system gaming mode image</description>
+    <message>Authentication is required to switch the system gaming mode image</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/chairlift-helper</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">gaming-switch</annotate>
   </action>
 
   <action id="io.projectbluefin.chairlift.ublue.factory-reset">
@@ -112,8 +124,80 @@
       <allow_inactive>auth_admin</allow_inactive>
       <allow_active>auth_admin_keep</allow_active>
     </defaults>
-    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/chairlift-ublue-helper</annotate>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/chairlift-helper</annotate>
     <annotate key="org.freedesktop.policykit.exec.argv1">factory-reset</annotate>
+  </action>
+
+  <action id="io.projectbluefin.chairlift.ublue.pin">
+    <description>Pin the system to a dated build</description>
+    <message>Authentication is required to pin the system to a dated build</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/chairlift-helper</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">pin</annotate>
+  </action>
+
+  <action id="io.projectbluefin.chairlift.ublue.unpin">
+    <description>Return the system to its release stream</description>
+    <message>Authentication is required to return the system to its release stream</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/chairlift-helper</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">unpin</annotate>
+  </action>
+
+  <action id="io.projectbluefin.chairlift.ublue.kvm-enable">
+    <description>Grant hardware virtualization access</description>
+    <message>Authentication is required to grant hardware virtualization access</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/chairlift-helper</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">kvm-enable</annotate>
+  </action>
+
+  <action id="io.projectbluefin.chairlift.ublue.docker-enable">
+    <description>Install Docker from verified Homebrew packages and enable it</description>
+    <message>Authentication is required to install Docker from verified Homebrew packages and enable it</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/chairlift-helper</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">docker-enable</annotate>
+  </action>
+
+  <action id="io.projectbluefin.chairlift.ublue.docker-disable">
+    <description>Stop and disable the Docker daemon</description>
+    <message>Authentication is required to stop and disable the Docker daemon</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/chairlift-helper</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">docker-disable</annotate>
+  </action>
+
+  <action id="io.projectbluefin.chairlift.ublue.docker-update">
+    <description>Update Docker from verified Homebrew packages</description>
+    <message>Authentication is required to update Docker from verified Homebrew packages</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/chairlift-helper</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">docker-update</annotate>
   </action>
 
 </policyconfig>

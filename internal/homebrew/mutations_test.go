@@ -69,12 +69,13 @@ func TestMutationWrappersBuildExpectedArgv(t *testing.T) {
 	}{
 		{"Tap", func() error { return Tap("multica-ai/tap") }, "tap multica-ai/tap"},
 		{"InstallFormula", func() error { return Install("gh", false) }, "install gh"},
+		{"DeveloperDevcontainer", func() error { return Install("devcontainer", false) }, "install devcontainer"},
 		{"InstallCask", func() error { return Install("firefox", true) }, "install --cask firefox"},
 		{"UninstallFormula", func() error { return Uninstall("gh", false) }, "uninstall gh"},
 		{"UninstallCask", func() error { return Uninstall("firefox", true) }, "uninstall --cask firefox"},
-		{"UpgradeNamed", func() error { return Upgrade("gh") }, "upgrade gh"},
-		{"UpgradeAll", func() error { return Upgrade("") }, "upgrade"},
-		{"Update", Update, "update"},
+		{"UpgradeNamed", func() error { return Upgrade(context.Background(), "gh") }, "upgrade gh"},
+		{"UpgradeAll", func() error { return Upgrade(context.Background(), "") }, "upgrade"},
+		{"Update", func() error { return Update(context.Background()) }, "update"},
 		{"Pin", func() error { return Pin("gh") }, "pin gh"},
 		{"Unpin", func() error { return Unpin("gh") }, "unpin gh"},
 		{"BundleDumpPlain", func() error { return BundleDump("", false) }, "bundle dump"},
@@ -99,12 +100,37 @@ func TestMutationWrappersBuildExpectedArgv(t *testing.T) {
 	}
 }
 
-// Upgrade("") must not append an empty argument: "brew upgrade ”" is not the
-// same command as "brew upgrade".
+func TestDeveloperDevcontainerInstallOutcomes(t *testing.T) {
+	for _, tc := range []struct {
+		name, script string
+		wantError    bool
+	}{
+		{"success", "exit 0", false},
+		{"failure", "echo 'devcontainer install failed' >&2\nexit 1", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			before := dryrun.Enabled()
+			dryrun.Set(false)
+			t.Cleanup(func() { dryrun.Set(before) })
+			argvLog := fakeBrewOnPath(t, tc.script)
+			err := Install("devcontainer", false)
+			if (err != nil) != tc.wantError {
+				t.Fatalf("Install(devcontainer) error = %v, want error %v", err, tc.wantError)
+			}
+			argv, readErr := os.ReadFile(argvLog)
+			if readErr != nil || strings.TrimSpace(string(argv)) != "install devcontainer" {
+				t.Fatalf("brew argv = %q, read error %v; want install devcontainer", argv, readErr)
+			}
+		})
+	}
+}
+
+// Upgrade(ctx, "") must not append an empty argument: brew upgrade "" is not
+// the same command as "brew upgrade".
 func TestUpgradeAllPassesNoPackageArgument(t *testing.T) {
 	got := captureSingleBrewArgv(t, func() {
-		if err := Upgrade(""); err != nil {
-			t.Fatalf("Upgrade(\"\"): %v", err)
+		if err := Upgrade(context.Background(), ""); err != nil {
+			t.Fatalf("Upgrade(ctx, \"\"): %v", err)
 		}
 	})
 	if strings.Fields(got)[0] != "upgrade" || len(strings.Fields(got)) != 1 {

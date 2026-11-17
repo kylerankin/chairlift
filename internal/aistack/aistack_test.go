@@ -3,356 +3,465 @@ package aistack
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/projectbluefin/chairlift/internal/dryrun"
-	"github.com/projectbluefin/chairlift/internal/gpu"
 )
 
-func TestSelectCoversEveryHardwareCase(t *testing.T) {
+func TestResolveCoversEveryState(t *testing.T) {
 	tests := []struct {
-		name            string
-		set             gpu.Set
-		wantVendor      gpu.Vendor
-		wantImage       string
-		wantAccelerator string
-		wantAccelerated bool
-		wantDevices     []string
+		name string
+		f    Facts
+		want State
 	}{
-		{
-			name:            "nvidia workstation",
-			set:             gpu.Set{NVIDIA: true},
-			wantVendor:      gpu.VendorNVIDIA,
-			wantImage:       "quay.io/ramalama/cuda:latest",
-			wantAccelerator: "CUDA",
-			wantAccelerated: true,
-			wantDevices:     []string{"nvidia.com/gpu=all"},
-		},
-		{
-			name:            "amd workstation",
-			set:             gpu.Set{AMD: true},
-			wantVendor:      gpu.VendorAMD,
-			wantImage:       "quay.io/ramalama/rocm:latest",
-			wantAccelerator: "ROCm",
-			wantAccelerated: true,
-			wantDevices:     []string{"/dev/kfd", "/dev/dri"},
-		},
-		{
-			name:            "intel laptop",
-			set:             gpu.Set{Intel: true},
-			wantVendor:      gpu.VendorIntel,
-			wantImage:       "quay.io/ramalama/intel-gpu:latest",
-			wantAccelerator: "Intel oneAPI",
-			wantAccelerated: true,
-			wantDevices:     []string{"/dev/dri"},
-		},
-		{
-			name:            "no gpu",
-			set:             gpu.Set{},
-			wantVendor:      gpu.VendorNone,
-			wantImage:       "quay.io/ramalama/ramalama:latest",
-			wantAccelerator: "CPU",
-			wantAccelerated: false,
-		},
-		{
-			// The hybrid laptop is the case a vendor-directory catalog gets
-			// wrong: it has an Intel chip and an NVIDIA chip, and the model
-			// should run on the NVIDIA one.
-			name:            "hybrid laptop prefers the discrete card",
-			set:             gpu.Set{Intel: true, NVIDIA: true},
-			wantVendor:      gpu.VendorNVIDIA,
-			wantImage:       "quay.io/ramalama/cuda:latest",
-			wantAccelerator: "CUDA",
-			wantAccelerated: true,
-			wantDevices:     []string{"nvidia.com/gpu=all"},
-		},
+		{"no homebrew outranks everything", Facts{UnitPresent: true, Checked: true, Healthy: true}, StateUnavailable},
+		{"fresh host", Facts{Capable: true}, StateUnconfigured},
+		{"in flight", Facts{Capable: true, Installed: true, Working: true}, StateProvisioning},
+		{"unit not yet probed", Facts{Capable: true, Installed: true, UnitPresent: true}, StateProvisioning},
+		{"unit and healthy endpoint", Facts{Capable: true, Installed: true, UnitPresent: true, Checked: true, Healthy: true}, StateReady},
+		{"unit without endpoint", Facts{Capable: true, Installed: true, UnitPresent: true, Checked: true}, StateDegraded},
+		{"llmman kept after disable", Facts{Capable: true, Installed: true}, StateDisabled},
 	}
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			stack := Select(tt.set)
+			if got := Resolve(tt.f); got != tt.want {
+				t.Errorf("Resolve(%+v) = %v, want %v", tt.f, got, tt.want)
+			}
+		})
+	}
+}
 
-			if stack.Vendor != tt.wantVendor {
-				t.Errorf("vendor = %q, want %q", stack.Vendor, tt.wantVendor)
+func TestSwitchReadsOnOnlyWhileTheUnitIsOwned(t *testing.T) {
+	on := map[State]bool{StateProvisioning: true, StateReady: true, StateDegraded: true}
+	for s := StateUnavailable; s <= StateDisabled; s++ {
+		if s.On() != on[s] {
+			t.Errorf("State(%d).On() = %v", s, s.On())
+		}
+	}
+}
+
+func TestBrewfileInstallsOnlyTheMissingRuntime(t *testing.T) {
+	got := Brewfile(false)
+	want := "tap \"llmmanorg/tap\"\nbrew \"llmmanorg/tap/llmman\"\n"
+	if got != want {
+		t.Fatalf("runtime install plan = %q, want %q", got, want)
+	}
+	if got := Brewfile(true); got != "" {
+		t.Fatalf("already installed runtime has work: %q", got)
+	}
+}
+
+func TestRenderUnitBindsLoopbackWithShellAndHistoryOff(t *testing.T) {
+	unit, err := RenderUnit("/opt/brew/bin/llmman")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"ExecStart=/opt/brew/bin/llmman serve\n",
+		"Environment=LLMMAN_HOST=127.0.0.1:17434\n",
+		"Environment=LLMMAN_PEERS=\n",
+		"Environment=LLMMAN_SHELL=off\n",
+		"Environment=LLMMAN_NOHISTORY=1\n",
+		"WantedBy=default.target\n",
+	} {
+		if !strings.Contains(unit, want) {
+			t.Errorf("unit missing %q:\n%s", want, unit)
+		}
+	}
+	for _, banned := range []string{"linuxbrew", "%h", "0.0.0.0", "LLMMAN_ORIGINS", "LLMMAN_AUTH", "OPENAI"} {
+		if strings.Contains(unit, banned) {
+			t.Errorf("unit contains %q:\n%s", banned, unit)
+		}
+	}
+}
+
+func TestRenderUnitRejectsPathsSystemdWouldReinterpret(t *testing.T) {
+	for _, exe := range []string{"llmman", "bin/llmman", "/home/a b/llmman", "/x/%h/llmman", "/x/$HOME/llmman"} {
+		if _, err := RenderUnit(exe); err == nil {
+			t.Errorf("RenderUnit(%q) accepted", exe)
+		}
+	}
+}
+
+func TestEnvFragmentPublishesOnlyOllamaHost(t *testing.T) {
+	if got := EnvFragment(); got != "OLLAMA_HOST=127.0.0.1:17434\n" {
+		t.Errorf("EnvFragment() = %q", got)
+	}
+}
+
+// host isolates every seam: a temp config dir, a fake llmman beside a fake
+// brew, a recorded command runner, and a recorded bundle install.
+type host struct {
+	config     string
+	exe        string
+	calls      []string
+	brew       []string
+	bundles    []string
+	fail       map[string]error
+	outputs    map[string]string
+	loadedUnit os.FileInfo
+}
+
+func newHost(t *testing.T) *host {
+	t.Helper()
+	h := &host{config: t.TempDir(), fail: map[string]error{}, outputs: map[string]string{}}
+	h.outputs["systemctl --user show "+ServiceName+" --property=InvocationID --value"] = strings.Repeat("a", 32)
+	// By default the running process predates any unit a test writes, so
+	// only a matching stamp proves adoption; tests of the start-time proof
+	// override this with setServiceState.
+	h.setServiceState("active", "no", time.Unix(1, 0), strings.Repeat("a", 32))
+	bin := t.TempDir()
+	h.exe = filepath.Join(bin, "llmman")
+	if err := os.WriteFile(h.exe, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	saved := []func(){}
+	restore := func(f func()) { saved = append(saved, f) }
+	oc, ol, ob, oi, or, on := configDir, lookPath, brewPath, installBundle, run, nodeURL
+	ot, otr := tapRepo, trustFormula
+	restore(func() {
+		configDir, lookPath, brewPath, installBundle, run, nodeURL = oc, ol, ob, oi, or, on
+		tapRepo, trustFormula = ot, otr
+	})
+	tapRepo = func(name string) error {
+		h.brew = append(h.brew, "brew tap "+name)
+		return h.fail["brew tap "+name]
+	}
+	trustFormula = func(name string) error {
+		h.brew = append(h.brew, "brew trust --formula "+name)
+		return h.fail["brew trust --formula "+name]
+	}
+	configDir = func() (string, error) { return h.config, nil }
+	lookPath = func(string) (string, error) { return "", errors.New("not on PATH") }
+	brewPath = func() string { return filepath.Join(bin, "brew") }
+	installBundle = func(path string) error {
+		data, err := os.ReadFile(path)
+		h.bundles = append(h.bundles, string(data))
+		return err
+	}
+	run = func(_ context.Context, name string, args ...string) (string, error) {
+		call := strings.TrimSpace(filepath.Base(name) + " " + strings.Join(args, " "))
+		h.calls = append(h.calls, call)
+		out, err := h.outputs[call], h.fail[call]
+		if err != nil {
+			return out, err
+		}
+		switch call {
+		case "systemctl --user daemon-reload":
+			h.loadedUnit, _ = os.Stat(filepath.Join(h.config, unitRel))
+			stateCall := "systemctl --user " + strings.Join(serviceStateArgs, " ")
+			h.outputs[stateCall] = strings.ReplaceAll(h.outputs[stateCall], "NeedDaemonReload=yes", "NeedDaemonReload=no")
+		case "systemctl --user " + strings.Join(serviceStateArgs, " "):
+			info, statErr := os.Stat(filepath.Join(h.config, unitRel))
+			if statErr == nil && (h.loadedUnit == nil || !os.SameFile(info, h.loadedUnit) || !info.ModTime().Equal(h.loadedUnit.ModTime())) {
+				out = strings.ReplaceAll(out, "NeedDaemonReload=no", "NeedDaemonReload=yes")
 			}
-			if stack.Image != tt.wantImage {
-				t.Errorf("image = %q, want %q", stack.Image, tt.wantImage)
-			}
-			if stack.Accelerator != tt.wantAccelerator {
-				t.Errorf("accelerator = %q, want %q", stack.Accelerator, tt.wantAccelerator)
-			}
-			if stack.Accelerated() != tt.wantAccelerated {
-				t.Errorf("accelerated = %v, want %v", stack.Accelerated(), tt.wantAccelerated)
-			}
-			if len(stack.Devices) != len(tt.wantDevices) {
-				t.Fatalf("devices = %v, want %v", stack.Devices, tt.wantDevices)
-			}
-			for i, device := range tt.wantDevices {
-				if stack.Devices[i] != device {
-					t.Errorf("device[%d] = %q, want %q", i, stack.Devices[i], device)
+		}
+		return out, nil
+	}
+	t.Cleanup(func() {
+		for _, f := range saved {
+			f()
+		}
+	})
+	return h
+}
+
+// setServiceState establishes the initial manager observation. A loaded unit
+// records the real file identity and mtime; later stamp writes require reload.
+func (h *host) setServiceState(active, needReload string, mainStart time.Time, invocation string) {
+	h.serviceOutput(active, needReload, mainStart, invocation)
+	if needReload == "no" {
+		h.loadedUnit, _ = os.Stat(filepath.Join(h.config, unitRel))
+	}
+}
+
+func (h *host) serviceOutput(active, needReload string, mainStart time.Time, invocation string) {
+	h.outputs["systemctl --user "+strings.Join(serviceStateArgs, " ")] = "ActiveState=" + active + "\n" +
+		"NeedDaemonReload=" + needReload + "\n" +
+		"ExecMainStartTimestamp=@" + strconv.FormatInt(mainStart.Unix(), 10) + "\n" +
+		"InvocationID=" + invocation + "\n"
+}
+
+// startInvocation models Restart=on-failure: only the process identity and start
+// time change; the manager does not reload the unit from disk.
+func (h *host) startInvocation(mainStart time.Time, invocation string) {
+	h.serviceOutput("active", "no", mainStart, invocation)
+	h.outputs["systemctl --user show "+ServiceName+" --property=InvocationID --value"] = invocation
+}
+
+func (h *host) exists(t *testing.T, rel string) bool {
+	t.Helper()
+	_, err := os.Stat(filepath.Join(h.config, rel))
+	return err == nil
+}
+
+const (
+	unitRel = "systemd/user/" + ServiceName
+	envRel  = "environment.d/" + EnvFragmentName
+)
+
+func TestEnableProvisionsInOrderWithTheResolvedPath(t *testing.T) {
+	h := newHost(t)
+	if err := Enable(context.Background()); err != nil {
+		t.Fatalf("Enable: %v", err)
+	}
+	unit, err := os.ReadFile(filepath.Join(h.config, unitRel))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(unit), "ExecStart="+h.exe+" serve\n") {
+		t.Errorf("unit does not use the resolved path %s:\n%s", h.exe, unit)
+	}
+	env, err := os.ReadFile(filepath.Join(h.config, envRel))
+	if err != nil || string(env) != EnvFragment() {
+		t.Errorf("fragment = %q, %v", env, err)
+	}
+	// A resolved runtime needs no installation bundle.
+	for _, b := range h.bundles {
+		if strings.Contains(b, Formula) {
+			t.Errorf("bundled the formula although llmman was present:\n%s", b)
+		}
+	}
+}
+
+func TestEnableInstallsTheFormulaWhenLLMManIsMissing(t *testing.T) {
+	h := newHost(t)
+	if err := os.Remove(h.exe); err != nil {
+		t.Fatal(err)
+	}
+	installBundle = func(path string) error {
+		data, _ := os.ReadFile(path)
+		h.bundles = append(h.bundles, string(data))
+		h.brew = append(h.brew, "brew bundle")
+		return os.WriteFile(h.exe, []byte("#!/bin/sh\n"), 0o755)
+	}
+	if err := Enable(context.Background()); err != nil {
+		t.Fatalf("Enable: %v", err)
+	}
+	if len(h.bundles) != 1 || !strings.Contains(h.bundles[0], `brew "`+Formula+`"`) {
+		t.Errorf("bundles = %q", h.bundles)
+	}
+	// Homebrew refuses to load a formula from an untrusted tap, and
+	// llmmanorg/tap is untrusted on a stock host: the tap must exist and
+	// the one formula be trusted before the bundle loads it — and nothing
+	// broader than that formula is trusted.
+	want := []string{"brew tap " + Tap, "brew trust --formula " + Formula, "brew bundle"}
+	if got := h.brew; strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("brew steps = %q, want %q", got, want)
+	}
+}
+
+func TestEnableStopsWhenTrustFails(t *testing.T) {
+	h := newHost(t)
+	if err := os.Remove(h.exe); err != nil {
+		t.Fatal(err)
+	}
+	h.fail["brew trust --formula "+Formula] = errors.New("trust failed")
+	if err := Enable(context.Background()); err == nil {
+		t.Fatal("Enable succeeded although the formula could not be trusted")
+	}
+	if len(h.bundles) != 0 || h.exists(t, unitRel) {
+		t.Errorf("bundled or wrote a unit after trust failed: bundles=%q", h.bundles)
+	}
+}
+
+func TestEnableStopsBeforeWritingWhenTheRuntimeCheckFails(t *testing.T) {
+	h := newHost(t)
+	h.fail["llmman serve --pull-only"] = errors.New("no engine")
+	if err := Enable(context.Background()); err == nil {
+		t.Fatal("Enable succeeded with a failed runtime check")
+	}
+	if h.exists(t, unitRel) || h.exists(t, envRel) {
+		t.Error("files written despite a failed runtime check")
+	}
+}
+
+func TestEnableRollsBackWhatItWroteWhenStartFails(t *testing.T) {
+	h := newHost(t)
+	h.fail["systemctl --user restart "+ServiceName] = errors.New("start failed")
+	if err := Enable(context.Background()); err == nil {
+		t.Fatal("Enable succeeded with a failed start")
+	}
+	if h.exists(t, unitRel) || h.exists(t, envRel) {
+		t.Error("unit or fragment left behind after a failed start")
+	}
+}
+
+func TestEnableKeepsAPreexistingUnitWhenStartFails(t *testing.T) {
+	h := newHost(t)
+	if err := writeAtomic(filepath.Join(h.config, unitRel), "old"); err != nil {
+		t.Fatal(err)
+	}
+	h.fail["systemctl --user restart "+ServiceName] = errors.New("start failed")
+	if err := Enable(context.Background()); err == nil {
+		t.Fatal("Enable succeeded with a failed start")
+	}
+	if !h.exists(t, unitRel) {
+		t.Error("retry removed a unit this call did not create")
+	}
+}
+
+func TestEnableFailsWhenNoExecutableResolvesAfterInstall(t *testing.T) {
+	h := newHost(t)
+	if err := os.Remove(h.exe); err != nil {
+		t.Fatal(err)
+	}
+	if err := Enable(context.Background()); err == nil {
+		t.Fatal("Enable succeeded without an llmman executable")
+	}
+	if len(h.calls) != 0 || h.exists(t, unitRel) {
+		t.Errorf("acted without an executable: %v", h.calls)
+	}
+}
+
+func TestDryRunMutatesNothing(t *testing.T) {
+	h := newHost(t)
+	dryrun.Set(true)
+	t.Cleanup(func() { dryrun.Set(false) })
+	if err := Enable(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := Disable(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(h.calls) != 0 || len(h.bundles) != 0 || h.exists(t, unitRel) || h.exists(t, envRel) {
+		t.Errorf("dry run acted: calls=%v bundles=%v", h.calls, h.bundles)
+	}
+}
+
+func TestDisableRemovesOnlyOwnedFiles(t *testing.T) {
+	h := newHost(t)
+	for _, rel := range []string{unitRel, envRel, "environment.d/50-user.conf"} {
+		if err := writeAtomic(filepath.Join(h.config, rel), "x"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := Disable(context.Background()); err != nil {
+		t.Fatalf("Disable: %v", err)
+	}
+	if h.exists(t, unitRel) || h.exists(t, envRel) {
+		t.Error("owned file survived disable")
+	}
+	if !h.exists(t, "environment.d/50-user.conf") {
+		t.Error("disable removed a user's own environment fragment")
+	}
+	if !strings.Contains(strings.Join(h.calls, "\n"), "systemctl --user unset-environment OLLAMA_HOST") {
+		t.Errorf("OLLAMA_HOST not cleared: %v", h.calls)
+	}
+	if _, err := os.Stat(h.exe); err != nil {
+		t.Error("disable removed the llmman binary")
+	}
+}
+
+func TestDisableKeepsTheUnitWhileTheServiceMayStillRun(t *testing.T) {
+	for state, keep := range map[string]bool{"active": true, "deactivating": true, "": true, "inactive": false, "failed": false} {
+		t.Run(state, func(t *testing.T) {
+			h := newHost(t)
+			for _, rel := range []string{unitRel, envRel} {
+				if err := writeAtomic(filepath.Join(h.config, rel), "x"); err != nil {
+					t.Fatal(err)
 				}
 			}
+			h.fail["systemctl --user disable --now "+ServiceName] = errors.New("stop failed")
+			h.outputs["systemctl --user is-active "+ServiceName] = state
+			err := Disable(context.Background())
+			if (err != nil) != keep || h.exists(t, unitRel) != keep || h.exists(t, envRel) != keep {
+				t.Errorf("state %q: err=%v unit=%v fragment=%v, want kept=%v", state, err, h.exists(t, unitRel), h.exists(t, envRel), keep)
+			}
 		})
 	}
 }
 
-func TestEveryStackRendersAStartableUnit(t *testing.T) {
-	for vendor, stack := range stacks {
-		unit := RenderUnit(stack)
-
-		for _, required := range []string{
-			"[Container]",
-			"Image=" + stack.Image,
-			"ContainerName=chairlift-ai",
-			"PublishPort=127.0.0.1:8080:8080",
-			"WantedBy=default.target",
-		} {
-			if !strings.Contains(unit, required) {
-				t.Errorf("%s unit is missing %q:\n%s", vendor, required, unit)
-			}
+func TestHealthyRequiresAJSONAnswerFromTheNodeRoute(t *testing.T) {
+	newHost(t)
+	block := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("case") {
+		case "ok":
+			_, _ = w.Write([]byte(`{"memory":1,"loaded":{},"stored":{}}`))
+		case "null":
+			_, _ = w.Write([]byte(`null`))
+		case "array":
+			_, _ = w.Write([]byte(`[]`))
+		case "error":
+			http.Error(w, "boom", http.StatusInternalServerError)
+		case "html":
+			_, _ = w.Write([]byte("<html>"))
+		case "hang":
+			<-block
 		}
-
-		for _, device := range stack.Devices {
-			if !strings.Contains(unit, "AddDevice="+device) {
-				t.Errorf("%s unit is missing AddDevice=%s", vendor, device)
-			}
+	}))
+	t.Cleanup(srv.Close)
+	// Registered after srv.Close so it runs first: Close waits for handlers.
+	t.Cleanup(func() { close(block) })
+	for c, want := range map[string]bool{"ok": true, "null": false, "array": false, "error": false, "html": false, "hang": false} {
+		nodeURL = srv.URL + "/llmman/node?case=" + c
+		start := time.Now()
+		if got := Healthy(context.Background()); got != want {
+			t.Errorf("%s: Healthy = %v, want %v", c, got, want)
 		}
-
-		// A CPU stack that quietly asked for /dev/dri would fail to start on
-		// the headless hosts it exists for.
-		if !stack.Accelerated() && strings.Contains(unit, "AddDevice=") {
-			t.Errorf("%s unit passes a device through:\n%s", vendor, unit)
+		if time.Since(start) > 5*time.Second {
+			t.Errorf("%s: probe was not bounded", c)
 		}
 	}
 }
 
-func TestUnitNameDoesNotCollideWithBluefinctl(t *testing.T) {
-	// bluefinctl installs ramalama.container into the same directory. If
-	// ChairLift ever takes that name it silently overwrites the user's
-	// bluefinctl stack.
-	if UnitName == "ramalama.container" {
-		t.Fatal("UnitName collides with bluefinctl's ramalama stack")
+func TestExecutablePrefersPathThenBrewSibling(t *testing.T) {
+	h := newHost(t)
+	if got := Executable(); got != h.exe {
+		t.Errorf("brew sibling: got %q want %q", got, h.exe)
 	}
-	if !strings.HasPrefix(UnitName, "chairlift-") {
-		t.Errorf("UnitName = %q, want a chairlift- prefix", UnitName)
+	lookPath = func(string) (string, error) { return "/usr/local/bin/llmman", nil }
+	if got := Executable(); got != "/usr/local/bin/llmman" {
+		t.Errorf("PATH: got %q", got)
 	}
-	if ServiceName != strings.TrimSuffix(UnitName, ".container")+".service" {
-		t.Errorf("ServiceName = %q does not match UnitName %q", ServiceName, UnitName)
-	}
-}
-
-// stubUnitDir points the package at a temporary quadlet directory and
-// records the systemctl calls it makes.
-func stubUnitDir(t *testing.T) (dir string, calls *[]string) {
-	t.Helper()
-
-	tmp := t.TempDir()
-	previousDir := unitDir
-	previousSystemctl := runSystemctl
-	t.Cleanup(func() {
-		unitDir = previousDir
-		runSystemctl = previousSystemctl
-		dryrun.Set(false)
-	})
-
-	unitDir = func() (string, error) { return tmp, nil }
-
-	recorded := []string{}
-	runSystemctl = func(_ context.Context, args ...string) error {
-		recorded = append(recorded, strings.Join(args, " "))
-		return nil
-	}
-
-	return tmp, &recorded
-}
-
-func TestEnableWritesTheUnitAndStartsIt(t *testing.T) {
-	dir, calls := stubUnitDir(t)
-
-	if IsEnabled() {
-		t.Fatal("IsEnabled reported true before Enable")
-	}
-
-	stack := Select(gpu.Set{AMD: true})
-	if err := Enable(context.Background(), stack); err != nil {
-		t.Fatalf("Enable: %v", err)
-	}
-
-	data, err := os.ReadFile(filepath.Join(dir, UnitName))
-	if err != nil {
-		t.Fatalf("reading written unit: %v", err)
-	}
-	if !strings.Contains(string(data), stack.Image) {
-		t.Errorf("written unit does not name %q:\n%s", stack.Image, data)
-	}
-
-	want := []string{"daemon-reload", "start " + ServiceName}
-	if strings.Join(*calls, "|") != strings.Join(want, "|") {
-		t.Errorf("systemctl calls = %v, want %v", *calls, want)
-	}
-
-	if !IsEnabled() {
-		t.Error("IsEnabled reported false after Enable")
+	lookPath = func(string) (string, error) { return "", errors.New("none") }
+	brewPath = func() string { return "" }
+	if got := Executable(); got != "" {
+		t.Errorf("no brew, no PATH: got %q", got)
 	}
 }
 
-func TestEnableRemovesTheUnitWhenTheServiceWillNotStart(t *testing.T) {
-	dir, _ := stubUnitDir(t)
-
-	runSystemctl = func(_ context.Context, args ...string) error {
-		if args[0] == "start" {
-			return errors.New("unit not found")
-		}
-		return nil
+// WebUIURL is the loopback daemon's models page; ChairLift links there
+// rather than re-implementing a picker (#568).
+func TestWebUIURLIsTheLoopbackDaemon(t *testing.T) {
+	if got, want := WebUIURL(), "http://"+Address+"/#/models"; got != want {
+		t.Errorf("WebUIURL() = %q, want %q", got, want)
 	}
-
-	if err := Enable(context.Background(), Select(gpu.Set{})); err == nil {
-		t.Fatal("Enable returned no error when the service failed to start")
-	}
-
-	if _, err := os.Stat(filepath.Join(dir, UnitName)); !os.IsNotExist(err) {
-		t.Error("a failed Enable left its quadlet on disk")
-	}
-	if IsEnabled() {
-		t.Error("IsEnabled reported true after a failed Enable")
+	if !strings.HasPrefix(Address, "127.0.0.1:") {
+		t.Errorf("Address %q is not loopback", Address)
 	}
 }
 
-func TestDisableRemovesTheUnit(t *testing.T) {
-	dir, calls := stubUnitDir(t)
-
-	if err := Enable(context.Background(), Select(gpu.Set{NVIDIA: true})); err != nil {
-		t.Fatalf("Enable: %v", err)
-	}
-	*calls = nil
-
-	if err := Disable(context.Background()); err != nil {
-		t.Fatalf("Disable: %v", err)
-	}
-
-	if _, err := os.Stat(filepath.Join(dir, UnitName)); !os.IsNotExist(err) {
-		t.Error("Disable left the quadlet on disk")
-	}
-	want := []string{"stop " + ServiceName, "daemon-reload"}
-	if strings.Join(*calls, "|") != strings.Join(want, "|") {
-		t.Errorf("systemctl calls = %v, want %v", *calls, want)
-	}
-}
-
-func TestDisableSucceedsWhenTheServiceIsAlreadyDown(t *testing.T) {
-	dir, _ := stubUnitDir(t)
-
-	if err := Enable(context.Background(), Select(gpu.Set{})); err != nil {
-		t.Fatalf("Enable: %v", err)
-	}
-
-	runSystemctl = func(_ context.Context, args ...string) error {
-		if args[0] == "stop" {
-			return errors.New("unit is not loaded")
-		}
-		return nil
-	}
-
-	if err := Disable(context.Background()); err != nil {
-		t.Fatalf("Disable: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(dir, UnitName)); !os.IsNotExist(err) {
-		t.Error("Disable left the quadlet on disk after a failed stop")
-	}
-}
-
-func TestDryRunTouchesNothing(t *testing.T) {
-	dir, calls := stubUnitDir(t)
-	dryrun.Set(true)
-
-	if err := Enable(context.Background(), Select(gpu.Set{AMD: true})); err != nil {
-		t.Fatalf("Enable: %v", err)
-	}
-	if err := Disable(context.Background()); err != nil {
-		t.Fatalf("Disable: %v", err)
-	}
-
-	if _, err := os.Stat(filepath.Join(dir, UnitName)); !os.IsNotExist(err) {
-		t.Error("dry-run wrote a quadlet")
-	}
-	if len(*calls) != 0 {
-		t.Errorf("dry-run ran systemctl: %v", *calls)
-	}
-}
-
-func TestApplyOverridesReplacesTheImageAndModel(t *testing.T) {
-	original := stacks[gpu.VendorNVIDIA]
-	originalModel := servedModel
-	t.Cleanup(func() {
-		stacks[gpu.VendorNVIDIA] = original
-		servedModel = originalModel
-	})
-
-	err := ApplyOverrides(
-		map[string]string{"nvidia": "registry.example.internal/ramalama/cuda:pinned"},
-		"ollama://qwen2.5:7b",
-	)
-	if err != nil {
-		t.Fatalf("ApplyOverrides: %v", err)
-	}
-
-	stack := Select(gpu.Set{NVIDIA: true})
-	if stack.Image != "registry.example.internal/ramalama/cuda:pinned" {
-		t.Errorf("image = %q, want the override", stack.Image)
-	}
-	if !strings.Contains(RenderUnit(stack), "ollama://qwen2.5:7b") {
-		t.Error("rendered unit does not serve the overridden model")
-	}
-
-	// An override for one vendor leaves the others alone.
-	if Select(gpu.Set{AMD: true}).Image != "quay.io/ramalama/rocm:latest" {
-		t.Error("overriding nvidia disturbed the amd stack")
-	}
-}
-
-func TestApplyOverridesRejectsBadInput(t *testing.T) {
-	tests := []struct {
-		name   string
-		images map[string]string
-		want   string
+// ReadActiveModel reads the alias llmman reports; a fresh runtime has no
+// alias set, which is the ordinary no-selection state, not an error. Other
+// failures still surface so a misconfigured daemon is not silently accepted.
+func TestReadActiveModelDistinguishesUnsetAliasFromFailure(t *testing.T) {
+	newHost(t)
+	failure := errors.New("command failed")
+	for _, test := range []struct {
+		name, output, model string
+		err                 error
+		wantError           bool
 	}{
-		{
-			name:   "unknown vendor",
-			images: map[string]string{"matrox": "example.com/x:1"},
-			want:   `unknown vendor "matrox"`,
-		},
-		{
-			name:   "empty image",
-			images: map[string]string{"amd": ""},
-			want:   "empty image",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			before := Select(gpu.Set{AMD: true}).Image
-
-			if err := ApplyOverrides(tt.images, ""); err == nil {
-				t.Fatal("ApplyOverrides accepted invalid input")
-			} else if !strings.Contains(err.Error(), tt.want) {
-				t.Errorf("error = %q, want it to mention %q", err, tt.want)
-			}
-
-			if got := Select(gpu.Set{AMD: true}).Image; got != before {
-				t.Errorf("a rejected override changed the amd image to %q", got)
+		{name: "fresh runtime", output: "Error: aliases.bluefin-active: not set", err: failure},
+		{name: "configured", output: "unsloth/example:Q4_K_M\n", model: "unsloth/example:Q4_K_M"},
+		{name: "config read failed", output: "Error: permission denied", err: failure, wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			run = func(context.Context, string, ...string) (string, error) { return test.output, test.err }
+			model, err := ReadActiveModel(context.Background())
+			if model != test.model || (err != nil) != test.wantError {
+				t.Fatalf("ReadActiveModel = %q, %v", model, err)
 			}
 		})
-	}
-}
-
-func TestNoOverridesIsANoOp(t *testing.T) {
-	if err := ApplyOverrides(nil, ""); err != nil {
-		t.Fatalf("ApplyOverrides(nil, \"\"): %v", err)
-	}
-	if Select(gpu.Set{}).Image != "quay.io/ramalama/ramalama:latest" {
-		t.Error("an empty override changed the CPU stack")
 	}
 }

@@ -1,19 +1,37 @@
-.PHONY: all build build-e2e run clean deps tidy install uninstall e2e
+# Every target in this Makefile is a command, not a file recipe: none of them
+# produces a file of its own name. All of them must therefore be declared
+# .PHONY, and internal/installcheck.TestMakefilePhonyCoversEveryTarget
+# enforces exactly that, over the full inventory rather than a sample.
+#
+# `test` is why this is a defect rather than a style nit. The repository has a
+# `test/` directory, so while the target was undeclared make considered it
+# already satisfied: `make test` printed "'test' is up to date" and ran
+# nothing, silently, for as long as AGENTS.md documented it as `go test ./...`.
+# The others worked only because no directory happens to share their names.
+.PHONY: all deps tidy
+.PHONY: schemas blueprints blueprints-check
+.PHONY: build
+.PHONY: build-linux-amd64 build-linux-arm64
+.PHONY: run dev clean
+.PHONY: test fmt lint
+.PHONY: build-e2e build-e2e-gui e2e e2e-atspi
+.PHONY: install uninstall
+.PHONY: bump
 
 # Binary names
 BINARY_NAME=chairlift
 HELPER_NAME=chairlift-updex-helper
-UBLUE_HELPER_NAME=chairlift-ublue-helper
+UBLUE_HELPER_NAME=chairlift-helper
 
 # Build directory
 BUILD_DIR=build
 
 # Installation directories
 #
-# PREFIX defaults to /usr, matching both the fixed absolute path pkexec
+# PREFIX defaults to /usr, matching the fixed absolute path pkexec
 # matches against PolicyKit's org.freedesktop.policykit.exec.path annotation
-# (data/io.projectbluefin.chairlift.updex.policy, internal/updex.HelperPath) and
-# the layout .goreleaser.yaml's nFPM packages already install to. PolicyKit
+# (data/io.projectbluefin.chairlift.updex.policy, internal/updex.HelperPath),
+# which is also where an OS image places the helpers from the release archive. PolicyKit
 # itself only ever reads actions from /usr/share/polkit-1/actions — it does
 # not consult PREFIX or XDG_DATA_DIRS — so installing under any other PREFIX
 # means the .policy files land somewhere polkit never looks. Override PREFIX
@@ -21,13 +39,14 @@ BUILD_DIR=build
 # `make install PREFIX=$$HOME/.local`), but understand that the
 # PolicyKit-authenticated updex helper path then no longer resolves to the
 # fixed exec.path annotation. DESTDIR (below) still layers under PREFIX
-# unchanged, for staged/packaged installs.
+# unchanged, for staged installs such as an OS image build.
 PREFIX ?= /usr
 BINDIR = $(PREFIX)/bin
 DATADIR = $(PREFIX)/share
 ICONSDIR = $(DATADIR)/icons
 APPLICATIONSDIR = $(DATADIR)/applications
 CONFIGDIR = $(DATADIR)/chairlift
+SCHEMASDIR = $(DATADIR)/glib-2.0/schemas
 POLKITACTIONSDIR = $(DATADIR)/polkit-1/actions
 POLKITRULESDIR = $(DATADIR)/polkit-1/rules.d
 
@@ -37,7 +56,6 @@ GOCMD=$(shell if [ -x $(HOMEBREW_GO) ]; then echo $(HOMEBREW_GO); else echo go; 
 GOBUILD=$(GOCMD) build
 GOCLEAN=$(GOCMD) clean
 GOTEST=$(GOCMD) test
-GOGET=$(GOCMD) get
 GOMOD=$(GOCMD) mod
 
 # CGO is not needed with puregotk!
@@ -51,19 +69,14 @@ deps:
 tidy:
 	$(GOMOD) tidy
 
-build: build-app build-helper build-ublue-helper
-
-build-app:
+# `schemas` is a prerequisite because a binary that writes a key the compiled
+# schema does not carry fails at runtime with "No such key" — a confusing way
+# to discover build/schemas went stale after the gschema gained one.
+build: schemas
 	@mkdir -p $(BUILD_DIR)
-	CGO_ENABLED=$(CGO_ENABLED) $(GOBUILD) -o $(BUILD_DIR)/$(BINARY_NAME) ./cmd/chairlift
-
-build-helper:
-	@mkdir -p $(BUILD_DIR)
-	CGO_ENABLED=$(CGO_ENABLED) $(GOBUILD) -o $(BUILD_DIR)/$(HELPER_NAME) ./cmd/chairlift-updex-helper
-
-build-ublue-helper:
-	@mkdir -p $(BUILD_DIR)
-	CGO_ENABLED=$(CGO_ENABLED) $(GOBUILD) -o $(BUILD_DIR)/$(UBLUE_HELPER_NAME) ./cmd/chairlift-ublue-helper
+	CGO_ENABLED=$(CGO_ENABLED) $(GOBUILD) $(E2E_COVER_FLAG) -o $(BUILD_DIR)/$(BINARY_NAME) ./cmd/chairlift
+	CGO_ENABLED=$(CGO_ENABLED) $(GOBUILD) $(E2E_COVER_FLAG) -o $(BUILD_DIR)/$(HELPER_NAME) ./cmd/chairlift-updex-helper
+	CGO_ENABLED=$(CGO_ENABLED) $(GOBUILD) $(E2E_COVER_FLAG) -o $(BUILD_DIR)/$(UBLUE_HELPER_NAME) ./cmd/chairlift-helper
 
 run: build
 	./$(BUILD_DIR)/$(BINARY_NAME) --dry-run
@@ -89,55 +102,114 @@ E2E_TAGS=chairlift_e2e
 # rows.
 E2E_BUILD_DIR=$(BUILD_DIR)/e2e
 
-build-e2e: build
+# E2E_COVERDIR, when set, makes build and build-e2e produce coverage-instrumented
+# binaries and makes the e2e target collect what they recorded. It is empty
+# by default so a developer running `make e2e` gets the same plain binaries
+# as before.
+E2E_COVERDIR?=
+E2E_COVER_FLAG=$(if $(E2E_COVERDIR),-cover -covermode=atomic,)
+
+build-e2e: build build-e2e-gui
+
+# AT-SPI needs only the tagged GUI, not the installed helper binaries.
+build-e2e-gui: schemas
 	@mkdir -p $(E2E_BUILD_DIR)
-	CGO_ENABLED=$(CGO_ENABLED) $(GOBUILD) -tags $(E2E_TAGS) -o $(E2E_BUILD_DIR)/$(BINARY_NAME) ./cmd/chairlift
+	CGO_ENABLED=$(CGO_ENABLED) $(GOBUILD) $(E2E_COVER_FLAG) -tags $(E2E_TAGS) -o $(E2E_BUILD_DIR)/$(BINARY_NAME) ./cmd/chairlift
 
 # Regenerate the documentation walkthrough screenshots in docs/screenshots/
 # from the real application, then remove the capture byproducts so only the
 # PNGs are left to commit.
 #
-# It cannot join `make ci`: it needs a display, GTK, and the X utilities. It
-# is also deliberately not run per-push — font hinting and GTK point releases
-# move pixels, so regenerating on every commit would churn the repository for
-# no signal. Run it when a feature's appearance actually changes.
+# It cannot join `make ci`: like every E2E target it runs the GUI inside the
+# Dakota image (test/e2e/dakota.sh) and needs podman. It is also deliberately
+# not run per-push — font hinting and GTK point releases move pixels, so
+# regenerating on every commit would churn the repository for no signal. Run
+# it when a feature's appearance actually changes.
 #
 # The referential check that every page has a screenshot and every screenshot
 # is referenced by docs/walkthrough.md is a pure-Go test in
 # internal/installcheck, so that half does run in `make ci`.
 .PHONY: screenshots
-screenshots: build-e2e
+screenshots: build-e2e schemas
 	@mkdir -p $(SCREENSHOT_DIR)
 	CHAIRLIFT_E2E_BUILD_DIR=$(abspath $(BUILD_DIR)) \
 		CHAIRLIFT_WALKTHROUGH_DIR=$(abspath $(SCREENSHOT_DIR)) \
-		$(GOTEST) -count=1 -run TestWalkthroughScreenshots ./test/e2e
+		CHAIRLIFT_SCHEMA_DIR=$(abspath $(BUILD_DIR))/schemas \
+		test/e2e/dakota.sh -count=1 -run '^TestWalkthroughScreenshots$$'
 	@test -n "$(SCREENSHOT_DIR)" || { echo "SCREENSHOT_DIR is empty; refusing to clean" >&2; exit 1; }
-	@rm -rf "$(SCREENSHOT_DIR)/home" $(SCREENSHOT_DIR)/*.xwd \
-		"$(SCREENSHOT_DIR)/chairlift.log" "$(SCREENSHOT_DIR)/window-geometry.env" \
-		"$(SCREENSHOT_DIR)/image-info.json"
+	@rm -rf "$(SCREENSHOT_DIR)/home" "$(SCREENSHOT_DIR)/runtime" \
+		"$(SCREENSHOT_DIR)/chairlift.log" "$(SCREENSHOT_DIR)/image-info.json"
 	@echo "==> screenshots written to $(SCREENSHOT_DIR)"
 
 SCREENSHOT_DIR=docs/screenshots
 
-# End-to-end smoke tests require GTK4, Libadwaita, dbus-run-session, and Xvfb;
-# the screenshot walkthrough additionally requires Xvfb, xdotool, xdpyinfo,
-# and xwd. They run separately from ci because the ordinary unit-test gate is
-# intentionally usable on hosts without those runtime libraries.
+# The end-to-end tests run inside ghcr.io/projectbluefin/dakota:testing
+# (test/e2e/dakota.sh, which needs podman and Go on the host), each GUI under
+# its own private headless Mutter Wayland session and private D-Bus session
+# (test/e2e/wayland_session.sh). That is the GTK, Libadwaita, compositor and
+# accessibility stack ChairLift ships on; nothing runs on the host's display
+# stack. They run separately from ci because the ordinary unit-test gate is
+# intentionally usable on hosts without podman.
 #
 # Only the GUI is built with E2E_TAGS. Both privileged helpers are built
 # exactly as they ship, so the boundary assertions in test/e2e exercise the
 # real binaries.
-e2e: build-e2e
-	CHAIRLIFT_E2E_BUILD_DIR=$(abspath $(BUILD_DIR)) $(GOTEST) -v ./test/e2e
+# The compiled schemas come along for the same reason `screenshots` builds
+# them: without CHAIRLIFT_SCHEMA_DIR the Livery page logs "the Livery
+# settings schema is not installed" and renders without its saved state, and
+# the walkthrough captures this target uploads are exactly what ships in
+# docs/screenshots.
+#
+# The behave AT-SPI suite (TestATSPIBehaveSuite) is skipped here and run by
+# e2e-atspi instead, because it alone takes most of the E2E time.
+e2e: build-e2e schemas
+ifeq ($(E2E_COVERDIR),)
+	CHAIRLIFT_E2E_BUILD_DIR=$(abspath $(BUILD_DIR)) \
+		CHAIRLIFT_SCHEMA_DIR=$(abspath $(BUILD_DIR))/schemas \
+		test/e2e/dakota.sh -v -skip '^(TestATSPIBehaveSuite|TestIntegrationDockerSystem)$$'
+else
+	@rm -rf "$(E2E_COVERDIR)" && mkdir -p "$(E2E_COVERDIR)"
+	CHAIRLIFT_E2E_BUILD_DIR=$(abspath $(BUILD_DIR)) \
+		CHAIRLIFT_SCHEMA_DIR=$(abspath $(BUILD_DIR))/schemas \
+		E2E_COVERDIR=$(abspath $(E2E_COVERDIR)) \
+		GOCOVERDIR=$(abspath $(E2E_COVERDIR)) \
+		test/e2e/dakota.sh -v -skip '^(TestATSPIBehaveSuite|TestIntegrationDockerSystem)$$'
+	$(GOCMD) tool covdata textfmt -i=$(abspath $(E2E_COVERDIR)) -o=e2e-coverage.out
+	@echo "==> e2e statement coverage written to e2e-coverage.out"
+endif
+
+# The live system-Docker gate (TestIntegrationDockerSystem), nightly in
+# .github/workflows/docker-system.yml. It runs the pinned Dakota image
+# unchanged under rootless Podman with private system and user managers; the
+# real chairlift-helper downloads and installs Docker from Homebrew's signed
+# index and bottles, so it needs network access to formulae.brew.sh and ghcr.io.
+.PHONY: e2e-docker
+e2e-docker: build-e2e schemas
+	CHAIRLIFT_E2E_BUILD_DIR=$(abspath $(BUILD_DIR)) \
+		CHAIRLIFT_SCHEMA_DIR=$(abspath $(BUILD_DIR))/schemas \
+		CHAIRLIFT_DOCKER_INTEGRATION=1 \
+		test/e2e/dakota.sh -v -count=1 -timeout 30m -run '^TestIntegrationDockerSystem$$'
+# The behave AT-SPI suite (test/e2e/features), run by test/e2e/dakota.sh like
+# every E2E test. Artifacts land in build/atspi/<tags|all>/. ATSPI_TAGS
+# narrows the run to a behave tag expression, e.g.
+# `make e2e-atspi ATSPI_TAGS=@maintenance`; CHAIRLIFT_ATSPI_KNOWN_ISSUES=1 also
+# runs @known_issue scenarios. ATSPI_TIMEOUT is the `go test` deadline; the
+# behave run is stopped shortly before it so its log is still printed.
+ATSPI_TAGS?=
+ATSPI_TIMEOUT?=40m
+ATSPI_RUN=$(or $(shell printf '%s' '$(ATSPI_TAGS)' | tr -cs 'A-Za-z0-9' '-' | sed 's/^-//; s/-$$//'),all)
+e2e-atspi: build-e2e-gui schemas
+	@rm -rf "$(abspath $(BUILD_DIR))/atspi/$(ATSPI_RUN)" && mkdir -p "$(abspath $(BUILD_DIR))/atspi/$(ATSPI_RUN)"
+	CHAIRLIFT_E2E_BUILD_DIR=$(abspath $(BUILD_DIR)) \
+		CHAIRLIFT_SCHEMA_DIR=$(abspath $(BUILD_DIR))/schemas \
+		CHAIRLIFT_ATSPI_OUT=$(abspath $(BUILD_DIR))/atspi/$(ATSPI_RUN) \
+		CHAIRLIFT_ATSPI_TAGS='$(ATSPI_TAGS)' \
+		test/e2e/dakota.sh -count=1 -v -timeout $(ATSPI_TIMEOUT) -run '^TestATSPI'
 
 # Development build with race detector (requires CGO)
 dev:
 	CGO_ENABLED=1 $(GOBUILD) -race -o $(BUILD_DIR)/$(BINARY_NAME)-dev ./cmd/chairlift
 
-# Install dependencies
-install-deps:
-	$(GOGET) codeberg.org/puregotk/puregotk
-	$(GOGET) gopkg.in/yaml.v3
 
 # Format code
 fmt:
@@ -160,13 +232,26 @@ install: build
 	install -Dm755 $(BUILD_DIR)/$(BINARY_NAME) $(DESTDIR)$(BINDIR)/$(BINARY_NAME)
 	# Install wrapper script
 	install -Dm755 data/chairlift-wrapper.sh $(DESTDIR)$(BINDIR)/chairlift-wrapper
+	# Install ChairLift's GSettings schemas — Livery preferences, Updates
+	# preferences, the first-run disposition, and USB printer choices — then
+	# recompile the system schema cache so `gsettings` can see them.
+	install -Dm644 data/io.projectbluefin.chairlift.livery.gschema.xml $(DESTDIR)$(SCHEMASDIR)/io.projectbluefin.chairlift.livery.gschema.xml
+	install -Dm644 data/io.projectbluefin.chairlift.updates.gschema.xml $(DESTDIR)$(SCHEMASDIR)/io.projectbluefin.chairlift.updates.gschema.xml
+	install -Dm644 data/io.projectbluefin.chairlift.firstrun.gschema.xml $(DESTDIR)$(SCHEMASDIR)/io.projectbluefin.chairlift.firstrun.gschema.xml
+	install -Dm644 data/io.projectbluefin.chairlift.printers.gschema.xml $(DESTDIR)$(SCHEMASDIR)/io.projectbluefin.chairlift.printers.gschema.xml
+	# Only for a direct install. Under DESTDIR the tree is a staging area
+	# holding these schemas alone, so compiling there would produce a
+	# gschemas.compiled containing only ChairLift's schemas — and an image
+	# shipping that file would overwrite the system cache and break GSettings
+	# for every other application. Whoever assembles the staged tree runs
+	# glib-compile-schemas over the complete schema directory instead.
+	@if [ -z "$(DESTDIR)" ]; then glib-compile-schemas $(SCHEMASDIR); fi
 	# Install desktop file
 	install -Dm644 data/io.projectbluefin.chairlift.desktop $(DESTDIR)$(APPLICATIONSDIR)/io.projectbluefin.chairlift.desktop
 	# Install package-maintainer defaults; /etc/chairlift/config.yml remains the administrator-owned override
 	install -Dm644 config.yml $(DESTDIR)$(CONFIGDIR)/config.yml
 	# Install icons
 	install -Dm644 data/icons/hicolor/scalable/apps/io.projectbluefin.chairlift.svg $(DESTDIR)$(ICONSDIR)/hicolor/scalable/apps/io.projectbluefin.chairlift.svg
-	install -Dm644 data/icons/hicolor/scalable/apps/io.projectbluefin.chairlift-flower.svg $(DESTDIR)$(ICONSDIR)/hicolor/scalable/apps/io.projectbluefin.chairlift-flower.svg
 	install -Dm644 data/icons/hicolor/symbolic/apps/io.projectbluefin.chairlift-symbolic.svg $(DESTDIR)$(ICONSDIR)/hicolor/symbolic/apps/io.projectbluefin.chairlift-symbolic.svg
 	# Install updex helper binary
 	install -Dm755 $(BUILD_DIR)/$(HELPER_NAME) $(DESTDIR)$(BINDIR)/$(HELPER_NAME)
@@ -184,10 +269,48 @@ install: build
 	install -Dm644 data/io.projectbluefin.chairlift.bootc.policy $(DESTDIR)$(POLKITACTIONSDIR)/io.projectbluefin.chairlift.bootc.policy
 	# Install PolicyKit policy for updex
 	install -Dm644 data/io.projectbluefin.chairlift.updex.policy $(DESTDIR)$(POLKITACTIONSDIR)/io.projectbluefin.chairlift.updex.policy
-	# Install PolicyKit policy for native A/B sysupdate staging
-	install -Dm644 data/io.projectbluefin.chairlift.sysupdate.policy $(DESTDIR)$(POLKITACTIONSDIR)/io.projectbluefin.chairlift.sysupdate.policy
 	# Install PolicyKit policy for the Bluefin-family channel/developer helper
 	install -Dm644 data/io.projectbluefin.chairlift.ublue.policy $(DESTDIR)$(POLKITACTIONSDIR)/io.projectbluefin.chairlift.ublue.policy
+
+# Compile the Livery GSettings schema for a source build.
+#
+# `gsettings` reads schemas from $(DATADIR)/glib-2.0/schemas and from
+# $$GSETTINGS_SCHEMA_DIR. A developer running build/chairlift has not run
+# `make install`, so without this the Livery page correctly reports its schema
+# missing. Run `make schemas` once, then export
+# GSETTINGS_SCHEMA_DIR=$(CURDIR)/$(BUILD_DIR)/schemas.
+# Skipped where glib-compile-schemas is absent, so a build host that only has
+# a Go toolchain still builds; the application reports its schema missing and
+# the Livery page degrades, which is the same path an uninstalled build takes.
+#
+# The whole recipe is one shell invocation because each recipe line otherwise
+# gets its own shell: an `exit 0` guard on the first line would end that line
+# alone and let the later glib-compile-schemas line run and fail with 127,
+# which would break `make build` on the Go-only host this skip exists for.
+schemas:
+	@if ! command -v glib-compile-schemas >/dev/null 2>&1; then \
+		echo "==> skipping schemas: glib-compile-schemas not installed"; \
+	else \
+		mkdir -p $(BUILD_DIR)/schemas && \
+		cp data/io.projectbluefin.chairlift.livery.gschema.xml $(BUILD_DIR)/schemas/ && \
+		cp data/io.projectbluefin.chairlift.updates.gschema.xml $(BUILD_DIR)/schemas/ && \
+		cp data/io.projectbluefin.chairlift.firstrun.gschema.xml $(BUILD_DIR)/schemas/ && \
+		cp data/io.projectbluefin.chairlift.printers.gschema.xml $(BUILD_DIR)/schemas/ && \
+		glib-compile-schemas $(BUILD_DIR)/schemas && \
+		echo "==> schemas compiled to $(BUILD_DIR)/schemas"; \
+	fi
+
+# Compile internal/ui/*.blp into the GtkBuilder XML the binary embeds. The
+# compiled .ui files are committed so `go build` stays pure Go; the compiler
+# runs only inside the pinned Dakota image, like every E2E target, so its
+# output is byte-identical everywhere. Run after editing any .blp.
+blueprints:
+	scripts/blueprints.sh
+
+# Fail when a committed .ui differs from what its .blp compiles to. CI runs
+# this in the E2E job (it needs podman, so it cannot join `make ci`).
+blueprints-check:
+	scripts/blueprints.sh --check
 
 # Uninstall the application
 uninstall:
@@ -195,8 +318,11 @@ uninstall:
 	rm -f $(DESTDIR)$(BINDIR)/chairlift-wrapper
 	rm -f $(DESTDIR)$(APPLICATIONSDIR)/io.projectbluefin.chairlift.desktop
 	rm -f $(DESTDIR)$(CONFIGDIR)/config.yml
+	rm -f $(DESTDIR)$(SCHEMASDIR)/io.projectbluefin.chairlift.livery.gschema.xml
+	rm -f $(DESTDIR)$(SCHEMASDIR)/io.projectbluefin.chairlift.updates.gschema.xml
+	rm -f $(DESTDIR)$(SCHEMASDIR)/io.projectbluefin.chairlift.firstrun.gschema.xml
+	rm -f $(DESTDIR)$(SCHEMASDIR)/io.projectbluefin.chairlift.printers.gschema.xml
 	rm -f $(DESTDIR)$(ICONSDIR)/hicolor/scalable/apps/io.projectbluefin.chairlift.svg
-	rm -f $(DESTDIR)$(ICONSDIR)/hicolor/scalable/apps/io.projectbluefin.chairlift-flower.svg
 	rm -f $(DESTDIR)$(ICONSDIR)/hicolor/symbolic/apps/io.projectbluefin.chairlift-symbolic.svg
 	rm -f $(DESTDIR)$(BINDIR)/$(HELPER_NAME)
 	rm -f $(DESTDIR)$(BINDIR)/$(UBLUE_HELPER_NAME)
@@ -206,10 +332,9 @@ uninstall:
 	rm -f $(DESTDIR)$(POLKITRULESDIR)/org.frostyard.ChairLift.bootc.rules
 	rm -f $(DESTDIR)$(POLKITACTIONSDIR)/io.projectbluefin.chairlift.updex.policy
 	rm -f $(DESTDIR)$(POLKITRULESDIR)/org.frostyard.ChairLift.updex.rules
-	rm -f $(DESTDIR)$(POLKITACTIONSDIR)/io.projectbluefin.chairlift.sysupdate.policy
 
 # One command mirrors CI's host-independent gates (verify → lint → unit → race
-# → build), in fail-fast order. The GTK/Xvfb-dependent E2E job runs separately
+# → build), in fail-fast order. The podman-dependent E2E job runs separately
 # through `make e2e`. The mill's deep gate calls this target.
 #
 # The build step reproduces CI's GOOS/GOARCH matrix (linux/amd64 and
@@ -237,7 +362,15 @@ ci:
 	$(MAKE) build
 	@echo "==> CI mirror passed"
 
-bump: ## generate a new version with svu
+bump: ## tag the next stable calendar version (YY.MM.N, starting at 1)
+	@# Tag only what main ships. A tag on a branch commit leaves main without the
+	@# tag in its history, so the next release's notes compare against the one
+	@# before it (v26.09.0-alpha.2 was tagged on a branch).
+	@git fetch --quiet origin main && \
+	if [ "$$(git rev-parse HEAD)" != "$$(git rev-parse origin/main)" ]; then \
+		echo "HEAD is not origin/main. Check out and pull main before bumping the version."; \
+		exit 1; \
+	fi
 	@$(MAKE) build
 	@$(MAKE) test
 	@$(MAKE) fmt
@@ -247,8 +380,8 @@ bump: ## generate a new version with svu
 		exit 1; \
 	fi
 	@echo "Creating new tag..."
-	@version=$$(svu next); \
-		git tag -a $$version -m "Version $$version"; \
-		echo "Tagged version $$version"; \
-		echo "Pushing tag $$version to origin..."; \
+	@version=$$(./scripts/next-version.sh) && \
+		git tag -a $$version -m "Version $$version" && \
+		echo "Tagged version $$version" && \
+		echo "Pushing tag $$version to origin..." && \
 		git push origin $$version

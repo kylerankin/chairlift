@@ -5,64 +5,106 @@ import (
 	"testing"
 )
 
-func TestPowerwashRowReflectsRunState(t *testing.T) {
-	fresh := PowerwashRow("")
-	if fresh.Title != "Remove Everything I Installed" {
-		t.Errorf("PowerwashRow(\"\").Title = %q, want %q", fresh.Title, "Remove Everything I Installed")
-	}
-	if !strings.Contains(fresh.Subtitle, "Distrobox") {
-		t.Errorf("PowerwashRow(\"\").Subtitle = %q, want it to describe what gets removed", fresh.Subtitle)
-	}
-
-	done := PowerwashRow("Powerwash complete")
-	if done.Subtitle != "Powerwash complete" {
-		t.Errorf("PowerwashRow(summary).Subtitle = %q, want the summary verbatim", done.Subtitle)
-	}
-}
-
-// The confirmation is the one place a user learns Powerwash is irreversible
-// and does not touch the image; both facts must be present.
-func TestPowerwashConfirmationStatesWhatItDoesAndDoesNot(t *testing.T) {
-	title, body := PowerwashConfirmation()
-	if !strings.Contains(title, "Remove Everything") {
-		t.Errorf("PowerwashConfirmation() title = %q, want it to name the action", title)
-	}
-	for _, want := range []string{"Flatpak", "Distrobox", "cannot be undone"} {
-		if !strings.Contains(body, want) {
-			t.Errorf("PowerwashConfirmation() body = %q, want it to contain %q", body, want)
+// noCommandText fails when user-facing reset text carries a command, a flag,
+// or a path — none of which a person who never opens a terminal can read.
+func noCommandText(t *testing.T, name, text string) {
+	t.Helper()
+	for _, banned := range []string{"--", "bootc", "/", "pkexec", "image", "system logs"} {
+		if strings.Contains(text, banned) {
+			t.Errorf("%s = %q, must not contain %q", name, text, banned)
 		}
 	}
 }
 
-func TestFactoryResetRowNamesWhatItReplaces(t *testing.T) {
-	row := FactoryResetRow()
-	if row.Title != "Factory Reset" {
-		t.Errorf("FactoryResetRow().Title = %q, want %q", row.Title, "Factory Reset")
+// The row is the text a person reads before deciding. Overstating the scope
+// ("everything") is the failure mode this pins: Powerwash removes Flatpak
+// apps and Distrobox containers only, and the row has to say what survives
+// (#525).
+func TestPowerwashRowStatesItsRealScope(t *testing.T) {
+	row := PowerwashRow()
+	if strings.Contains(strings.ToLower(row.Title), "everything") {
+		t.Errorf("PowerwashRow().Title = %q, want it not to claim it removes everything", row.Title)
 	}
-	if !strings.Contains(row.Subtitle, "fresh install") {
-		t.Errorf("FactoryResetRow().Subtitle = %q, want it to describe the reset", row.Subtitle)
+	for _, want := range []string{"Flatpak", "Distrobox", "Your files", "Apps page", "stay"} {
+		if !strings.Contains(row.Subtitle, want) {
+			t.Errorf("PowerwashRow().Subtitle = %q, want it to name %q", row.Subtitle, want)
+		}
+	}
+	noCommandText(t, "PowerwashRow().Subtitle", row.Subtitle)
+}
+
+// A run that removed nothing must never read as a run that cleared the
+// machine, and a partial failure must not read as a success.
+func TestPowerwashResultSubtitleNeverOverstatesTheRun(t *testing.T) {
+	all := PowerwashResultSubtitle(2, 0)
+	partial := PowerwashResultSubtitle(1, 1)
+	failed := PowerwashResultSubtitle(0, 2)
+	nothing := PowerwashResultSubtitle(0, 0)
+
+	if !strings.HasPrefix(all, "Removed") {
+		t.Errorf("all removed = %q, want it to report the removal", all)
+	}
+	for name, got := range map[string]string{"partial failure": partial, "total failure": failed, "nothing installed": nothing} {
+		if strings.HasPrefix(got, "Removed") {
+			t.Errorf("%s = %q, must not read as a completed removal", name, got)
+		}
+	}
+	if !strings.Contains(partial, "couldn't") || !strings.Contains(failed, "Couldn't") {
+		t.Errorf("failures must say so: partial=%q failed=%q", partial, failed)
+	}
+	if partial == failed || failed == nothing {
+		t.Errorf("each outcome needs its own text: partial=%q failed=%q nothing=%q", partial, failed, nothing)
+	}
+	for _, got := range []string{all, partial, failed, nothing} {
+		noCommandText(t, "PowerwashResultSubtitle", got)
 	}
 }
 
-// The one non-negotiable requirement: --experimental must be named in the
-// confirmation, not hidden behind friendlier wording, because it is the
-// single fact most likely to change a user's mind about proceeding.
-func TestFactoryResetConfirmationNamesExperimental(t *testing.T) {
+// The confirmation is the one place a user learns Powerwash is irreversible
+// and what it leaves alone; both facts must be present.
+func TestPowerwashConfirmationStatesWhatItDoesAndDoesNot(t *testing.T) {
+	title, body := PowerwashConfirmation()
+	if !strings.Contains(title, "Flatpak Apps and Containers") {
+		t.Errorf("PowerwashConfirmation() title = %q, want it to name the action", title)
+	}
+	for _, want := range []string{"Flatpak", "Distrobox", "Your files", "can't be undone"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("PowerwashConfirmation() body = %q, want it to contain %q", body, want)
+		}
+	}
+	noCommandText(t, "PowerwashConfirmation() body", body)
+}
+
+func TestFactoryResetRowNamesWhatItReplaces(t *testing.T) {
+	row := FactoryResetRow()
+	for _, want := range []string{"operating system", "Your files and apps stay", "restart"} {
+		if !strings.Contains(row.Subtitle, want) {
+			t.Errorf("FactoryResetRow().Subtitle = %q, want it to state %q", row.Subtitle, want)
+		}
+	}
+	noCommandText(t, "FactoryResetRow().Subtitle", row.Subtitle)
+}
+
+// The one non-negotiable requirement: the confirmation must say the reset
+// method is experimental, in words a person reads, because it is the single
+// fact most likely to change their mind about proceeding. It must not do so
+// by printing the command's flag.
+func TestFactoryResetConfirmationDisclosesExperimental(t *testing.T) {
 	title, body := FactoryResetConfirmation()
 	if !strings.Contains(title, "Factory Reset") {
 		t.Errorf("FactoryResetConfirmation() title = %q, want it to name the action", title)
 	}
-	if !strings.Contains(body, "--experimental") {
-		t.Errorf("FactoryResetConfirmation() body = %q, want it to name --experimental", body)
+	for _, want := range []string{"experimental", "can't be undone", "restart", "Your files and apps stay"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("FactoryResetConfirmation() body = %q, want it to contain %q", body, want)
+		}
 	}
-	if !strings.Contains(body, "cannot be undone") {
-		t.Errorf("FactoryResetConfirmation() body = %q, want it to state irreversibility", body)
-	}
+	noCommandText(t, "FactoryResetConfirmation() body", body)
 }
 
 func TestFactoryResetResultDefersToARestart(t *testing.T) {
 	got := FactoryResetResultSubtitle()
-	if !strings.Contains(got, "restart") {
+	if !strings.Contains(got, "Restart") {
 		t.Errorf("FactoryResetResultSubtitle() = %q, want it to ask for a restart", got)
 	}
 }

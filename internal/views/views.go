@@ -5,15 +5,24 @@ import (
 	"log"
 	"time"
 
+	"github.com/projectbluefin/chairlift/internal/agentmode"
+	"github.com/projectbluefin/chairlift/internal/aistack"
+	"github.com/projectbluefin/chairlift/internal/bootc"
+	"github.com/projectbluefin/chairlift/internal/capability"
 	"github.com/projectbluefin/chairlift/internal/config"
-	"github.com/projectbluefin/chairlift/internal/troubleshoot"
+	"github.com/projectbluefin/chairlift/internal/livery"
+	"github.com/projectbluefin/chairlift/internal/ui"
+	"github.com/projectbluefin/chairlift/internal/updateflow"
 	"github.com/projectbluefin/chairlift/internal/views/actionstate"
-	"github.com/projectbluefin/chairlift/internal/views/badgestate"
+	"github.com/projectbluefin/chairlift/internal/views/activity"
+	"github.com/projectbluefin/chairlift/internal/views/liverystate"
+	"github.com/projectbluefin/chairlift/internal/views/pageview"
 	"github.com/projectbluefin/chairlift/internal/views/rowset"
 
 	sgtk "github.com/frostyard/snowkit/gtk"
 
 	"codeberg.org/puregotk/puregotk/v4/adw"
+	"codeberg.org/puregotk/puregotk/v4/gobject"
 	"codeberg.org/puregotk/puregotk/v4/gtk"
 )
 
@@ -31,52 +40,164 @@ type ToastAdder interface {
 
 // UserHome manages all content pages
 type UserHome struct {
-	config     *config.Config
-	toastAdder ToastAdder
+	config       *config.Config
+	capabilities capability.Set
+	toastAdder   ToastAdder
+	updateShell  *UpdateShell
+	// activities is the window's inventory of long-running work; see
+	// internal/views/activity. Actions outside the update shell's admission
+	// report to it directly.
+	activities *activity.Tracker
 
 	// Pages (ToolbarViews)
-	systemPage       *adw.ToolbarView
+	agentsPage       *adw.ToolbarView
 	updatesPage      *adw.ToolbarView
 	applicationsPage *adw.ToolbarView
 	maintenancePage  *adw.ToolbarView
 	featuresPage     *adw.ToolbarView
+	liveryPage       *adw.ToolbarView
 	helpPage         *adw.ToolbarView
+	recoveryPage     *adw.ToolbarView // Powerwash detail, reached from Maintenance, not a sidebar page
+	developerPage    *adw.ToolbarView // Developer Mode detail, reached from Features, not a sidebar page
 
 	// PreferencesPages inside each ToolbarView - keep references to prevent GC
-	systemPrefsPage       *adw.PreferencesPage
+	agentsPrefsPage       *adw.PreferencesPage
 	updatesPrefsPage      *adw.PreferencesPage
 	applicationsPrefsPage *adw.PreferencesPage
 	maintenancePrefsPage  *adw.PreferencesPage
 	featuresPrefsPage     *adw.PreferencesPage
+	liveryPrefsPage       *adw.PreferencesPage
 	helpPrefsPage         *adw.PreferencesPage
+	recoveryPrefsPage     *adw.PreferencesPage
+	developerPrefsPage    *adw.PreferencesPage
+	// The preferences page inside each createPage ToolbarView; it owns the
+	// scrolling, so it is what ScrollPageToTop resets.
+	pageContents map[*adw.ToolbarView]*adw.PreferencesPage
 
 	// References for dynamic updates
-	formulaeExpander       *adw.ExpanderRow
-	casksExpander          *adw.ExpanderRow
-	outdatedExpander       *adw.ExpanderRow
-	searchResultsExpander  *adw.ExpanderRow
-	searchEntry            *gtk.SearchEntry
-	flatpakUserExpander    *adw.ExpanderRow
-	flatpakSystemExpander  *adw.ExpanderRow
-	flatpakUpdatesExpander *adw.ExpanderRow
-	flatpakUpdateRows      []*adw.ActionRow               // Store references for cleanup
-	flatpakUserRows        rowset.Tracker[*adw.ActionRow] // Store references for cleanup
-	flatpakSystemRows      rowset.Tracker[*adw.ActionRow] // Store references for cleanup
-	formulaeRows           rowset.Tracker[*adw.ActionRow]
-	caskRows               rowset.Tracker[*adw.ActionRow]
-	searchResultRows       rowset.Tracker[*adw.ActionRow]
-	brewBundlesGroup       *adw.PreferencesGroup
-	brewTrustGroup         *adw.PreferencesGroup
-	brewTrustRows          map[string]*adw.ActionRow
-	outdatedRows           rowset.Tracker[*adw.ActionRow]
+	installedFormulae  *adw.PreferencesGroup
+	installedCasks     *adw.PreferencesGroup
+	formulaeRows       rowset.Tracker[*adw.ActionRow]
+	caskRows           rowset.Tracker[*adw.ActionRow]
+	brewBundlesGroup   *adw.PreferencesGroup
+	appInstallProgress installProgress
+	brewTrustGroup     *adw.PreferencesGroup
+	brewTrustTaps      map[string]*untrustedTapEntry // tap name -> its expander and remaining packages
+	brewTrustError     *adw.ActionRow                // failed discovery row, nil otherwise
+	bundleButtons      buttonRoute
+	// Each destination selects its own entries; one gate serializes installs.
+	bundleItems       []*bundleItemRow
+	bundleSelections  []*bundleSelection
+	bundleInstallGate actionstate.Gate
+	// Shared callbacks avoid allocating a trampoline per entry on rebuild.
+	bundleChecks     checkRoute
+	bundleSelectAlls buttonRoute
+	// bundleStatusRefresh lets only the newest installed-state check of the
+	// collections publish; see refreshBundleStatuses.
+	bundleStatusRefresh actionstate.RefreshGate
 
-	// Update All references
-	updateAllGroup   *adw.PreferencesGroup
-	updateAllRow     *adw.ActionRow
-	updateAllBtn     *gtk.Button
-	updateAllPhases  map[string]*adw.ActionRow
-	updateAllRestart *adw.ActionRow
-	updateAllGate    actionstate.Gate
+	// One shared callback per rebuilt list; see buttonRoute. Each is cleared
+	// alongside its row tracker, so reloads allocate no new trampolines.
+	formulaButtons buttonRoute
+	caskButtons    buttonRoute
+	trustButtons   buttonRoute
+	// confirmations routes every confirmation dialog the Apps and Updates
+	// pages present, one response each.
+	confirmations dialogRoute
+
+	// Native activity indicators; operation state remains in the existing gates.
+	liveryAppGridSpinner     *gtk.Spinner
+	liveryPanelSpinner       *gtk.Spinner
+	liveryPanelRotateSpinner *gtk.Spinner
+	liveryDockSpinner        *gtk.Spinner
+	liveryDockRotateSpinner  *gtk.Spinner
+	developerSpinner         *gtk.Spinner
+	agentModeSpinner         *gtk.Spinner
+
+	// Wallpapers owns one setup action and only the last observed readiness.
+	wallpaperRow       *adw.ExpanderRow
+	wallpaperChoice    *gtk.CheckButton
+	wallpaperButton    *gtk.Button
+	wallpaperSpinner   *gtk.Spinner
+	wallpaperActivity  *setupActivity
+	wallpaperGate      actionstate.Gate
+	wallpaperRefresh   actionstate.RefreshGate
+	wallpaperInstalled bool
+	wallpaperDisposed  bool
+
+	// Livery references. liveryState is the last state the page loaded and
+	// is what every handler compares against, so a programmatic widget
+	// update during restore is recognized as "no change" instead of being
+	// replayed as a user action; liverySuppress closes the same window
+	// explicitly. See applyLiveryState.
+	liveryAppGridExpander  *adw.ExpanderRow
+	liveryAppGridSwitch    *gtk.Switch
+	liveryAppGridRow       *adw.ActionRow
+	liveryPickerMode       liveryPickerMode
+	liveryPanelGroup       *adw.PreferencesGroup
+	liveryPanelSwitch      *gtk.Switch
+	liveryPanelMarkRow     *adw.ActionRow
+	liveryPanelRotate      *gtk.Switch
+	liveryDockGroup        *adw.PreferencesGroup
+	liveryDockSwitch       *gtk.Switch
+	liveryPickerDialog     *adw.Dialog
+	liveryPickerSearch     *gtk.SearchEntry
+	liveryPickerList       *gtk.ListBox
+	liveryPickerCancel     func()
+	liveryPickerGeneration uint64
+	liveryFoundationGrid   *gtk.FlowBox
+	liveryFoundationImages map[string]*gtk.Image
+	// liveryFoundationChecks holds each gallery tile's selected-mark badge,
+	// index-aligned with livery.Foundations() and the grid's children.
+	liveryFoundationChecks []*gtk.Image
+	liveryDockSelectedRow  *adw.ActionRow
+	liveryDockRotate       *gtk.Switch
+	// liveryDockVisible is the result set currently drawn, so the list's one
+	// row-activated handler can map a row index back to a project without
+	// allocating a callback per row. See refreshLiveryPickerRows.
+	liveryDockVisible []pageview.LiveryProjectResult
+	liveryState       livery.State
+	liverySuppress    bool
+	liveryLoaded      bool
+	// What the first load found this desktop can apply: the app-grid mark
+	// needs its icon-theme directory, the panel mark needs the Custom
+	// Command Menu extension. The setup assistant reads these to leave an
+	// inapplicable choice insensitive rather than offering a switch that
+	// would apply nothing.
+	liveryAppGridAvailable bool
+	liveryPanelAvailable   bool
+	// liverySchemaMissing records the one load failure the page cannot
+	// recover from in-session; every choice is then reported unavailable.
+	liverySchemaMissing bool
+	// One gate per section serializes that section's toggle work. Every
+	// section's Apply and Clear touch the same mark file, so an off-then-on
+	// flip without a gate can land Clear after Apply and leave the switch
+	// showing enabled with no mark installed. See liveryToggleGate.
+	liveryAppGridGate actionstate.Gate
+	liveryPanelGate   actionstate.Gate
+	liveryDockGate    actionstate.Gate
+	// One serializer per section orders that section's selection work. A
+	// selection carries a value, so refusing the second pick would discard
+	// it; these queue instead, and a pick that a newer one has already
+	// overtaken drops out. Without them two rapid picks can interleave and
+	// leave the persisted id naming one mark while the installed icon is
+	// another. The section's master switch reserves a place in the same
+	// line, so its Apply or Clear never races a pick. See
+	// liverySelectionWork and runLiveryToggleWork.
+	liveryAppGridWork actionstate.Serializer
+	liveryPanelWork   actionstate.Serializer
+	liveryDockWork    actionstate.Serializer
+	// One serializer covers rotation for both sections, because both rotate
+	// switches write the same systemd user unit. Without it a rapid on/off
+	// flip can land RemoveRotation before the earlier InstallRotation and
+	// leave the unit's presence disagreeing with the persisted keys. See
+	// onLiveryRotateToggled.
+	liveryRotateWork    actionstate.Serializer
+	liveryRotatePending liverystate.RotationCandidates
+
+	// Profile Picture section of the Livery page; nil when account_group is
+	// disabled. See profile_picture.go.
+	profilePicture *avatarPicker
 
 	// Automatic background updates
 	autoUpdatesRow    *adw.ActionRow
@@ -87,118 +208,278 @@ type UserHome struct {
 	bootcStageBtn      *gtk.Button
 	bootcActivityRow   *adw.ActionRow
 	bootcLogExpander   *adw.ExpanderRow
+	// System version readout (updates_page bootc_status_group), re-rendered
+	// from every observed bootc status rather than only the startup read.
+	// systemVersionRefresh orders those reads so an older one cannot land
+	// over a newer one.
+	systemVersionGroup   *adw.PreferencesGroup
+	systemVersionRow     *adw.ActionRow
+	systemVersionDetails *adw.ExpanderRow
+	systemVersionRows    rowset.Tracker[*adw.ActionRow]
+	systemVersionRefresh actionstate.RefreshGate
+	// The Roll Back group holds only the rollback row and is hidden with
+	// it, so a host with no previous deployment shows no orphaned heading.
+	bootcRollbackGroup *adw.PreferencesGroup
 	bootcRollbackRow   *adw.ActionRow
 	bootcRollbackBtn   *gtk.Button
-	bootcRollbackGate  actionstate.Gate
+	// Shown in place of Roll Back once a live rollback is queued, because
+	// the rollback only takes effect at the next boot (#520).
+	bootcRestartBtn   *gtk.Button
+	bootcRollbackGate actionstate.Gate
 
-	// native A/B (sysupdate) update references
-	sysupdateStageExpander *adw.ExpanderRow
-	sysupdateStageBtn      *gtk.Button
-	sysupdateActivityRow   *adw.ActionRow
-	sysupdateLogExpander   *adw.ExpanderRow
-	sysupdateRollbackRow   *adw.ActionRow
+	// Free up space admits one cleanup run at a time.
+	freeUpSpaceGate actionstate.Gate
+
+	// updateFeaturesGate admits one Features-page updex helper mutation at a time
+	// for a single feature's enable/disable toggle.
+	updateFeaturesGate actionstate.Gate
 
 	// Bluefin-family (channel / developer mode / gaming) references
-	channelGroup    *adw.PreferencesGroup
-	channelRow      *adw.ActionRow
-	channelSwitch   *gtk.Switch
-	developerGroup  *adw.PreferencesGroup
-	developerRow    *adw.ActionRow
-	developerSwitch *gtk.Switch
-	gamingGroup     *adw.PreferencesGroup
-	gamingRow       *adw.ActionRow
-	gamingSwitch    *gtk.Switch
-	driverRow       *adw.ActionRow
-	driverButton    *gtk.Button
-	driverGate      actionstate.Gate
+	channelGroup           *adw.PreferencesGroup
+	channelRow             *adw.ActionRow
+	channelSwitch          *gtk.Switch
+	developerGroup         *adw.PreferencesGroup
+	developerRow           *adw.ExpanderRow
+	developerSwitch        *gtk.Switch
+	developerGate          actionstate.Gate
+	developerCanToggle     bool
+	developerEnabled       bool
+	developerToggle        *guardedSwitch
+	developerSetupActivity *setupActivity
+	developerEntryRow      *adw.ActionRow
+	hardwareEnablement     *hardwareEnablementView
+	developerApps          *developerAppsView
+	gameModeRow            *adw.ActionRow
+	gameModeSwitch         *gtk.Switch
+	gameModeToggle         *guardedSwitch
+	gameModeGate           actionstate.Gate
+	gameModeDialogs        dialogRoute
+	pendingImage           string
+	stagedImageLoaded      bool
+	channelSwitchable      bool
+	driverSwitchable       bool
+	gameModeSwitchable     bool
+	developerOptions       []*developerOptionRow
+	wslBackend             string
+	wslCombo               *adw.ComboRow
+	wslDocBtn              *gtk.Button
+	wslSuppress            bool
+	wslBackendResolved     bool
+	wslBackendNotify       func(gobject.Object, uintptr)
+	driverRow              *adw.ActionRow
+	driverButton           *gtk.Button
+	driverGate             actionstate.Gate
 
-	// Staged-update changelog (SBOM diff), a drill-down inside
-	// bootcStageExpander rather than a page of its own.
+	// Bash terminal feature, including its pending wizard choice.
+	bluefinCLI *bluefinCLIRow
+
+	// Compass (features_page compass_group).
+	compassSpinner *gtk.Spinner
+	compassGate    actionstate.Gate
+	compassDialogs dialogRoute
+	// compassShown is the last state showCompassState rendered from a
+	// successful read, so a failed re-read can restore it (#701).
+	compassShown compassRendering
+
+	// Staged-update changelog (SBOM diff), with visible Compare and optional
+	// result details in the system-update secondary group.
 	changelogRow      *adw.ActionRow
+	changelogGroup    *adw.PreferencesGroup
 	changelogButton   *gtk.Button
 	changelogSections []*adw.ExpanderRow
 	changelogBooted   string
 	changelogStaged   string
 	changelogGate     actionstate.Gate
 
-	// Enhanced Troubleshooting (features_page troubleshooting_group)
-	troubleshootGroup  *adw.PreferencesGroup
-	troubleshootRow    *adw.ActionRow
-	troubleshootButton *gtk.Button
-	troubleshootState  troubleshoot.State
-	troubleshootGate   actionstate.Gate
+	// recoveryDialogs routes the Powerwash page's confirmation dialogs.
+	recoveryDialogs dialogRoute
+	// recoveryEntryRow is the Maintenance page's Powerwash entry (nil when
+	// the entry is not built); bootcRollbackOffered records whether the
+	// detail's Roll Back group is currently shown, for its subtitle.
+	recoveryEntryRow     *adw.ActionRow
+	bootcRollbackOffered bool
 
-	// Local AI (features_page ai_group)
-	aiStackGroup  *adw.PreferencesGroup
-	aiStackRow    *adw.ActionRow
-	aiStackSwitch *gtk.Switch
-	aiStackGate   actionstate.Gate
+	// Agent Mode (agents_page agents_group)
+	agentModeRow       *adw.ActionRow
+	agentModelRow      *adw.ComboRow
+	agentModelSpinner  *gtk.Spinner
+	agentModelSuppress bool
+	agentModelList     []string
+	agentModelActive   string
+	agentModelSelected uint32
+	agentModelNotify   func(gobject.Object, uintptr)
+	agentModeToggle    *guardedSwitch
+	agentModeState     aistack.State
+	agentModeGate      actionstate.Gate
+	agentRefresh       actionstate.RefreshGate
+	// agentManageRow opens llmman's models page, where users pick a model.
+	agentManageRow *adw.ActionRow
+
+	// Troubleshooting (agents_page troubleshooting_group): the Goose row, which
+	// sets Goose up and launches it, and the menu-entry switch. Main-thread
+	// only. gooseGate admits one setup or launch at a time and gooseBusy
+	// keeps a background readiness read off the row while one runs;
+	// gooseRefresh drops a read a newer one superseded.
+	gooseRow       *adw.ActionRow
+	gooseLaunchBtn *gtk.Button
+	gooseSpinner   *gtk.Spinner
+	gooseGate      actionstate.Gate
+	gooseBusy      bool
+	gooseRefresh   actionstate.RefreshGate
+	gooseFacts     agentmode.ReadinessFacts
+	gooseState     agentmode.State
+
+	askBluefinMenuRow *adw.ActionRow
+	askBluefinToggle  *guardedSwitch
+	askBluefinGate    actionstate.Gate
+	askBluefinMapped  func(gtk.Widget)
+	askBluefinProbed  bool
+
+	// Contribute to Bluefin (agents_page). contributeMapped, connected once
+	// at build, re-runs preflight each time the group is shown;
+	// contributeRefresh drops a read a newer one or a session start
+	// superseded.
+	contributeRow     *adw.ActionRow
+	contributeButton  *gtk.Button
+	contributeGuide   *gtk.Button
+	contributeSpinner *gtk.Spinner
+	contributeGate    actionstate.Gate
+	contributeRefresh actionstate.RefreshGate
+	contributeMapped  func(gtk.Widget)
 
 	// Powerwash / Factory Reset (maintenance_page reset_group)
 	powerwashGate    actionstate.Gate
 	factoryResetGate actionstate.Gate
 
 	// Features page references
-	featuresGroup            *adw.PreferencesGroup
-	featuresUnavailableGroup *adw.PreferencesGroup
-	featureRows              map[string]*adw.ActionRow
+	featuresGroup *adw.PreferencesGroup
+	featureRows   map[string]*adw.ActionRow
+	// Printer applications (features_page printers_group)
+	printersGroup *adw.PreferencesGroup
+	printerRows   []*printerRow
 
 	// Groups with deferred visibility
-	maintenanceBrewGroup    *adw.PreferencesGroup
-	maintenanceFlatpakGroup *adw.PreferencesGroup
 
-	// Update badge tracking
-	updateCounts badgestate.Counts
+	// Powerwash detail navigation, wired by the window after construction.
+	// Maintenance opens the detail; its back button returns to Maintenance.
+	// The stable recovery route is a detail, not a sidebar page.
+	openRecoveryDetail  func()
+	closeRecoveryDetail func()
 
-	brewRefresh         actionstate.RefreshGate
-	searchRefresh       actionstate.RefreshGate
-	brewPackagesRefresh actionstate.RefreshGate
+	openDeveloperDetail  func()
+	closeDeveloperDetail func()
+	brewPackagesRefresh  actionstate.RefreshGate
+	// formulaGates and caskGates hold each installed list's row gates, so a
+	// rebuild waits for a running uninstall or pin instead of replacing
+	// the only controls that show it.
+	formulaGates actionstate.RowGates
+	caskGates    actionstate.RowGates
 }
 
-// New creates a new UserHome views manager
-func New(cfg *config.Config, toastAdder ToastAdder) *UserHome {
+// New creates a new UserHome views manager.
+//
+// caps is the capability set resolved once during window construction; every
+// view builder routes its group predicate through it, so a group renders only
+// when its configuration enables it and the host supports it. A nil caps is
+// treated as an empty set, which lets callers that cannot resolve capabilities
+// still construct views (they simply render nothing capability-gated).
+//
+// updates is the Updates destination's preferences page, which the update
+// shell owns (UpdateShell.PreferencesPage): buildUpdatesPage appends its
+// groups after the shell's. A nil updates builds a page of its own.
+//
+// activities is the window's inventory of long-running work; a nil tracker
+// records nothing.
+func New(cfg *config.Config, caps capability.Set, toastAdder ToastAdder, updates *adw.PreferencesPage, activities *activity.Tracker) *UserHome {
 	start := time.Now()
 
 	uh := &UserHome{
-		config:     cfg,
-		toastAdder: toastAdder,
+		config:       cfg,
+		capabilities: caps,
+		toastAdder:   toastAdder,
+		activities:   activities,
 	}
 
 	// Create pages - createPage returns both ToolbarView and PreferencesPage
-	uh.systemPage, uh.systemPrefsPage = uh.createPage()
-	uh.updatesPage, uh.updatesPrefsPage = uh.createPage()
+	uh.agentsPage, uh.agentsPrefsPage = uh.createPage()
+	if updates != nil {
+		uh.updatesPrefsPage = updates
+	} else {
+		uh.updatesPage, uh.updatesPrefsPage = uh.createPage()
+	}
 	uh.applicationsPage, uh.applicationsPrefsPage = uh.createPage()
 	uh.maintenancePage, uh.maintenancePrefsPage = uh.createPage()
 	uh.featuresPage, uh.featuresPrefsPage = uh.createPage()
+	uh.liveryPage, uh.liveryPrefsPage = uh.createPage()
 	uh.helpPage, uh.helpPrefsPage = uh.createPage()
+	uh.recoveryPage, uh.recoveryPrefsPage = uh.createRecoveryPage()
+	uh.developerPage, uh.developerPrefsPage = uh.createDeveloperPage()
 
 	// Build page content
-	uh.buildSystemPage()
+	uh.buildAgentsPage()
 	uh.buildUpdatesPage()
 	uh.buildApplicationsPage()
 	uh.buildMaintenancePage()
 	uh.buildFeaturesPage()
+	uh.buildLiveryPage()
 	uh.buildHelpPage()
-
+	uh.buildRecoveryPage()
+	if uh.collectionsAvailable() {
+		go uh.loadBrewBundles(uh.developerBundlePaths())
+	}
+	go uh.loadInitialStagedDeployment()
+	uh.buildDeveloperPage()
 	log.Printf("views: all pages built in %s", time.Since(start))
-
 	return uh
 }
 
-// updateBadgeCount updates the total update count and notifies the window
-func (uh *UserHome) updateBadgeCount() {
-	total := uh.updateCounts.Total()
+// groupEnabled is the one policy floor every view builder shares: a page's
+// group renders only when its configuration enables it AND the host supports
+// it. It composes the administrator's configuration with the capability set
+// resolved once during window construction, so the views never derive their
+// own answer and the floor stays identical across every page. See
+// internal/capability. A nil capability set composes to false everywhere,
+// matching the repository's fail-closed rule.
+func (uh *UserHome) groupEnabled(page, group string) bool {
+	return capability.Compose(uh.config.IsGroupEnabled, uh.capabilities)(page, group)
+}
 
-	sgtk.RunOnMainThread(func() {
-		uh.toastAdder.SetUpdateBadge(total)
-	})
+// OnUpdateFinished refreshes the installed app inventories, the Compare pair,
+// and the System version readout after verified live updates. The shell
+// remains the only badge owner.
+func (uh *UserHome) OnUpdateFinished(final updateflow.Snapshot) {
+	if final.Preview {
+		return
+	}
+	for _, source := range final.CompletedSources {
+		switch source {
+		case updateflow.DeveloperTools:
+			go uh.loadHomebrewPackages()
+		case updateflow.OperatingSystem:
+			go func() {
+				versionGeneration := uh.systemVersionRefresh.Begin()
+				ctx, cancel := bootc.DefaultContext()
+				defer cancel()
+				status, err := bootc.GetStatus(ctx)
+				if err != nil {
+					log.Printf("views: could not refresh staged system state: %v", err)
+					return
+				}
+				sgtk.RunOnMainThread(func() {
+					uh.refreshChangelogAvailability(status)
+					uh.renderSystemVersion(versionGeneration, status)
+					uh.applyStagedImage(status)
+				})
+			}()
+		}
+	}
 }
 
 // GetPage returns a page by name
 func (uh *UserHome) GetPage(name string) *adw.ToolbarView {
 	switch name {
-	case "system":
-		return uh.systemPage
+	case "agents":
+		return uh.agentsPage
 	case "updates":
 		return uh.updatesPage
 	case "applications":
@@ -207,30 +488,69 @@ func (uh *UserHome) GetPage(name string) *adw.ToolbarView {
 		return uh.maintenancePage
 	case "features":
 		return uh.featuresPage
+	case "livery":
+		return uh.liveryPage
 	case "help":
 		return uh.helpPage
+	case "developer":
+		return uh.developerPage
 	default:
 		return nil
 	}
 }
 
-// createPage creates a page with toolbar view and scrolled content
+// DeveloperPage returns the Developer Mode detail ToolbarView so the window can
+// add it to its content stack. Nil-guarded: the page is always built by New.
+func (uh *UserHome) DeveloperPage() *adw.ToolbarView {
+	return uh.developerPage
+}
+
+// SetOpenDeveloperDetail wires the callback the Features page calls to open the
+// Developer Mode detail view.
+func (uh *UserHome) SetOpenDeveloperDetail(fn func()) {
+	uh.openDeveloperDetail = fn
+}
+
+// SetCloseDeveloperDetail wires the callback the Developer Mode back button calls
+// to return to Features.
+func (uh *UserHome) SetCloseDeveloperDetail(fn func()) {
+	uh.closeDeveloperDetail = fn
+}
+
+// ScrollPageToTop returns a page built by createPage to its top. A page keeps
+// its scroll position across navigation, so a step of the setup flow could
+// otherwise open mid-page with its heading out of view.
+func (uh *UserHome) ScrollPageToTop(name string) {
+	if page := uh.pageContents[uh.GetPage(name)]; page != nil {
+		page.ScrollToTop()
+	}
+}
+
+// pageUI is one content destination: internal/ui/page.blp.
+type pageUI struct {
+	_           ui.File              `ui:"page"`
+	Page        *adw.ToolbarView     `ui:"page"`
+	Header      *adw.HeaderBar       `ui:"header"`
+	BackButton  *gtk.Button          `ui:"back_button"`
+	Preferences *adw.PreferencesPage `ui:"preferences"`
+}
+
+// createPage binds one content destination: a header bar over a
+// preferences page that scrolls and clamps itself.
 func (uh *UserHome) createPage() (*adw.ToolbarView, *adw.PreferencesPage) {
-	toolbarView := adw.NewToolbarView()
+	var view pageUI
+	ui.Bind(&view)
+	if uh.pageContents == nil {
+		uh.pageContents = map[*adw.ToolbarView]*adw.PreferencesPage{}
+	}
+	uh.pageContents[view.Page] = view.Preferences
+	return view.Page, view.Preferences
+}
 
-	// Add header bar
-	headerBar := adw.NewHeaderBar()
-	toolbarView.AddTopBar(&headerBar.Widget)
-
-	// Create scrolled window with preferences page
-	scrolled := gtk.NewScrolledWindow()
-	scrolled.SetPolicy(gtk.PolicyNeverValue, gtk.PolicyAutomaticValue)
-	scrolled.SetVexpand(true)
-
-	prefsPage := adw.NewPreferencesPage()
-	scrolled.SetChild(&prefsPage.Widget)
-
-	toolbarView.SetContent(&scrolled.Widget)
-
-	return toolbarView, prefsPage
+// AttachUpdateShell shares the unified mutation owner with secondary actions.
+func (uh *UserHome) AttachUpdateShell(shell *UpdateShell) {
+	uh.updateShell = shell
+	if shell != nil {
+		shell.trustGroupAvailable = uh.brewTrustGroup != nil
+	}
 }

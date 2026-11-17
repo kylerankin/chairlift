@@ -24,19 +24,47 @@ func TestChannelSwitchConfirmsAndNamesTheChannel(t *testing.T) {
 	if !testing_.Confirm {
 		t.Error("ChannelSwitch(false, true).Confirm = false, want true")
 	}
-	if !strings.Contains(testing_.Toast, "testing") || !strings.Contains(testing_.Toast, "Restart") {
-		t.Errorf("ChannelSwitch(false, true).Toast = %q, want it to name testing and ask for a restart", testing_.Toast)
+	if !strings.Contains(testing_.Toast, "on") || !strings.Contains(testing_.Toast, "Restart") {
+		t.Errorf("ChannelSwitch(false, true).Toast = %q, want it to say early updates are on and ask for a restart", testing_.Toast)
 	}
 
 	stable := ChannelSwitch(false, false)
-	if !strings.Contains(stable.Toast, "stable") {
-		t.Errorf("ChannelSwitch(false, false).Toast = %q, want it to name stable", stable.Toast)
+	if !strings.Contains(stable.Toast, "off") || testing_.Toast == stable.Toast {
+		t.Errorf("ChannelSwitch(false, false).Toast = %q, want it to say early updates are off", stable.Toast)
+	}
+}
+func TestGameModeSwitchNeverConfirmsUnderDryRun(t *testing.T) {
+	for _, enable := range []bool{true, false} {
+		decision := GameModeSwitch(true, enable)
+		if decision.Confirm {
+			t.Errorf("GameModeSwitch(true, %v).Confirm = true, want false", enable)
+		}
+		if !strings.Contains(decision.Toast, "[DRY-RUN]") {
+			t.Errorf("GameModeSwitch(true, %v).Toast = %q, want a dry-run preview", enable, decision.Toast)
+		}
+	}
+}
+
+func TestGameModeSwitchConfirmsAndRequiresRestart(t *testing.T) {
+	on := GameModeSwitch(false, true)
+	if !on.Confirm {
+		t.Error("GameModeSwitch(false, true).Confirm = false, want true")
+	}
+	if !strings.Contains(on.Toast, "Game Mode is on") || !strings.Contains(on.Toast, "Restart") {
+		t.Errorf("GameModeSwitch(false, true).Toast = %q, want on and restart", on.Toast)
+	}
+	off := GameModeSwitch(false, false)
+	if !off.Confirm {
+		t.Error("GameModeSwitch(false, false).Confirm = false, want true")
+	}
+	if !strings.Contains(off.Toast, "Game Mode is off") || !strings.Contains(off.Toast, "Restart") {
+		t.Errorf("GameModeSwitch(false, false).Toast = %q, want off and restart", off.Toast)
 	}
 }
 
 func TestDeveloperModeNeverConfirmsUnderDryRun(t *testing.T) {
 	for _, enable := range []bool{true, false} {
-		decision := DeveloperMode(true, enable)
+		decision := DeveloperMode(true, enable, []string{"docker"})
 		if decision.Confirm {
 			t.Errorf("DeveloperMode(true, %v).Confirm = true, want false", enable)
 		}
@@ -48,7 +76,7 @@ func TestDeveloperModeNeverConfirmsUnderDryRun(t *testing.T) {
 
 func TestDeveloperModeLiveToastsAskForARelogin(t *testing.T) {
 	for _, enable := range []bool{true, false} {
-		decision := DeveloperMode(false, enable)
+		decision := DeveloperMode(false, enable, nil)
 		if !decision.Confirm {
 			t.Errorf("DeveloperMode(false, %v).Confirm = false, want true", enable)
 		}
@@ -58,42 +86,29 @@ func TestDeveloperModeLiveToastsAskForARelogin(t *testing.T) {
 	}
 }
 
-// Gaming mode is the one toggle whose live run can partly or wholly fail,
-// so Confirm is not simply !dryRun.
-func TestGamingModeConfirmsOnlyWhenSomethingChanged(t *testing.T) {
-	tests := []struct {
-		name        string
-		dryRun      bool
-		enable      bool
-		changed     int
-		failed      int
-		skipped     int
-		wantConfirm bool
-		wantToast   string
-	}{
-		{name: "dry run", dryRun: true, enable: true, wantToast: "[DRY-RUN]"},
-		{name: "full install", enable: true, changed: 6, wantConfirm: true, wantToast: "6 gaming component(s) installed"},
-		{name: "full removal", changed: 6, wantConfirm: true, wantToast: "6 gaming component(s) removed"},
-		{name: "partial install still confirms", enable: true, changed: 4, failed: 2, wantConfirm: true, wantToast: "2 failed"},
-		{name: "total failure does not confirm", enable: true, changed: 0, failed: 6, wantConfirm: false, wantToast: "No gaming components could be installed"},
-		{name: "nothing to do still confirms", enable: true, changed: 0, wantConfirm: true, wantToast: "already in the requested state"},
-		// Everything present belongs to the system image, so removal is a
-		// no-op and the switch must not claim gaming mode is now off.
-		{name: "only system-wide components", changed: 0, skipped: 2, wantConfirm: false, wantToast: "left in place"},
-		{name: "partial removal names the skipped ones", changed: 3, skipped: 1, wantConfirm: true, wantToast: "left in place"},
+// Issue #495: an enable whose helper skipped groups still confirms and names
+// each group not granted, so it does not read as a complete grant.
+func TestDeveloperModeNamesSkippedGroups(t *testing.T) {
+	decision := DeveloperMode(false, true, []string{"docker", "incus-admin"})
+	if !decision.Confirm {
+		t.Errorf("DeveloperMode(partial enable) = %+v, want it confirmed", decision)
 	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			decision := GamingMode(test.dryRun, test.enable, test.changed, test.failed, test.skipped)
-			if decision.Confirm != test.wantConfirm {
-				t.Errorf("GamingMode(%v, %v, %d, %d, %d).Confirm = %v, want %v",
-					test.dryRun, test.enable, test.changed, test.failed, test.skipped, decision.Confirm, test.wantConfirm)
-			}
-			if !strings.Contains(decision.Toast, test.wantToast) {
-				t.Errorf("GamingMode(...).Toast = %q, want it to contain %q", decision.Toast, test.wantToast)
-			}
-		})
+	for _, group := range []string{"docker", "incus-admin"} {
+		if !strings.Contains(decision.Toast, group) {
+			t.Errorf("DeveloperMode(partial enable).Toast = %q, want it to name %s", decision.Toast, group)
+		}
+	}
+	// ShowToast renders a single ellipsized line; keep the Dakota note no
+	// longer than the plain enable toast plus the two group names, so the
+	// names are not the part that gets cut off.
+	if len(decision.Toast) > 72 {
+		t.Errorf("DeveloperMode(partial enable).Toast = %q (%d chars), want at most 72 so it fits a plain toast", decision.Toast, len(decision.Toast))
+	}
+	if !strings.Contains(decision.Toast, "Log out") {
+		t.Errorf("DeveloperMode(partial enable).Toast = %q, want it to ask for a re-login", decision.Toast)
+	}
+	if disable := DeveloperMode(false, false, []string{"docker"}); strings.Contains(disable.Toast, "docker") {
+		t.Errorf("DeveloperMode(disable, skipped).Toast = %q, want no skipped-group note", disable.Toast)
 	}
 }
 
@@ -144,6 +159,50 @@ func TestAutomaticUpdatesLiveToastsNameTheDirection(t *testing.T) {
 	}
 	if !strings.Contains(on.Toast, "on") || !strings.Contains(off.Toast, "off") {
 		t.Errorf("AutomaticUpdates toasts do not name the direction: on=%q off=%q", on.Toast, off.Toast)
+	}
+}
+
+// The post-action resume-timer probe (#558) is a warning, not an
+// action, so the decision is just a string: empty when no warning is
+// needed, the warning copy when there is. The three interesting cases:
+//
+//   - disable + resume timer still armed (the helper/GUI skew)
+//   - disable + resume timer masked or absent (no skew)
+//   - enable (the resume timer is left masked or absent regardless of
+//     helper version, so a "still armed" warning would be wrong)
+func TestAutomaticUpdatesResumeOutdatedReturnsWarningOnlyForDisableArmed(t *testing.T) {
+	tests := []struct {
+		name           string
+		enabled        bool
+		resumeOutdated bool
+		wantEmpty      bool
+	}{
+		{name: "disable with armed resume timer warns", enabled: false, resumeOutdated: true, wantEmpty: false},
+		{name: "disable with masked resume timer is silent", enabled: false, resumeOutdated: false, wantEmpty: true},
+		{name: "enable with armed resume timer is silent", enabled: true, resumeOutdated: true, wantEmpty: true},
+		{name: "enable with masked resume timer is silent", enabled: true, resumeOutdated: false, wantEmpty: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			toast := AutomaticUpdatesResumeOutdated(test.enabled, test.resumeOutdated)
+			if test.wantEmpty && toast != "" {
+				t.Errorf("AutomaticUpdatesResumeOutdated(%v, %v) = %q, want empty", test.enabled, test.resumeOutdated, toast)
+			}
+			if !test.wantEmpty && toast == "" {
+				t.Errorf("AutomaticUpdatesResumeOutdated(%v, %v) = empty, want a warning", test.enabled, test.resumeOutdated)
+			}
+		})
+	}
+}
+
+// The warning copy names the action the user has to take (re-pull the
+// image), not a one-click fix inside the GUI, because the new helper
+// only ships through the image's next pull.
+func TestAutomaticUpdatesResumeOutdatedToastNamesRePull(t *testing.T) {
+	toast := AutomaticUpdatesResumeOutdated(false, true)
+	if !strings.Contains(toast, "Re-pull") && !strings.Contains(toast, "re-pull") {
+		t.Errorf("warning toast = %q, want it to mention re-pulling the image", toast)
 	}
 }
 
@@ -199,11 +258,13 @@ func TestPowerwashConfirmsOnlyWhenSomethingWasRemoved(t *testing.T) {
 		wantConfirm bool
 		wantToast   string
 	}{
-		{name: "dry run", dryRun: true, wantToast: "[DRY-RUN]"},
-		{name: "both succeeded", succeeded: 2, wantConfirm: true, wantToast: "complete"},
-		{name: "nothing installed", wantConfirm: true, wantToast: "Nothing was installed"},
-		{name: "one failed, one succeeded", succeeded: 1, failed: 1, wantConfirm: true, wantToast: "problems"},
-		{name: "total failure does not confirm", failed: 2, wantConfirm: false, wantToast: "nothing was removed"},
+		{name: "dry run", dryRun: true, succeeded: 2, wantToast: "[DRY-RUN] Preview: would remove"},
+		{name: "dry run with nothing installed", dryRun: true, wantToast: "[DRY-RUN] Preview: nothing is installed to remove"},
+		{name: "dry run with an unreadable inventory", dryRun: true, succeeded: 1, failed: 1, wantToast: "[DRY-RUN] Preview: could not read"},
+		{name: "both succeeded", succeeded: 2, wantConfirm: true, wantToast: "Removed"},
+		{name: "nothing installed", wantConfirm: true, wantToast: "nothing to remove"},
+		{name: "one failed, one succeeded", succeeded: 1, failed: 1, wantConfirm: true, wantToast: "couldn't be removed"},
+		{name: "total failure does not confirm", failed: 2, wantConfirm: false, wantToast: "Couldn't remove anything"},
 	}
 
 	for _, test := range tests {
@@ -220,35 +281,38 @@ func TestPowerwashConfirmsOnlyWhenSomethingWasRemoved(t *testing.T) {
 	}
 }
 
-func TestAIStackNamesTheAccelerator(t *testing.T) {
-	decision := AIStack(false, true, "CUDA")
-
-	if !decision.Confirm {
-		t.Error("a live enable did not confirm the switch")
-	}
-	if !strings.Contains(decision.Toast, "CUDA") {
-		t.Errorf("toast does not name the accelerator: %q", decision.Toast)
+func TestAgentModeDryRunDoesNotConfirm(t *testing.T) {
+	for _, enable := range []bool{true, false} {
+		decision := AgentMode(true, enable)
+		if decision.Confirm || !strings.Contains(decision.Toast, "DRY-RUN") {
+			t.Errorf("dry run enable=%v: %+v", enable, decision)
+		}
 	}
 }
 
-func TestAIStackDryRunDoesNotConfirm(t *testing.T) {
-	decision := AIStack(true, true, "ROCm")
-
-	if decision.Confirm {
-		t.Error("a dry-run enable confirmed the switch")
-	}
-	if !strings.Contains(decision.Toast, "DRY-RUN") {
-		t.Errorf("toast is not marked as a preview: %q", decision.Toast)
+func TestAgentModeDisableSaysModelsWereKept(t *testing.T) {
+	decision := AgentMode(false, false)
+	if !decision.Confirm || !strings.Contains(decision.Toast, "kept") {
+		t.Errorf("live disable: %+v", decision)
 	}
 }
 
-func TestAIStackDisableConfirms(t *testing.T) {
-	decision := AIStack(false, false, "CPU")
-
-	if !decision.Confirm {
-		t.Error("a live disable did not confirm the switch")
+func TestPrinterAppDryRunDoesNotConfirmAndNamesTheRow(t *testing.T) {
+	for _, enable := range []bool{true, false} {
+		decision := PrinterApp(true, enable, "HP Printers (HPLIP)")
+		if decision.Confirm || !strings.HasPrefix(decision.Toast, "[DRY-RUN] Preview: HP Printers (HPLIP) would be") || !strings.HasSuffix(decision.Toast, "— no changes made") {
+			t.Errorf("dry run enable=%v: %+v", enable, decision)
+		}
 	}
-	if !strings.Contains(decision.Toast, "stopped") {
-		t.Errorf("toast does not say the server stopped: %q", decision.Toast)
+}
+
+func TestPrinterAppLiveConfirmsAndDisableSaysSettingsWereKept(t *testing.T) {
+	on := PrinterApp(false, true, "Gutenprint Printers")
+	if !on.Confirm || on.Toast != "Gutenprint Printers is on." {
+		t.Errorf("live enable: %+v", on)
+	}
+	off := PrinterApp(false, false, "Gutenprint Printers")
+	if !off.Confirm || !strings.HasPrefix(off.Toast, "Gutenprint Printers is off") || !strings.Contains(off.Toast, "kept") {
+		t.Errorf("live disable: %+v", off)
 	}
 }

@@ -7,7 +7,6 @@ import (
 	"reflect"
 	"sort"
 	"testing"
-	"time"
 )
 
 const tapInfoJSON = `[
@@ -84,42 +83,30 @@ func TestFormulaeGroupedByTap(t *testing.T) {
 
 func TestCasksGroupedByTap(t *testing.T) {
 	caskroom := t.TempDir()
-	writeFile(t, filepath.Join(caskroom, "somecask", ".metadata", "1.0", "20260101", "Casks", "somecask.json"),
-		`{"token": "somecask", "tap": "ublue-os/tap"}`)
-	// API-installed cask without Casks/*.json metadata is skipped (trusted)
+	// A cask installed from an untrusted tap: its receipt records the source
+	// tap, which is the authoritative origin current Homebrew writes to
+	// <token>/.metadata/INSTALL_RECEIPT.json.
+	writeFile(t, filepath.Join(caskroom, "somecask", ".metadata", "INSTALL_RECEIPT.json"),
+		`{"source": {"tap": "ublue-os/tap"}}`)
+	// API-installed cask: the receipt still records homebrew/cask, which the
+	// trust check treats as trusted further up.
 	writeFile(t, filepath.Join(caskroom, "codex", ".metadata", "INSTALL_RECEIPT.json"),
-		`{"loaded_from_api": true}`)
-
-	// Two metadata snapshots whose directory names sort in the opposite
-	// order of their actual chronology ("9" sorts lexically after "10",
-	// even though it is the older snapshot). Each snapshot claims a
-	// different tap so we can tell which one installedCasksByTap picked.
-	oldMetaPath := filepath.Join(caskroom, "multitap", ".metadata", "9", "20260101", "Casks", "multitap.json")
-	newMetaPath := filepath.Join(caskroom, "multitap", ".metadata", "10", "20260201", "Casks", "multitap.json")
-	writeFile(t, oldMetaPath, `{"token": "multitap", "tap": "stale-org/tap"}`)
-	writeFile(t, newMetaPath, `{"token": "multitap", "tap": "fresh-org/tap"}`)
-
-	oldTime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	newTime := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
-	if err := os.Chtimes(oldMetaPath, oldTime, oldTime); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chtimes(newMetaPath, newTime, newTime); err != nil {
+		`{"source": {"tap": "homebrew/cask"}}`)
+	// A cask from another untrusted tap.
+	writeFile(t, filepath.Join(caskroom, "multitap", ".metadata", "INSTALL_RECEIPT.json"),
+		`{"source": {"tap": "fresh-org/tap"}}`)
+	// Cask with no receipt is skipped silently (not attributed to any tap).
+	if err := os.MkdirAll(filepath.Join(caskroom, "broke"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
-	byTap := installedCasksByTap(caskroom)
-	if got := byTap["ublue-os/tap"]; !reflect.DeepEqual(got, []string{"ublue-os/tap/somecask"}) {
-		t.Errorf("ublue-os/tap = %v", got)
+	want := map[string][]string{
+		"ublue-os/tap":  {"ublue-os/tap/somecask"},
+		"homebrew/cask": {"homebrew/cask/codex"},
+		"fresh-org/tap": {"fresh-org/tap/multitap"},
 	}
-	if _, ok := byTap["homebrew/cask"]; ok {
-		t.Error("API cask should not be attributed to any tap")
-	}
-	if got := byTap["fresh-org/tap"]; !reflect.DeepEqual(got, []string{"fresh-org/tap/multitap"}) {
-		t.Errorf("fresh-org/tap (chronologically newest, lexically first dir) = %v, want [fresh-org/tap/multitap]", got)
-	}
-	if _, ok := byTap["stale-org/tap"]; ok {
-		t.Error("stale metadata (lexically last dir but chronologically older) should not win attribution")
+	if got := installedCasksByTap(caskroom); !reflect.DeepEqual(got, want) {
+		t.Errorf("installedCasksByTap() = %v, want %v", got, want)
 	}
 }
 
@@ -140,6 +127,34 @@ func TestUntrustedTapMessageDetection(t *testing.T) {
 	}
 }
 
+func TestUntrustedTapFromErrorLine(t *testing.T) {
+	cases := []struct {
+		in      string
+		wantTap string
+		wantOk  bool
+	}{
+		{"Error: Refusing to load formula opencode from untrusted tap anomalyco/tap.", "anomalyco/tap", true},
+		{"Error: Refusing to load cask foo from untrusted tap bar/baz.", "bar/baz", true},
+		// Repository names may contain dots; only brew's sentence-ending
+		// period is stripped, so the suggested `brew trust` target stays whole.
+		{"Error: Refusing to load formula opencode from untrusted tap foo/bar.baz.", "foo/bar.baz", true},
+		// Installer output replayed on stdout is attacker-influenced: the
+		// capture charset stops shell metacharacters from reaching the
+		// suggested `brew trust <tap>` command.
+		{"Error: Refusing to load formula x from untrusted tap foo/bar;rm -rf ~", "foo/bar", true},
+		{"Error: Refusing to load formula x from untrusted tap $(id)/evil", "", false},
+		{"Warning: The following taps are not trusted:\n  multica-ai/tap", "", false},
+		{"Error: No such formula", "", false},
+		{"", "", false},
+	}
+	for _, c := range cases {
+		gotTap, gotOk := untrustedTapFromErrorLine(c.in)
+		if gotTap != c.wantTap || gotOk != c.wantOk {
+			t.Errorf("untrustedTapFromErrorLine(%q) = (%q, %v), want (%q, %v)", c.in, gotTap, gotOk, c.wantTap, c.wantOk)
+		}
+	}
+}
+
 func TestTrustPackagesDryRun(t *testing.T) {
 	dryrun.Set(true)
 	defer dryrun.Set(false)
@@ -149,5 +164,38 @@ func TestTrustPackagesDryRun(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("dry-run TrustPackages: %v", err)
+	}
+}
+
+// TestUntrustedTapWithoutDropsOnlyThatPackage pins the per-package trust
+// bookkeeping: trusting one formula leaves its siblings, a cask of the same
+// name, and the original tap value untouched.
+func TestUntrustedTapWithoutDropsOnlyThatPackage(t *testing.T) {
+	tap := UntrustedTap{
+		Name:     "vendor/tap",
+		Formulae: []string{"vendor/tap/a", "vendor/tap/b"},
+		Casks:    []string{"vendor/tap/a"},
+	}
+
+	got := tap.Without(Formula, "vendor/tap/a")
+	if !reflect.DeepEqual(got.Formulae, []string{"vendor/tap/b"}) {
+		t.Errorf("Formulae = %v, want [vendor/tap/b]", got.Formulae)
+	}
+	if !reflect.DeepEqual(got.Casks, []string{"vendor/tap/a"}) {
+		t.Errorf("Casks = %v, want the same-named cask kept", got.Casks)
+	}
+	if got.Count() != 2 {
+		t.Errorf("Count() = %d, want 2", got.Count())
+	}
+	if !reflect.DeepEqual(tap.Formulae, []string{"vendor/tap/a", "vendor/tap/b"}) || tap.Count() != 3 {
+		t.Errorf("receiver changed: %+v", tap)
+	}
+
+	got = got.Without(Cask, "vendor/tap/a").Without(Formula, "vendor/tap/b")
+	if got.Count() != 0 {
+		t.Errorf("Count() after trusting everything = %d, want 0", got.Count())
+	}
+	if got.Name != "vendor/tap" {
+		t.Errorf("Name = %q, want vendor/tap", got.Name)
 	}
 }

@@ -1,6 +1,10 @@
 package config
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/projectbluefin/chairlift/internal/branding"
+)
 
 // LogMessage renders the high-signal startup diagnostic for an authoritative
 // configuration failure.
@@ -13,9 +17,13 @@ func (e *LoadError) LogMessage() string {
 
 // ToastMessage renders the persistent user-facing startup diagnostic for an
 // authoritative configuration failure.
+//
+// Unlike LogMessage above, this reaches a user — internal/window feeds it to
+// ShowErrorToast — so it names the product, not the code name, and leaves
+// the file path and parser detail to the log.
 func (e *LoadError) ToastMessage() string {
 	return fmt.Sprintf(
-		"Configuration error: %s. All feature groups are disabled. Fix the configuration file and restart ChairLift.",
-		e.Error(),
+		"%s's settings file has a mistake, so most features are off. Fix it, then restart %s.",
+		branding.AppName, branding.AppName,
 	)
 }

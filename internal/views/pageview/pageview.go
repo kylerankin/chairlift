@@ -2,14 +2,15 @@
 package pageview
 
 import (
-	"bufio"
+	"errors"
 	"fmt"
-	"io"
 	"strings"
 	"time"
 
-	"golang.org/x/text/cases"
-	"golang.org/x/text/language"
+	"github.com/projectbluefin/chairlift/internal/devtools"
+	"github.com/projectbluefin/chairlift/internal/gpu"
+	"github.com/projectbluefin/chairlift/internal/homebrew"
+	"github.com/projectbluefin/chairlift/internal/pkexec"
 )
 
 // Row is the text displayed by a view row.
@@ -30,22 +31,6 @@ type Command struct {
 	Args []string
 }
 
-// OSReleaseEntry is one parsed field from an os-release file.
-type OSReleaseEntry struct {
-	Title string
-	Value string
-	IsURL bool
-}
-
-// FlatpakApplication returns the row text for an installed Flatpak application.
-func FlatpakApplication(name, applicationID, version string) Row {
-	subtitle := applicationID
-	if version != "" {
-		subtitle = fmt.Sprintf("%s (%s)", applicationID, version)
-	}
-	return Row{Title: name, Subtitle: subtitle}
-}
-
 // HomebrewPackage returns the row text for an installed Homebrew package.
 func HomebrewPackage(name, version string, pinned bool) Row {
 	subtitle := version
@@ -55,128 +40,192 @@ func HomebrewPackage(name, version string, pinned bool) Row {
 	return Row{Title: name, Subtitle: subtitle}
 }
 
-// BrewBundle returns the row text for a configured Homebrew bundle.
-func BrewBundle(name, description, path string) Row {
-	subtitle := path
-	if description != "" {
-		subtitle = fmt.Sprintf("%s — %s", description, path)
-	}
-	return Row{Title: name, Subtitle: subtitle}
+// HomebrewPackageButtonName is the accessible name of an installed-package
+// row's button: its label, without a progress ellipsis, followed by the
+// package, so "Uninstall" becomes "Uninstall jq" and "Uninstalling…" becomes
+// "Uninstalling jq". Every row shows the same words; without the package a
+// screen reader announces "Uninstall" again and again.
+func HomebrewPackageButtonName(label, name string) string {
+	return strings.TrimSuffix(label, "…") + " " + name
 }
 
-// SearchResult returns the row text for a Homebrew search result.
-func SearchResult(name, kind string) Row {
-	return Row{Title: name, Subtitle: kind}
-}
+// PackageListExportSubtitle describes the Apps page's package-list export.
+// The export writes Brewfile in the home folder with --force, so it replaces
+// any Brewfile there — one the person wrote by hand as much as an earlier
+// export — and the subtitle names the file so that person can tell.
+const PackageListExportSubtitle = "Saves everything you installed here to a file named Brewfile in your home folder, so you can put it back later. Replaces any Brewfile already there."
 
-// UntrustedTap returns the row text for an untrusted Homebrew tap.
+// UntrustedTap returns the row text for a software source whose updates
+// Homebrew has paused. The source is named, because a person cannot decide
+// to trust something they cannot identify, and the count stands in for the
+// package list: what matters is how much is stuck, not its taxonomy.
 func UntrustedTap(name string, formulae, casks []string) Row {
-	packages := make([]string, 0, len(formulae)+len(casks))
-	for _, names := range [][]string{formulae, casks} {
-		for _, packageName := range names {
-			if i := strings.LastIndex(packageName, "/"); i >= 0 {
-				packageName = packageName[i+1:]
-			}
-			packages = append(packages, packageName)
-		}
+	count := len(formulae) + len(casks)
+	row := Row{Title: name, Subtitle: "Updates are paused for software from this source."}
+	switch {
+	case count == 1:
+		row.Subtitle = "Updates are paused for 1 program from this source."
+	case count > 1:
+		row.Subtitle = fmt.Sprintf("Updates are paused for %d programs from this source.", count)
+	}
+	return row
+}
+
+// BootcStageButtonLabel is the label of the system-update row's action. The
+// action runs the image's stage helper, which downloads the newest version
+// and stages it for the next restart, so the button says "Download": a
+// button labelled as a check that pulled an image and queued a deployment
+// behind an administrator prompt was the shakedown's W3-01.
+const BootcStageButtonLabel = "Download"
+
+// BootcStageRunningSubtitle is the system-update expander subtitle while the
+// stage helper runs. It names both halves, because the helper checks first
+// and downloads only when a newer version exists.
+const BootcStageRunningSubtitle = "Looking for a newer version and downloading it…"
+
+// TapTrustConfirmation returns the title and body of the dialog that
+// confirms trusting a whole source. count is how many installed programs
+// from the source are still untrusted, so the body says exactly how much
+// the one click trusts — "all 1 programs" never reaches a person.
+func TapTrustConfirmation(name string, count int) (title, body string) {
+	title = fmt.Sprintf("Trust Software from %s?", name)
+	const caution = "Only trust sources you recognize."
+	switch {
+	case count == 1:
+		body = fmt.Sprintf("This will trust the 1 installed program from %s, so it can install and update. %s", name, caution)
+	case count > 1:
+		body = fmt.Sprintf("This will trust all %d installed programs from %s at once, so they can install and update. %s", count, name, caution)
+	default:
+		body = fmt.Sprintf("This will trust software from %s, so it can install and update. %s", name, caution)
+	}
+	return title, body
+}
+
+// UntrustedTapPackage returns the row text for one installed package from an
+// untrusted tap. qualifiedName is the "user/tap/name" form ListUntrustedTaps
+// records; kind tells the row whether the package is a formula or a cask,
+// since the noun a person reads differs by namespace and Homebrew's own
+// output ("from untrusted tap … formula foo") uses the same distinction.
+//
+// The subtitle names what trusting the package actually buys — that this one
+// program will update again — rather than the implementation detail of which
+// tap trust list it joins. The noun is the user's word, not the system word:
+// formulae are still "programs" here even though Homebrew distinguishes them
+// internally.
+func UntrustedTapPackage(qualifiedName string, kind homebrew.PackageKind) Row {
+	noun := "program"
+	if kind == homebrew.Cask {
+		noun = "app"
 	}
 	return Row{
-		Title:    name,
-		Subtitle: fmt.Sprintf("%d installed: %s", len(packages), strings.Join(packages, ", ")),
+		Title:    packageDisplayName(qualifiedName),
+		Subtitle: fmt.Sprintf("Updates are paused for this %s — Trust to update", noun),
 	}
 }
 
-// FlatpakUpdate returns the row text for an available Flatpak update.
-func FlatpakUpdate(name, applicationID, newVersion, installation string) Row {
-	subtitle := applicationID
-	if newVersion != "" {
-		subtitle = fmt.Sprintf("%s → %s", applicationID, newVersion)
+// packageDisplayName strips the "user/tap/" prefix from a qualified package
+// name and returns the bare name a person recognizes (the same shape the
+// Apps page uses for Homebrew rows). It does no error handling because
+// ListUntrustedTaps already enforces the three-segment shape; a malformed
+// name returns the original string rather than panicking in a view.
+func packageDisplayName(qualified string) string {
+	if i := strings.LastIndex(qualified, "/"); i >= 0 && i < len(qualified)-1 {
+		return qualified[i+1:]
 	}
-	if installation == "user" {
-		subtitle += " (user)"
-	}
-	return Row{Title: name, Subtitle: subtitle}
+	return qualified
 }
 
-// BootcUpdateSubtitle returns the system-update expander subtitle.
+// BootcUpdateSubtitle returns the system-update expander subtitle. A
+// downloaded update changes nothing until the machine restarts, so the
+// waiting state says when it takes effect rather than that it is "staged".
+// The idle state describes what the Download action does — a download, an
+// administrator password, and nothing until a restart — because those are
+// the consequences a person cannot discover from a button label.
 func BootcUpdateSubtitle(staged bool, version string) string {
 	if !staged {
-		return "Check for and download the latest system image"
+		return "Downloads the newest version of the operating system. Asks for an administrator password; the new version installs when you restart"
 	}
 	if version == "" {
-		return "Update staged — restart to apply"
+		return "A new version installs when you restart."
 	}
-	return fmt.Sprintf("Update %s staged — restart to apply", version)
+	return fmt.Sprintf("Version %s installs when you restart.", version)
 }
 
-// BootcStageResultSubtitle returns the subtitle after a staging action completes.
-func BootcStageResultSubtitle(staged bool, version, lastMessage string) string {
+// BootcStageResultSubtitle returns the subtitle after a staging action
+// completes. Nothing waiting after a run that reported no error means the
+// system is current. The script's own last line is deliberately not shown:
+// it is written for a terminal and can name paths a person has no use for.
+func BootcStageResultSubtitle(staged bool, version string) string {
 	if staged {
 		return BootcUpdateSubtitle(true, version)
 	}
-	if lastMessage != "" {
-		return lastMessage
-	}
-	return "System is up to date"
+	return "Everything is up to date."
 }
 
-// SysupdateUpdateSubtitle returns the native A/B system-update expander
-// subtitle from the /run/snosi state-file presentation (the outcome grammar
-// is internal/sysupdate.Status.Presentation's): "staged" shows the pending
-// version, "current" shows the last check time, "failed" prompts a retry,
-// and anything else — including the fresh-boot no-files state — is the
-// neutral idle prompt.
-func SysupdateUpdateSubtitle(outcome, version, checkedAt string) string {
-	switch outcome {
-	case "staged":
-		if version == "" {
-			return "Update staged — restart to apply"
-		}
-		return fmt.Sprintf("Update %s staged — restart to apply", version)
-	case "current":
-		if formatted := formatCheckedAt(checkedAt); formatted != "" {
-			return fmt.Sprintf("System is up to date (checked %s)", formatted)
-		}
-		return "System is up to date"
-	case "failed":
-		return "Last update check failed — use Check for Updates to retry"
+// BootcStageFailureSubtitle returns the subtitle after a staging action
+// failed. It points at Details only when the helper printed something: the
+// view hides Details until a line arrives, and a stage can print nothing —
+// on Dakota, bootc logged its progress to the journal, not to the pipe.
+func BootcStageFailureSubtitle(hadOutput bool) string {
+	if hadOutput {
+		return "The update couldn't be downloaded. Open Details to see what happened."
+	}
+	return "The update couldn't be downloaded"
+}
+
+// UpdateBusyToast answers a Download, early-updates, graphics-driver,
+// Roll Back, Factory Reset, or Powerwash Restart Now request refused because
+// a check, an update run, or a restart already owns the system. Deployment
+// changes must not race an update run's staging; a refused click must still
+// say why nothing happened.
+const UpdateBusyToast = "Wait for the current update check or installation to finish"
+
+// PrivilegedFailureToast returns the toast for a privileged action that
+// returned err, and whether that toast is an error. failure is the view's
+// own plain-language failure text; the views on the Updates page do not
+// quote the helper's output, so the window's message-based dismissal check
+// never sees pkexec's "Request dismissed". A dismissed authentication prompt
+// is not a failure — the helper never ran — so it yields the brief
+// pkexec.CancelledMessage instead of a persistent error.
+func PrivilegedFailureToast(err error, failure string) (toast string, isError bool) {
+	if pkexec.IsAuthDismissed(err) {
+		return pkexec.CancelledMessage, false
+	}
+	return failure, true
+}
+
+// StagingLogSubtitle returns the "Details" expander subtitle for a staging
+// run whose output is rendered through a bounded rolling window: shown is how
+// many lines the expander currently holds and total is how many the stage
+// helper has printed.
+//
+// It names the cap whenever one applied, because a truncated log that reads
+// like a complete one is worse than no log at all: someone diagnosing a failed
+// stage would otherwise keep looking for a line the view had silently dropped.
+// The view hides the expander until the first line arrives, so total <= 0
+// never names an empty log as something to view.
+func StagingLogSubtitle(shown, total int) string {
+	switch {
+	case total <= 0:
+		return "No output"
+	case shown < total:
+		return fmt.Sprintf("Showing the last %d of %d lines.", shown, total)
+	case total == 1:
+		return "1 line."
 	default:
-		return "Check for and download the latest system image"
+		return fmt.Sprintf("%d lines.", total)
 	}
 }
 
-// formatCheckedAt renders a stager ISO-8601 timestamp as a local wall-clock
-// time, or "" when unparseable.
-func formatCheckedAt(checkedAt string) string {
-	parsed, err := time.Parse(time.RFC3339, checkedAt)
-	if err != nil {
-		return ""
-	}
-	return parsed.Local().Format("15:04")
-}
+// ChangelogComparingLabel is the Compare button's label while a comparison
+// runs. The view both sets it and tests for it, so it has one spelling; a
+// three-dot copy of the ellipsis made the in-flight guard never match.
+const ChangelogComparingLabel = "Comparing…"
 
-// SysupdateStageResultSubtitle returns the subtitle after a native A/B
-// staging action completes.
-func SysupdateStageResultSubtitle(staged bool, version, lastMessage string) string {
-	if staged {
-		return SysupdateUpdateSubtitle("staged", version, "")
-	}
-	if lastMessage != "" {
-		return lastMessage
-	}
-	return "System is up to date"
-}
-
-// SysupdateRollbackSubtitle returns the read-only rollback row subtitle.
-// version is the inactive slot's version only when it is older than the
-// running one (internal/sysupdate.RollbackCandidate); a staged-but-newer
-// slot or an empty slot both present as no rollback.
-func SysupdateRollbackSubtitle(version string) string {
-	if version == "" {
-		return "No previous version on disk"
-	}
-	return fmt.Sprintf("Version %s is on the inactive slot — choose it in the boot menu at restart to roll back", version)
-}
+// FeatureChangeBusyToast answers an optional-feature toggle refused because
+// another feature change is still running; each is a privileged updex
+// helper call, and two at once would race.
+const FeatureChangeBusyToast = "Wait for the current feature change to finish"
 
 // Feature returns the initial row text for an updex feature.
 func Feature(name, description string) Row {
@@ -188,12 +237,41 @@ func FeatureGroupDescription(count int) string {
 	return fmt.Sprintf("%d features available", count)
 }
 
-// HelpResources returns configured Help links in their display order.
+// FeaturesEmptyState decides whether the Features page must explain that it
+// offers nothing, and with what text. The page is otherwise blank on a host
+// with no ublue-os image descriptor (so no Developer or Gaming group), no
+// Podman (so no Printers group), and no optional features for updex to list,
+// which reads as a broken page rather than an answer. bluefinGroups is
+// whether any Developer or Gaming group was built; printers is whether the
+// Printers group was built — a row of switches is an offering, not an empty
+// page; optionalFeatures is
+// whether the optional-features group is (or may still become) visible — a
+// group still checking, or one that could not check, is itself an
+// explanation.
+func FeaturesEmptyState(bluefinGroups, printers, optionalFeatures bool) (Row, bool) {
+	if bluefinGroups || printers || optionalFeatures {
+		return Row{}, false
+	}
+	return Row{
+		Title:    "Nothing to Set Up Here",
+		Subtitle: "This computer has no extra features to set up.",
+	}, true
+}
+
+// HelpResources returns configured Help links in their display order with clear action titles.
+//
+// Each title names what its key holds in the distribution's shipped
+// configuration (projectbluefin/common's help_resources_group): website is
+// the documentation site and chat is the Ask Bluefin assistant. Titling chat
+// as documentation put "Browse Documentation" on the assistant and "Visit
+// project website" on the documentation. "Ask for Help" rather than "Ask
+// Bluefin" because the Ask Bluefin menu entry opens Troubleshooting on the
+// Agents page, a different destination.
 func HelpResources(website, issues, chat string) []HelpResource {
 	candidates := []HelpResource{
-		{Title: "Website", URL: website},
-		{Title: "Report Issues", URL: issues},
-		{Title: "Community Discussions", URL: chat},
+		{Title: "Browse Documentation", URL: website},
+		{Title: "Report a Problem", URL: issues},
+		{Title: "Ask for Help", URL: chat},
 	}
 	resources := make([]HelpResource, 0, len(candidates))
 	for _, resource := range candidates {
@@ -207,203 +285,313 @@ func HelpResources(website, issues, chat string) []HelpResource {
 // MaintenanceCommand returns the invocation for a configured maintenance action.
 func MaintenanceCommand(script string, sudo bool) Command {
 	if sudo {
-		return Command{Name: "pkexec", Args: []string{script}}
+		return Command{Name: pkexec.Command, Args: []string{script}}
 	}
 	return Command{Name: script}
 }
 
-// ParseOSRelease parses displayable fields from an os-release stream.
-func ParseOSRelease(reader io.Reader) ([]OSReleaseEntry, error) {
-	var entries []OSReleaseEntry
-	scanner := bufio.NewScanner(reader)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") || !strings.Contains(line, "=") {
-			continue
-		}
-
-		parts := strings.SplitN(line, "=", 2)
-		key := parts[0]
-		value := strings.Trim(parts[1], "\"'")
-		readableKey := strings.ReplaceAll(key, "_", " ")
-		readableKey = cases.Title(language.English).String(strings.ToLower(readableKey))
-
-		entries = append(entries, OSReleaseEntry{
-			Title: readableKey,
-			Value: value,
-			IsURL: strings.HasSuffix(key, "URL"),
-		})
-	}
-	return entries, scanner.Err()
-}
-
-// ShortDigest returns a compact bootc digest for display.
-func ShortDigest(digest string) string {
-	if len(digest) > 19 {
-		return digest[:19] + "..."
-	}
-	return digest
-}
-
-// BluefinGroupDescription returns the Bluefin-family group description for a
-// detected variant and running tag — e.g. "Bluefin LTS · lts". An empty tag
-// falls back to the product name alone.
-func BluefinGroupDescription(variantName, tag string) string {
-	if variantName == "" {
-		return "Bluefin-family features"
-	}
-	if tag == "" {
-		return variantName
-	}
-	return fmt.Sprintf("%s · %s", variantName, tag)
-}
-
-// ChannelRow returns the release-channel switch row text. onTesting is the
-// running channel; switchable is false when the running tag has no
-// counterpart to switch to, in which case the subtitle explains the row is
-// inert rather than leaving the user to guess.
-func ChannelRow(onTesting, switchable bool, tag string) Row {
-	row := Row{Title: "Testing Channel"}
+// SystemVersionRow returns the compact system-version row: the version a
+// person can quote in a support request or compare against release notes,
+// and whether a newer one is already waiting. The exact identifiers stay
+// behind SystemVersionDetails, because nobody needs a digest to read their
+// own version. staged reports that an update is waiting even when its
+// version cannot be read, which a composefs host cannot do without root.
+func SystemVersionRow(version, released string, staged bool, stagedVersion string) Row {
+	row := Row{Title: "System Version"}
+	date := formatReleaseDate(released)
 	switch {
-	case !switchable && tag != "":
-		row.Subtitle = fmt.Sprintf("This image publishes no testing channel for the %s tag", tag)
-	case !switchable:
-		row.Subtitle = "This image does not publish a testing channel"
-	case onTesting:
-		row.Subtitle = "Tracking testing — turn off to return to stable, then restart"
+	case version != "" && date != "":
+		row.Subtitle = fmt.Sprintf("Version %s, released %s.", version, date)
+	case version != "":
+		row.Subtitle = fmt.Sprintf("Version %s.", version)
+	case date != "":
+		row.Subtitle = fmt.Sprintf("Released %s.", date)
 	default:
-		row.Subtitle = "Track pre-release images — unstable, restart to apply"
+		row.Subtitle = "Couldn't read this computer's version."
+	}
+	if staged {
+		row.Subtitle = row.Subtitle + " " + BootcUpdateSubtitle(true, stagedVersion)
+	}
+	return row
+}
+
+// SystemVersionDetails returns the rows behind the System version "Details"
+// expander: the identifiers a support request asks for, and the only place
+// they appear. A row is omitted when its value is unknown, so the expander
+// never shows an empty field. The digest is given whole: a shortened one
+// cannot identify a build, and these rows exist to be quoted.
+func SystemVersionDetails(version, released, source, digest string) []Row {
+	candidates := []Row{
+		{Title: "Version", Subtitle: version},
+		{Title: "Released", Subtitle: formatReleaseDate(released)},
+		{Title: "Source", Subtitle: source},
+		{Title: "Build ID", Subtitle: digest},
+	}
+	rows := make([]Row, 0, len(candidates))
+	for _, row := range candidates {
+		if row.Subtitle != "" {
+			rows = append(rows, row)
+		}
+	}
+	return rows
+}
+
+// formatReleaseDate renders an image timestamp as a plain date, or "" when
+// it is absent or unparseable.
+func formatReleaseDate(timestamp string) string {
+	parsed, err := time.Parse(time.RFC3339, timestamp)
+	if err != nil {
+		return ""
+	}
+	return parsed.Local().Format("2 January 2006")
+}
+
+// ChannelRow returns the early-updates switch row text. onTesting is the
+// running channel; switchable is false when this system publishes no
+// counterpart to switch to, in which case the subtitle says the row is inert
+// rather than leaving the user to guess.
+//
+// The subtitle names the two consequences a person cannot discover
+// afterwards: the versions are less tested, and taking one replaces the
+// operating system and needs a restart.
+func ChannelRow(onTesting, switchable bool) Row {
+	row := Row{Title: "Get Updates Early"}
+	switch {
+	case !switchable:
+		row.Subtitle = "Not offered for this computer."
+	case onTesting:
+		row.Subtitle = "You get new features sooner, but they're less tested. Changing this needs a restart."
+	default:
+		row.Subtitle = "Get new features sooner. They're less tested and can break. Needs a restart."
 	}
 	return row
 }
 
 // ChannelSwitchResultSubtitle returns the subtitle after a channel switch
-// completes. It never claims the running system changed: bootc stages the
-// new image, so the restart is the part the user still has to do.
+// completes. It never claims the running system changed: the new version is
+// only downloaded, so the restart is the part the user still has to do.
 func ChannelSwitchResultSubtitle(toTesting bool) string {
 	if toTesting {
-		return "Switched to testing — restart to apply"
+		return "Restart to start getting early updates."
 	}
-	return "Switched to stable — restart to apply"
+	return "Restart to go back to tested updates."
 }
 
-// DeveloperRow returns the developer-mode switch row text. groups are the
-// developer groups the user currently belongs to.
-func DeveloperRow(active bool, groups []string) Row {
+// DeveloperRow returns the developer-tools switch row text. It names the
+// capability, never the supplementary groups that carry it: which groups an
+// account is added to is an implementation detail of how access is granted,
+// where what a person deciding needs is the consequence — an administrator
+// password now, and a new login before anything works.
+func DeveloperRow(active bool) Row {
 	row := Row{Title: "Developer Mode"}
 	if active {
-		row.Subtitle = fmt.Sprintf("Active — member of %s", strings.Join(groups, ", "))
+		row.Subtitle = "Containers and virtual machines are set up for your account."
 		return row
 	}
-	row.Subtitle = "Join the container, VM, and serial-device groups"
+	row.Subtitle = "Set up containers and virtual machines. Asks for your administrator password."
 	return row
 }
 
-// DeveloperResultSubtitle returns the subtitle after a developer-mode toggle
-// completes. Group membership is only applied to new sessions, so both
-// outcomes say so rather than implying an immediate effect.
+// DeveloperResultSubtitle returns the subtitle after a developer-tools toggle
+// completes. The change only reaches new login sessions, so both outcomes say
+// so rather than implying an immediate effect.
 func DeveloperResultSubtitle(enabled bool) string {
 	if enabled {
-		return "Developer mode enabled — log out and back in to take effect"
+		return "Log out and back in to finish turning this on."
 	}
-	return "Developer mode disabled — log out and back in to take effect"
+	return "Log out and back in to finish turning this off."
 }
 
-// GamingRow returns the gaming-mode switch row text. summary comes from
-// internal/gaming.State.Summary.
-func GamingRow(summary string) Row {
-	return Row{Title: "Gaming Mode", Subtitle: summary}
+// DockerControlAllowed follows the requested direction, including after a
+// successful mutation changes which helper action the switch would dispatch.
+// on is DockerSwitchOn's answer, not merely whether a unit runs.
+func DockerControlAllowed(on, canEnable, canDisable bool) bool {
+	return (!on && canEnable) || (on && canDisable)
 }
 
-// GamingResultSubtitle returns the subtitle after a gaming-mode toggle
-// completes. changed is the number of Flatpaks installed or removed, and
-// failed the number that could not be.
-func GamingResultSubtitle(enabled bool, changed, failed int) string {
+// DockerHelperOutdated is the Docker row's subtitle when the image's
+// privileged helper predates the Homebrew-bottle install (v26.11.1).
+const DockerHelperOutdated = "Turning on Docker needs a newer system version. Update this computer, restart, then try again."
+
+// DockerCanEnable reports whether the installed helper can turn Docker on
+// here. The GUI ships through Homebrew and the helper through the OS image,
+// so they can disagree. Every released helper authorizes docker-enable, but
+// only one that also authorizes docker-update (v26.11.1+) can create the
+// docker group and install the runtime when the image ships no Docker units;
+// an older one fails after authentication with "group 'docker' does not exist".
+func DockerCanEnable(state devtools.DockerState, enable, update bool) bool {
+	return state.Available && enable && (state.Installed || update)
+}
+
+// DockerHelperNeedsUpdate reports that only the image's helper version stands
+// between this host and enabling Docker, so the row says to update.
+func DockerHelperNeedsUpdate(state devtools.DockerState, enable, update bool) bool {
+	return state.Available && enable && !DockerCanEnable(state, enable, update)
+}
+
+// DockerSwitchOn reports whether the Docker switch reads on: the daemon runs
+// and this account is not shut out of it. A running daemon whose socket does
+// not answer (or whose paired unit is missing) stays on, so it can be stopped.
+// A daemon that runs without access for this account reads off, so turning
+// the switch on dispatches docker-enable, which grants that access.
+func DockerSwitchOn(state devtools.DockerState) bool {
+	return state.Active && !state.NoAccess
+}
+
+// Disclosure subtitles for the Docker row's package list. The daemon set is
+// installed by the privileged helper from verified Homebrew bottles into a
+// root-owned location; the CLI set is ordinary user-scope Homebrew formulae.
+const (
+	DockerRuntimeContents = "Homebrew, installed for the whole computer"
+	DockerCLIContents     = "Homebrew formula"
+)
+
+// DockerSubtitle distinguishes system activation from this session's access.
+func DockerSubtitle(state devtools.DockerState, err error) string {
+	switch {
+	case state.NeedsLogin || errors.Is(err, devtools.ErrDockerNewLogin):
+		return "Log out and back in to use Docker with your new access."
+	case state.Unavailable != "":
+		return state.Unavailable
+	case state.Ready:
+		return "System Docker is ready for this account."
+	case state.NoAccess:
+		return "Docker is running, but your account can't use it yet. Turn this on to get access."
+	case state.Active:
+		return "Docker is running, but its socket is not responding."
+	case err != nil:
+		return "Couldn't check Docker's system service."
+	case !state.Installed:
+		return "Enables Developer Mode first if needed, then installs Docker from verified Homebrew packages for all accounts. Administrator approval is required."
+	default:
+		return "Enables Developer Mode first if needed, then turns on system Docker for all accounts. Administrator approval is required."
+	}
+}
+
+func DockerEditorFailure(preview bool) string {
+	if preview {
+		return "[DRY-RUN] VS Code setup needs attention; no Docker changes made. See the application log for details."
+	}
+	return "Docker access is enabled, but VS Code setup couldn't finish. See the application log for details."
+}
+
+// Compass row text. The check reads both Flatpak installations and the
+// remote list before the switch can be used.
+const (
+	CompassTitle               = "Compass"
+	CompassCheckingSubtitle    = "Checking whether Compass is installed…"
+	CompassUnavailableSubtitle = "Couldn't check whether Compass is installed."
+)
+
+// CompassSubtitle returns the Compass row's subtitle for an observed state.
+// supported reports whether Compass is published for this architecture and
+// remote whether the FlatPark remote Compass installs from exists.
+func CompassSubtitle(installed, supported, remote bool) string {
+	switch {
+	case installed:
+		return "Installed for everyone on this computer. Open Compass from the app grid."
+	case !supported:
+		return "Compass is only available for x86_64 computers."
+	case !remote:
+		return "Compass installs from FlatPark, which isn't set up on this computer."
+	default:
+		return "A fast, keyboard-first launcher for apps, files, and commands. Installs from FlatPark."
+	}
+}
+
+// CompassWorkingSubtitle returns the subtitle while Compass is being
+// installed or removed.
+func CompassWorkingSubtitle(enable bool) string {
+	if enable {
+		return "Installing…"
+	}
+	return "Removing…"
+}
+
+// CompassToast returns the toast after a Compass toggle. failed reports an
+// install or removal error; changed reports whether a command actually ran.
+func CompassToast(dryRun, enable, changed, failed bool) (toast string, isError bool) {
 	verb := "removed"
-	if enabled {
+	if enable {
 		verb = "installed"
 	}
-	if failed > 0 {
-		return fmt.Sprintf("%d component(s) %s, %d failed", changed, verb, failed)
+	switch {
+	case failed && enable:
+		return "Couldn't install Compass. Try again.", true
+	case failed:
+		return "Couldn't remove Compass. Try again.", true
+	case dryRun:
+		return fmt.Sprintf("[DRY-RUN] Preview: Compass would be %s — no changes made", verb), false
+	case !changed:
+		return "Nothing needed changing.", false
+	default:
+		return fmt.Sprintf("Compass %s.", verb), false
 	}
-	if changed == 0 {
-		return "No components needed changing"
-	}
-	return fmt.Sprintf("%d component(s) %s", changed, verb)
 }
 
-// UpdateAllRow returns the Update All hero row text before a run has started.
-// planned is the number of phases that will run on this host.
-func UpdateAllRow(planned int) Row {
-	row := Row{Title: "Update All"}
-	switch planned {
-	case 0:
-		row.Subtitle = "Nothing on this system can be updated from here"
-	case 1:
-		row.Subtitle = "Update the one available source"
-	default:
-		row.Subtitle = "Update the system image, applications, and packages in one step"
+// GameModeConfirmation returns the exact title and body for the Game Mode switch warning.
+func GameModeConfirmation() (title, body string) {
+	return "Game Mode Requires a Reboot",
+		"This mode includes Steam and Gamescope built in with an Open Gaming Collective kernel."
+}
+
+// GameModeRow returns the Game Mode row presentation.
+func GameModeRow(active, canSwitch bool) Row {
+	row := Row{Title: "Game Mode"}
+	if active {
+		row.Subtitle = "Steam, Gamescope, and Open Gaming Collective kernel are active."
+		return row
 	}
+	if !canSwitch {
+		row.Subtitle = "A matching gaming system image is not available for this computer."
+		return row
+	}
+	row.Subtitle = "Switch to the gaming system image with Steam, Gamescope, and an Open Gaming Collective kernel."
 	return row
 }
 
-// UpdateAllPhaseSubtitle returns the per-phase row subtitle. running is true
-// while the phase is in flight; detail is the phase's Result detail once it
-// has finished, and empty before it starts.
-func UpdateAllPhaseSubtitle(running bool, detail string) string {
-	switch {
-	case running:
-		return "Working…"
-	case detail == "":
-		return "Waiting"
-	default:
-		return detail
+// GameModeResultSubtitle returns the subtitle for Game Mode after a switch stages.
+func GameModeResultSubtitle(enabled bool) string {
+	if enabled {
+		return "Restart to switch to Game Mode."
 	}
+	return "Restart to switch to the standard mode."
 }
 
-// RestartRow returns the restart prompt row text. It is only shown when an OS
-// image is actually staged, so it always names the restart as the thing that
-// applies it rather than as a generic suggestion.
-func RestartRow(version string) Row {
-	if version == "" {
-		return Row{
-			Title:    "Restart to Apply",
-			Subtitle: "A system update is staged and takes effect after a restart",
-		}
-	}
-	return Row{
-		Title:    "Restart to Apply",
-		Subtitle: fmt.Sprintf("Version %s is staged and takes effect after a restart", version),
-	}
-}
-
-// BootcRollbackRow returns the bootc rollback row text. version and timestamp
-// describe the deployment the host would return to; either may be empty.
+// BootcRollbackRow returns the previous-version row text. version and
+// timestamp describe the deployment the host would return to; either may be
+// empty. The caller shows the row only once bootc reports that deployment,
+// so empty arguments mean its details are unreadable, never that nothing is
+// kept: a composefs host reads neither the rollback's version label nor its
+// image creation time without root (#521).
 //
 // It is deliberately a single row naming one destination, not a history
-// browser: `bootc rollback` has exactly one target — the deployment the host
-// already records — so offering a choice would imply a capability the
-// operation does not have.
+// browser: going back has exactly one target — the version the host still
+// keeps — so offering a choice would imply a capability the operation does
+// not have.
 func BootcRollbackRow(version, timestamp string) Row {
-	row := Row{Title: "Roll Back"}
+	row := Row{Title: "Go Back to the Previous Version"}
+	date := formatReleaseDate(timestamp)
 	switch {
-	case version == "" && timestamp == "":
-		row.Subtitle = "No previous system image is available"
+	case version == "" && date == "":
+		// A destination exists; only its date is unreadable. Saying
+		// nothing is kept would be the one wrong answer here.
+		row.Subtitle = "Return to the previous version the next time you restart."
 	case version == "":
-		row.Subtitle = fmt.Sprintf("Return to the image from %s at the next restart", timestamp)
-	case timestamp == "":
-		row.Subtitle = fmt.Sprintf("Return to version %s at the next restart", version)
+		row.Subtitle = fmt.Sprintf("Return to the version from %s the next time you restart.", date)
+	case date == "":
+		row.Subtitle = fmt.Sprintf("Return to version %s the next time you restart.", version)
 	default:
-		row.Subtitle = fmt.Sprintf("Return to version %s (%s) at the next restart", version, timestamp)
+		row.Subtitle = fmt.Sprintf("Return to version %s from %s the next time you restart.", version, date)
 	}
 	return row
 }
 
-// BootcRollbackResultSubtitle returns the subtitle after a rollback is
-// staged. Rolling back only changes which deployment boots next, so it never
-// claims the running system changed.
+// BootcRollbackResultSubtitle returns the subtitle after going back is
+// requested. It only changes which version starts next, so it never claims
+// the running system changed.
 func BootcRollbackResultSubtitle() string {
-	return "Rolled back — restart to boot the previous image"
+	return "The previous version starts the next time you restart."
 }
 
 // AutomaticUpdatesRow returns the automatic-background-updates switch row
@@ -413,10 +601,10 @@ func BootcRollbackResultSubtitle() string {
 func AutomaticUpdatesRow(enabled bool) Row {
 	row := Row{Title: "Automatic Updates"}
 	if enabled {
-		row.Subtitle = "This system installs updates in the background and applies them at restart"
+		row.Subtitle = "Updates download in the background and install when you restart."
 		return row
 	}
-	row.Subtitle = "Update this system only when you ask"
+	row.Subtitle = "Updates install only when you ask."
 	return row
 }
 
@@ -425,87 +613,131 @@ func AutomaticUpdatesRow(enabled bool) Row {
 // so neither outcome implies an immediate change.
 func AutomaticUpdatesResultSubtitle(enabled bool) string {
 	if enabled {
-		return "Automatic updates are on — the next check runs on the system's schedule"
+		return "Automatic updates are on."
 	}
-	return "Automatic updates are off — use Update All when you want to update"
+	return "Automatic updates are off. Update from this page when you're ready."
 }
 
 // GraphicsDriverRow returns the graphics-driver row text. current is the
-// driver flavour of the running image, hardware describes the detected GPU,
-// and recommended is non-empty only when a switch is both possible and
-// worthwhile.
+// driver the running system carries, hardware describes the detected
+// graphics chip, and recommended is non-empty only when a switch is both
+// possible and worthwhile.
 //
 // The row is informational whenever there is nothing to offer, which is the
-// common case: an AMD or Intel machine is already correct, and an LTS host
-// has no driver image published at all.
+// common case. When there is something to offer it names the hardware the
+// driver is for and the restart it costs, and promises nothing about speed:
+// what a driver switch buys varies per machine, and this row cannot know.
 func GraphicsDriverRow(current, hardware, recommended string) Row {
 	row := Row{Title: "Graphics Driver"}
+	// gpu.Set.Describe answers with a sentence, not a name, when nothing
+	// was detected (a virtual machine); interpolating it produced "for your
+	// No graphics hardware detected graphics".
+	if hardware == (gpu.Set{}).Describe() {
+		hardware = ""
+	}
 	switch {
+	case recommended != "" && hardware != "":
+		row.Subtitle = fmt.Sprintf("Switch to the %s driver for your %s graphics. Needs a restart.", recommended, hardware)
 	case recommended != "":
-		row.Subtitle = fmt.Sprintf("%s detected — switch to the %s image, then restart", hardware, recommended)
+		row.Subtitle = fmt.Sprintf("Switch to the %s driver. Needs a restart.", recommended)
 	case current != "" && hardware != "":
-		row.Subtitle = fmt.Sprintf("%s · running the %s image", hardware, current)
+		row.Subtitle = fmt.Sprintf("Using the %s driver for your %s graphics.", current, hardware)
+	case current != "":
+		row.Subtitle = fmt.Sprintf("Using the %s driver.", current)
 	case hardware != "":
-		row.Subtitle = hardware
+		row.Subtitle = fmt.Sprintf("Your graphics: %s.", hardware)
 	default:
-		row.Subtitle = "No graphics hardware detected"
+		row.Subtitle = "No graphics hardware found."
 	}
 	return row
 }
 
 // GraphicsDriverResultSubtitle returns the subtitle after a driver switch is
-// staged. Like a channel switch it only stages the image, so it never claims
-// the running system changed.
+// requested. Like a channel switch it only downloads the new version, so it
+// never claims the running system changed.
 func GraphicsDriverResultSubtitle(driver string) string {
-	return fmt.Sprintf("Switched to the %s image — restart to apply", driver)
+	return fmt.Sprintf("Restart to use the %s driver.", driver)
 }
 
-// PowerwashRow returns the Powerwash row text. summary comes from
-// internal/powerwash.Summarize's Headline once a run has completed, or "" if
-// no run has happened yet.
-func PowerwashRow(summary string) Row {
-	if summary == "" {
-		return Row{
-			Title:    "Remove Everything I Installed",
-			Subtitle: "Removes every user Flatpak and Distrobox container. Does not touch the system image.",
-		}
+// Recovery rows. These two are not maintenance — they are what a person
+// reaches for when something has already gone wrong — so their text has one
+// job: state the real scope. Neither removes "everything", and a row that
+// implied it would be talking someone out of the action that would have
+// helped them, or into one that does more than they wanted.
+//
+// The confirmation dialogs below are the authority on irreversibility; these
+// rows are the resting text of the page.
+//
+// Flatpak and Distrobox stay named here on purpose: Powerwash removes
+// exactly those and leaves everything on the Apps page (and other
+// containers), so "your apps" alone would claim a wider scope than the
+// action has (#525).
+
+// PowerwashRow returns the Powerwash row text.
+func PowerwashRow() Row {
+	return Row{
+		Title:    "Remove Flatpak Apps and Containers",
+		Subtitle: "Removes every Flatpak app and Distrobox container in your account. Your files and everything on the Apps page stay.",
 	}
-	return Row{Title: "Remove Everything I Installed", Subtitle: summary}
+}
+
+// PowerwashResultSubtitle returns the subtitle after a Powerwash run,
+// counted from internal/powerwash.Summarize. A step whose tool is not
+// installed had nothing to remove, which is neither success nor failure, so
+// a run that skipped everything must not read as though it cleared the
+// machine.
+func PowerwashResultSubtitle(succeeded, failed int) string {
+	switch {
+	case failed > 0 && succeeded > 0:
+		return "Some apps or containers couldn't be removed. Try again."
+	case failed > 0:
+		return "Couldn't remove anything. Try again."
+	case succeeded > 0:
+		return "Removed your Flatpak apps and containers."
+	default:
+		return "There was nothing to remove."
+	}
 }
 
 // PowerwashConfirmation returns the title and body of the confirmation
 // dialog Powerwash must show before it runs, since removing every installed
 // application and container cannot be undone from within ChairLift.
 func PowerwashConfirmation() (title, body string) {
-	return "Remove Everything I Installed?",
-		"This removes every Flatpak application and every Distrobox container " +
-			"for your account. It does not touch the system image or your files. " +
-			"This cannot be undone."
+	return "Remove Flatpak Apps and Containers?",
+		"Every Flatpak app and Distrobox container in your account will be removed. " +
+			"Your files and everything on the Apps page stay. " +
+			"This can't be undone."
 }
 
 // FactoryResetRow returns the Factory Reset row text.
 func FactoryResetRow() Row {
 	return Row{
-		Title:    "Factory Reset",
-		Subtitle: "Replaces the system with a fresh install of the current image, discarding local changes",
+		Title:    "Reset This Computer",
+		Subtitle: "Reinstall the operating system the next time you restart. Your files and apps stay.",
 	}
 }
 
 // FactoryResetConfirmation returns the title and body of the confirmation
-// dialog Factory Reset must show before it runs. The body names
-// --experimental explicitly — bootc's own reset path is not stabilized
-// upstream, and a confirmation that omitted that fact would be hiding the
-// one piece of information most likely to change a user's mind.
+// dialog Factory Reset must show before it runs. The body says plainly that
+// the reset method is still experimental — bootc's reset path is not
+// stabilized upstream (it runs with --experimental), and a confirmation that
+// omitted that fact would be hiding the one piece of information most likely
+// to change a user's mind.
 func FactoryResetConfirmation() (title, body string) {
-	return "Factory Reset This System?",
-		"This discards every local change and reinstalls the current system " +
-			"image from scratch, using bootc's --experimental reset path. " +
-			"Your applications and home directory are not touched, but this " +
-			"cannot be undone. The reset applies at the next restart."
+	return "Factory Reset This Computer?",
+		"The operating system will be reinstalled and any changes made to it " +
+			"will be lost. Your files and apps stay. This uses a reset method " +
+			"that is still experimental, and it can't be undone. " +
+			"The reset happens the next time you restart."
 }
 
 // FactoryResetResultSubtitle returns the subtitle after a factory reset is
 // applied. Like a channel switch it only stages the change.
 func FactoryResetResultSubtitle() string {
-	return "Factory reset applied — restart to complete it"
+	return "Restart to finish resetting this computer."
 }
+
+// KVMAccessNeedsNewLogin is shown after virtualization access was granted to
+// an account whose current session cannot use it yet. devtools.ErrNewLogin's
+// own text is a Go error string, lower-case and phrased for a log.
+const KVMAccessNeedsNewLogin = "Virtualization access granted. Log out and back in, then turn on WSL Mode again."

@@ -8,14 +8,19 @@
 # user-writable table would let any local user redirect an authenticated
 # system switch.
 #
-# ChairLift already knows the three Bluefin-family images:
+# ChairLift already knows the Bluefin-family images:
 #
 #   ghcr.io/ublue-os/bluefin            lts <-> lts-testing, lts-hwe <-> lts-hwe-testing
-#                                       (latest/stable/gts/beta publish no
+#                                       (latest/stable publish no
 #                                       testing tag, so those hosts show the
 #                                       switch as unavailable)
 #   ghcr.io/projectbluefin/bluefin-lts  lts, stable -> testing; testing -> stable
 #   ghcr.io/projectbluefin/dakota       latest, stable -> testing; testing -> stable
+#   ghcr.io/projectbluefin/dakota-gaming
+#                                       stable -> testing; testing -> stable
+#                                       (the gaming image publishes no
+#                                       "latest" tag, so a host on one is
+#                                       recognized as no stream at all)
 #
 # Entries here are overlaid on those. A key that matches a built-in replaces
 # it outright, so an override can remove a mapping as well as add one; any
@@ -23,7 +28,11 @@
 #
 # Every entry is validated before it is applied. A file that would produce a
 # reference ChairLift cannot switch back from, or that maps to a tag the
-# image does not declare, is rejected whole rather than partly applied.
+# image does not declare, is rejected whole rather than partly applied. The
+# file must also contain exactly one YAML document: content after a `---`
+# boundary is rejected rather than silently ignored, because the privileged
+# helper resolves `bootc switch` targets through this same table and must
+# never resolve a mapping the GUI did not read.
 
 images:
   # A TunaOS desktop image published with latest/stable/testing streams.
@@ -53,3 +62,41 @@ images:
       latest: testing
     to_stable:
       testing: latest
+
+# Drivers table:
+# Overrides the graphics-driver variant table in the same file. The privileged
+# helper resolves driver switches through this table just as it resolves channel
+# switches. A second file would be a second chance for the GUI and helper to disagree.
+#
+# Keys in `drivers:` must be the base image path (full registry path, without a tag
+# or a driver variant suffix like -nvidia).
+#
+# Supported driver flavours:
+#   standard: base image with open-source drivers (AMD/Intel) - REQUIRED
+#   nvidia: proprietary NVIDIA driver (switches to <base>-nvidia:<tag>)
+#   nvidia-open: NVIDIA open kernel modules (switches to <base>-nvidia-open:<tag>)
+#
+# The driver suffix is inserted ahead of a trailing flavour suffix rather
+# than appended, because that is how the images are published: the NVIDIA
+# variant of ghcr.io/projectbluefin/dakota-gaming is dakota-nvidia-gaming,
+# not dakota-gaming-nvidia.
+#
+# The `standard` driver entry is mandatory and must declare a non-empty stream
+# list, so a host on a driver image can always switch back to the base image.
+# Each flavour lists the published streams/tags. A driver switch is only
+# offered when the running stream appears in that flavour's stream list.
+
+drivers:
+  # TunaOS desktop image with standard and NVIDIA driver variants.
+  ghcr.io/tuna-os/tromso:
+    standard:
+      - latest
+      - stable
+    nvidia:
+      - latest
+
+  ghcr.io/tuna-os/razorfin:
+    standard:
+      - latest
+    nvidia:
+      - latest

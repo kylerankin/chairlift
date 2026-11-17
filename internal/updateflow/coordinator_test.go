@@ -1,0 +1,1381 @@
+package updateflow
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/projectbluefin/chairlift/internal/userprefs"
+)
+
+func TestCoordinatorChecksStartConcurrently(t *testing.T) {
+	started := make(chan SourceID, 2)
+	release := make(chan struct{})
+	providers := []*testProvider{
+		{
+			id:        Applications,
+			available: true,
+			check: func(context.Context) (CheckResult, error) {
+				started <- Applications
+				<-release
+				return CheckResult{}, nil
+			},
+		},
+		{
+			id:        DeveloperTools,
+			available: true,
+			check: func(context.Context) (CheckResult, error) {
+				started <- DeveloperTools
+				<-release
+				return CheckResult{}, nil
+			},
+		},
+	}
+	c := New(providerInterfaces(providers), nil)
+
+	result := make(chan Snapshot, 1)
+	go func() {
+		result <- c.Check(context.Background(), allPreferences(), enabledConfiguration(), nil)
+	}()
+
+	waitForSources(t, started, Applications, DeveloperTools)
+	close(release)
+
+	select {
+	case got := <-result:
+		if got.Phase != PhaseReady {
+			t.Fatalf("phase = %v, want %v", got.Phase, PhaseReady)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("concurrent check did not finish")
+	}
+}
+
+func TestCoordinatorNewerCheckPublishesFinalStateOnly(t *testing.T) {
+	oldStarted := make(chan struct{})
+	releaseOld := make(chan struct{})
+	var calls atomic.Int32
+	provider := &testProvider{
+		id:        Applications,
+		available: true,
+		check: func(context.Context) (CheckResult, error) {
+			if calls.Add(1) == 1 {
+				close(oldStarted)
+				<-releaseOld
+				return CheckResult{Items: []Item{{Name: "old"}}}, nil
+			}
+			return CheckResult{Items: []Item{{Name: "new"}}}, nil
+		},
+	}
+	c := New([]Provider{provider}, nil)
+
+	var mu sync.Mutex
+	var published []Snapshot
+	publish := func(snapshot Snapshot) {
+		mu.Lock()
+		published = append(published, snapshot)
+		mu.Unlock()
+	}
+
+	oldResult := make(chan Snapshot, 1)
+	go func() {
+		oldResult <- c.Check(context.Background(), allPreferences(), enabledConfiguration(), publish)
+	}()
+	<-oldStarted
+
+	newResult := make(chan Snapshot, 1)
+	go func() {
+		newResult <- c.Check(context.Background(), allPreferences(), enabledConfiguration(), publish)
+	}()
+
+	var current Snapshot
+	select {
+	case current = <-newResult:
+	case <-time.After(time.Second):
+		t.Fatal("newer check did not finish")
+	}
+	close(releaseOld)
+
+	select {
+	case <-oldResult:
+	case <-time.After(time.Second):
+		t.Fatal("older check did not finish")
+	}
+
+	if len(current.Sources) != 1 || len(current.Sources[0].Items) != 1 ||
+		current.Sources[0].Items[0].Name != "new" {
+		t.Fatalf("newer result = %#v, want new item", current)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	for _, snapshot := range published {
+		if snapshot.Generation > current.Generation {
+			t.Fatalf("published generation %d after current generation %d", snapshot.Generation, current.Generation)
+		}
+		if snapshot.Generation == current.Generation &&
+			snapshot.Phase == PhaseReady &&
+			len(snapshot.Sources[0].Items) == 1 &&
+			snapshot.Sources[0].Items[0].Name == "old" {
+			t.Fatal("older final state was published as the newer generation")
+		}
+	}
+}
+
+func TestCoordinatorFailedCheckRetainsLastKnownItemsAndRestart(t *testing.T) {
+	checkErr := errors.New("check failed")
+	var checks atomic.Int32
+	provider := &testProvider{
+		id:        Applications,
+		available: true,
+		check: func(context.Context) (CheckResult, error) {
+			if checks.Add(1) == 1 {
+				return CheckResult{
+					Items:           []Item{{Name: "known"}},
+					RestartRequired: true,
+				}, nil
+			}
+			return CheckResult{
+				Items:           []Item{{Name: "partial"}},
+				RestartRequired: false,
+			}, checkErr
+		},
+	}
+	c := New([]Provider{provider}, nil)
+
+	c.Check(context.Background(), allPreferences(), enabledConfiguration(), nil)
+	got := c.Check(context.Background(), allPreferences(), enabledConfiguration(), nil)
+
+	source := got.Sources[0]
+	if !errors.Is(source.CheckErr, checkErr) {
+		t.Fatalf("check error = %v, want %v", source.CheckErr, checkErr)
+	}
+	if len(source.Items) != 1 || source.Items[0].Name != "known" {
+		t.Fatalf("failed-check items = %#v, want last known item", source.Items)
+	}
+	if !source.RestartRequired {
+		t.Fatal("failed check cleared the last-known restart requirement")
+	}
+}
+
+func TestCoordinatorKeepsPrinterUpdatesAlongsideCheckWarnings(t *testing.T) {
+	provider := &testProvider{
+		id:        PrinterDrivers,
+		available: true,
+		check: func(context.Context) (CheckResult, error) {
+			return CheckResult{
+				Items:    []Item{{ID: "hplip", Name: "HPLIP"}},
+				Warnings: []string{"Ghostscript"},
+			}, nil
+		},
+	}
+	prefs := allPreferences()
+	prefs.PrinterDrivers = true
+	policy := enabledConfiguration()
+	policy[PrinterDrivers] = Policy{Configured: true, Supported: true}
+
+	got := New([]Provider{provider}, nil).Check(context.Background(), prefs, policy, nil)
+	if got.Phase != PhaseReady || got.Action != ActionUpdateAll || got.TotalUpdates != 1 {
+		t.Fatalf("partial check snapshot = %#v, want an actionable update", got)
+	}
+	source := got.Sources[0]
+	if len(source.Items) != 1 || source.Items[0].Name != "HPLIP" {
+		t.Fatalf("items = %#v, want HPLIP retained", source.Items)
+	}
+	if len(source.CheckWarnings) != 1 || source.CheckWarnings[0] != "Ghostscript" {
+		t.Fatalf("check warnings = %#v, want Ghostscript", source.CheckWarnings)
+	}
+}
+
+func TestCoordinatorDoesNotReportUpToDateWhenEveryPrinterCheckWarns(t *testing.T) {
+	provider := &testProvider{
+		id:        PrinterDrivers,
+		available: true,
+		check: func(context.Context) (CheckResult, error) {
+			return CheckResult{Warnings: []string{"Ghostscript"}}, nil
+		},
+	}
+	prefs := allPreferences()
+	prefs.PrinterDrivers = true
+	policy := enabledConfiguration()
+	policy[PrinterDrivers] = Policy{Configured: true, Supported: true}
+
+	got := New([]Provider{provider}, nil).Check(context.Background(), prefs, policy, nil)
+	if got.Phase != PhaseCheckFailed || got.Action != ActionCheck {
+		t.Fatalf("partial check snapshot = %#v, want retryable check failure", got)
+	}
+	if !sameIDs(got.FailedSources, []SourceID{PrinterDrivers}) {
+		t.Fatalf("failed sources = %#v, want printer drivers", got.FailedSources)
+	}
+}
+
+func TestCoordinatorSerializesGenerationStartWithPublication(t *testing.T) {
+	provider := &testProvider{
+		id:        Applications,
+		available: true,
+		check: func(context.Context) (CheckResult, error) {
+			return CheckResult{}, nil
+		},
+	}
+	c := New([]Provider{provider}, nil)
+	finalPublished := make(chan struct{})
+	releasePublication := make(chan struct{})
+	var finalOnce sync.Once
+	publish := func(snapshot Snapshot) {
+		if snapshot.Generation == 1 && snapshot.Phase == PhaseReady {
+			finalOnce.Do(func() {
+				close(finalPublished)
+				<-releasePublication
+			})
+		}
+	}
+
+	firstResult := make(chan Snapshot, 1)
+	go func() {
+		firstResult <- c.Check(context.Background(), allPreferences(), enabledConfiguration(), publish)
+	}()
+	<-finalPublished
+
+	secondResult := make(chan Snapshot, 1)
+	go func() {
+		secondResult <- c.Check(context.Background(), allPreferences(), enabledConfiguration(), publish)
+	}()
+
+	advanced := false
+	deadline := time.NewTimer(200 * time.Millisecond)
+	ticker := time.NewTicker(time.Millisecond)
+	defer deadline.Stop()
+	defer ticker.Stop()
+poll:
+	for {
+		if c.generation.Load() > 1 {
+			advanced = true
+			break
+		}
+		select {
+		case <-deadline.C:
+			break poll
+		case <-ticker.C:
+		}
+	}
+
+	close(releasePublication)
+	select {
+	case <-firstResult:
+	case <-time.After(time.Second):
+		t.Fatal("first check did not finish after publication was released")
+	}
+	select {
+	case <-secondResult:
+	case <-time.After(time.Second):
+		t.Fatal("second check did not finish after publication was released")
+	}
+	if advanced {
+		t.Fatal("new generation started while an older snapshot was publishing")
+	}
+}
+
+func TestCoordinatorUpdateWaitsForBlockedCheck(t *testing.T) {
+	checkStarted := make(chan struct{})
+	releaseCheck := make(chan struct{})
+	checkFinished := make(chan struct{})
+	applyEntered := make(chan struct{})
+	applyStarted := make(chan struct{})
+	releaseApply := make(chan struct{})
+	provider := &testProvider{
+		id:        Applications,
+		available: true,
+		check: func(context.Context) (CheckResult, error) {
+			close(checkStarted)
+			<-releaseCheck
+			close(checkFinished)
+			return CheckResult{}, nil
+		},
+		apply: func(context.Context, []Item, func(Progress)) (ApplyResult, error) {
+			close(applyStarted)
+			select {
+			case <-checkFinished:
+			default:
+				t.Error("provider Apply entered before the blocked check finished")
+			}
+			close(applyEntered)
+			<-releaseApply
+			return ApplyResult{Changed: true}, nil
+		},
+	}
+	c := New([]Provider{provider}, nil)
+	current := Snapshot{
+		Phase:  PhaseReady,
+		Action: ActionUpdateAll,
+		Sources: []SourceState{{
+			ID:         Applications,
+			Configured: true,
+			Available:  true,
+			Enabled:    true,
+			Items:      []Item{{Name: "update"}},
+		}},
+		TotalUpdates: 1,
+	}
+
+	checkDone := make(chan struct{})
+	go func() {
+		c.Check(context.Background(), allPreferences(), enabledConfiguration(), nil)
+		close(checkDone)
+	}()
+	select {
+	case <-checkStarted:
+	case <-time.After(time.Second):
+		t.Fatal("check did not start")
+	}
+
+	updateDone := make(chan struct{})
+	go func() {
+		c.UpdateAll(context.Background(), current, allPreferences(), nil)
+		close(updateDone)
+	}()
+
+	select {
+	case <-applyEntered:
+		t.Fatal("mutation entered provider Apply while a check was blocked")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(releaseCheck)
+	select {
+	case <-checkDone:
+	case <-time.After(time.Second):
+		t.Fatal("check did not finish")
+	}
+
+	select {
+	case <-applyStarted:
+	case <-time.After(time.Second):
+		t.Fatal("mutation did not start after the check finished")
+	}
+	close(releaseApply)
+	select {
+	case <-updateDone:
+	case <-time.After(time.Second):
+		t.Fatal("mutation did not finish")
+	}
+}
+
+func TestCoordinatorCheckWaitsForBlockedMutation(t *testing.T) {
+	applyStarted := make(chan struct{})
+	releaseApply := make(chan struct{})
+	checkEntered := make(chan struct{})
+	provider := &testProvider{
+		id:        Applications,
+		available: true,
+		check: func(context.Context) (CheckResult, error) {
+			close(checkEntered)
+			return CheckResult{}, nil
+		},
+		apply: func(context.Context, []Item, func(Progress)) (ApplyResult, error) {
+			close(applyStarted)
+			<-releaseApply
+			return ApplyResult{Changed: true}, nil
+		},
+	}
+	c := New([]Provider{provider}, nil)
+	current := Snapshot{
+		Phase:  PhaseReady,
+		Action: ActionUpdateAll,
+		Sources: []SourceState{{
+			ID:         Applications,
+			Configured: true,
+			Available:  true,
+			Enabled:    true,
+			Items:      []Item{{Name: "update"}},
+		}},
+		TotalUpdates: 1,
+	}
+
+	updateDone := make(chan struct{})
+	go func() {
+		c.UpdateAll(context.Background(), current, allPreferences(), nil)
+		close(updateDone)
+	}()
+	select {
+	case <-applyStarted:
+	case <-time.After(time.Second):
+		t.Fatal("mutation did not start")
+	}
+
+	checkDone := make(chan struct{})
+	go func() {
+		c.Check(context.Background(), allPreferences(), enabledConfiguration(), nil)
+		close(checkDone)
+	}()
+	select {
+	case <-checkEntered:
+		t.Fatal("check entered provider Check while mutation was running")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(releaseApply)
+	select {
+	case <-updateDone:
+	case <-time.After(time.Second):
+		t.Fatal("mutation did not finish")
+	}
+	select {
+	case <-checkEntered:
+	case <-time.After(time.Second):
+		t.Fatal("check did not enter after the mutation finished")
+	}
+	select {
+	case <-checkDone:
+	case <-time.After(time.Second):
+		t.Fatal("check did not finish")
+	}
+}
+
+func TestCoordinatorCheckKeepsSourceRolesDistinct(t *testing.T) {
+	disabled := &testProvider{id: Applications, available: true}
+	unavailable := &testProvider{id: DeveloperTools, available: false}
+	enabled := &testProvider{
+		id:        SystemComponents,
+		available: true,
+		check: func(context.Context) (CheckResult, error) {
+			return CheckResult{Items: []Item{{Name: "component"}}}, nil
+		},
+	}
+	// The provider's own probe succeeds, but the host capability floor
+	// cannot back the source: it is unavailable, not administrator-disabled,
+	// and it is never checked.
+	unsupported := &testProvider{
+		id:        OperatingSystem,
+		available: true,
+		check: func(context.Context) (CheckResult, error) {
+			return CheckResult{Items: []Item{{Name: "image"}}}, nil
+		},
+	}
+	c := New(providerInterfaces([]*testProvider{disabled, unavailable, enabled, unsupported}), nil)
+	values := userprefs.Values{SystemComponents: true, OperatingSystem: true}
+	got := c.Check(context.Background(), values, map[SourceID]Policy{
+		Applications:     {Configured: false, Supported: true},
+		DeveloperTools:   {Configured: true, Supported: true},
+		SystemComponents: {Configured: true, Supported: true},
+		OperatingSystem:  {Configured: true, Supported: false},
+	}, nil)
+
+	if len(got.Sources) != 4 {
+		t.Fatalf("sources = %d, want 4", len(got.Sources))
+	}
+	if got.Sources[0].Configured || !got.Sources[0].Available || got.Sources[0].Enabled {
+		t.Fatalf("administrator-disabled source = %#v", got.Sources[0])
+	}
+	if !got.Sources[1].Configured || got.Sources[1].Available || got.Sources[1].Enabled {
+		t.Fatalf("runtime-unavailable source = %#v", got.Sources[1])
+	}
+	if !got.Sources[2].Configured || !got.Sources[2].Available || !got.Sources[2].Enabled {
+		t.Fatalf("enabled source = %#v", got.Sources[2])
+	}
+	if !got.Sources[3].Configured || got.Sources[3].Available || got.Sources[3].Enabled || len(got.Sources[3].Items) != 0 {
+		t.Fatalf("capability-unsupported source = %#v", got.Sources[3])
+	}
+	if got.TotalUpdates != 1 {
+		t.Fatalf("total updates = %d, want 1", got.TotalUpdates)
+	}
+}
+
+func TestCoordinatorAppliesInConstructorOrder(t *testing.T) {
+	var mu sync.Mutex
+	var order []SourceID
+	providers := []*testProvider{
+		{
+			id:        SystemComponents,
+			available: true,
+			apply: func(context.Context, []Item, func(Progress)) (ApplyResult, error) {
+				mu.Lock()
+				order = append(order, SystemComponents)
+				mu.Unlock()
+				return ApplyResult{Changed: true}, nil
+			},
+		},
+		{
+			id:        Applications,
+			available: true,
+			apply: func(context.Context, []Item, func(Progress)) (ApplyResult, error) {
+				mu.Lock()
+				order = append(order, Applications)
+				mu.Unlock()
+				return ApplyResult{Changed: true}, nil
+			},
+		},
+		{
+			id:        OperatingSystem,
+			available: true,
+			apply: func(context.Context, []Item, func(Progress)) (ApplyResult, error) {
+				mu.Lock()
+				order = append(order, OperatingSystem)
+				mu.Unlock()
+				return ApplyResult{Changed: true}, nil
+			},
+		},
+	}
+	current := Snapshot{Sources: []SourceState{
+		{ID: SystemComponents, Configured: true, Available: true, Enabled: true, Items: []Item{{Name: "system"}}},
+		{ID: Applications, Configured: true, Available: true, Enabled: true, Items: []Item{{Name: "app"}}},
+		{ID: OperatingSystem, Configured: true, Available: true, Enabled: true, Items: []Item{{Name: "os"}}},
+	}}
+
+	got := New(providerInterfaces(providers), nil).UpdateAll(
+		context.Background(), current, allPreferences(), nil,
+	)
+	if got.Phase != PhaseReady {
+		t.Fatalf("phase = %v, want %v", got.Phase, PhaseReady)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !sameIDs(order, []SourceID{SystemComponents, Applications, OperatingSystem}) {
+		t.Fatalf("apply order = %#v, want constructor order", order)
+	}
+}
+
+func TestCoordinatorKeepsPendingItemsWhenApplyReportsUnchanged(t *testing.T) {
+	provider := &testProvider{
+		id:        Applications,
+		available: true,
+		apply: func(context.Context, []Item, func(Progress)) (ApplyResult, error) {
+			// A provider whose command exited 0 without applying anything:
+			// no error, but no verified mutation either.
+			return ApplyResult{Changed: false}, nil
+		},
+	}
+	current := Snapshot{Sources: []SourceState{
+		{ID: Applications, Configured: true, Available: true, Enabled: true, Items: []Item{{Name: "Compass"}}},
+	}}
+
+	got := New([]Provider{provider}, nil).UpdateAll(
+		context.Background(), current, allPreferences(), nil,
+	)
+	source := got.Sources[0]
+	if source.Completed {
+		t.Fatal("unchanged source was marked completed")
+	}
+	if len(source.Items) != 1 {
+		t.Fatalf("unchanged source items = %#v, want the pending item retained", source.Items)
+	}
+	if len(got.CompletedSources) != 0 {
+		t.Fatalf("completed sources = %#v, want none", got.CompletedSources)
+	}
+	if got.TotalUpdates != 1 {
+		t.Fatalf("total updates = %d, want the pending item still counted", got.TotalUpdates)
+	}
+	if source.ApplyErr == nil || !sameIDs(got.FailedSources, []SourceID{Applications}) {
+		t.Fatalf("unapplied source has no failure: error=%v failed=%v", source.ApplyErr, got.FailedSources)
+	}
+	if got.Phase != PhasePartialFailure || got.Action != ActionRetryFailed {
+		t.Fatalf("phase/action = %v/%v, want partial-failure/retry-failed", got.Phase, got.Action)
+	}
+}
+
+func TestCoordinatorSkipsMaintenanceWhenNothingChanged(t *testing.T) {
+	var runs atomic.Int32
+	maintenance := &testMaintenance{
+		run: func(context.Context, func(Progress)) error {
+			runs.Add(1)
+			return nil
+		},
+	}
+	provider := &testProvider{
+		id:        Applications,
+		available: true,
+		apply: func(context.Context, []Item, func(Progress)) (ApplyResult, error) {
+			return ApplyResult{Changed: false}, nil
+		},
+	}
+	current := Snapshot{Sources: []SourceState{
+		{ID: Applications, Configured: true, Available: true, Enabled: true, Items: []Item{{Name: "app"}}},
+	}}
+
+	got := New([]Provider{provider}, maintenance).UpdateAll(
+		context.Background(), current,
+		userprefs.Values{Applications: true, MaintenanceAfterUpdates: true},
+		nil,
+	)
+	if runs.Load() != 0 {
+		t.Fatal("maintenance ran although the source changed nothing")
+	}
+	if got.MaintenanceRan {
+		t.Fatal("maintenance marked as run although the source changed nothing")
+	}
+}
+
+func TestCoordinatorContinuesAfterApplyFailure(t *testing.T) {
+	applyErr := errors.New("first provider failed")
+	var secondCalled atomic.Bool
+	first := &testProvider{
+		id:        Applications,
+		available: true,
+		apply: func(context.Context, []Item, func(Progress)) (ApplyResult, error) {
+			return ApplyResult{}, applyErr
+		},
+	}
+	second := &testProvider{
+		id:        DeveloperTools,
+		available: true,
+		apply: func(context.Context, []Item, func(Progress)) (ApplyResult, error) {
+			secondCalled.Store(true)
+			return ApplyResult{Changed: true}, nil
+		},
+	}
+	current := Snapshot{Sources: []SourceState{
+		{ID: Applications, Configured: true, Available: true, Enabled: true, Items: []Item{{Name: "app"}}},
+		{ID: DeveloperTools, Configured: true, Available: true, Enabled: true, Items: []Item{{Name: "tool"}}},
+	}}
+
+	got := New([]Provider{first, second}, nil).UpdateAll(
+		context.Background(), current, allPreferences(), nil,
+	)
+	if !secondCalled.Load() {
+		t.Fatal("later provider was not attempted after an earlier failure")
+	}
+	if got.Phase != PhasePartialFailure {
+		t.Fatalf("phase = %v, want %v", got.Phase, PhasePartialFailure)
+	}
+	if !sameIDs(got.FailedSources, []SourceID{Applications}) {
+		t.Fatalf("failed sources = %#v, want applications", got.FailedSources)
+	}
+	if len(got.CompletedSources) != 1 || got.CompletedSources[0] != DeveloperTools {
+		t.Fatalf("completed sources = %#v, want developer tools", got.CompletedSources)
+	}
+}
+
+func TestCoordinatorRetryIncludesOnlyApplyFailures(t *testing.T) {
+	var firstCalls atomic.Int32
+	var secondCalls atomic.Int32
+	first := &testProvider{
+		id:        Applications,
+		available: true,
+		apply: func(context.Context, []Item, func(Progress)) (ApplyResult, error) {
+			firstCalls.Add(1)
+			if firstCalls.Load() == 1 {
+				return ApplyResult{}, errors.New("retry me")
+			}
+			return ApplyResult{Changed: true}, nil
+		},
+	}
+	second := &testProvider{
+		id:        DeveloperTools,
+		available: true,
+		apply: func(context.Context, []Item, func(Progress)) (ApplyResult, error) {
+			secondCalls.Add(1)
+			return ApplyResult{Changed: true}, nil
+		},
+	}
+	current := Snapshot{Sources: []SourceState{
+		{ID: Applications, Configured: true, Available: true, Enabled: true, Items: []Item{{Name: "app"}}},
+		{ID: DeveloperTools, Configured: true, Available: true, Enabled: true, Items: []Item{{Name: "tool"}}},
+	}}
+	c := New([]Provider{first, second}, nil)
+
+	failed := c.UpdateAll(context.Background(), current, allPreferences(), nil)
+	retried := c.UpdateAll(context.Background(), failed, allPreferences(), nil)
+
+	if firstCalls.Load() != 2 {
+		t.Fatalf("failed provider calls = %d, want 2", firstCalls.Load())
+	}
+	if secondCalls.Load() != 1 {
+		t.Fatalf("successful provider calls = %d, want 1", secondCalls.Load())
+	}
+	if retried.Phase != PhaseReady || retried.TotalUpdates != 0 {
+		t.Fatalf("retry result = %#v, want ready with no updates", retried)
+	}
+	if len(retried.CompletedSources) != 2 {
+		t.Fatalf("completed sources = %#v, want both sources", retried.CompletedSources)
+	}
+}
+
+func TestCoordinatorMaintenanceRunsOnceAfterCompleteLiveSuccess(t *testing.T) {
+	var runs atomic.Int32
+	maintenance := &testMaintenance{
+		run: func(context.Context, func(Progress)) error {
+			runs.Add(1)
+			return nil
+		},
+	}
+	provider := &testProvider{
+		id:        Applications,
+		available: true,
+		apply: func(context.Context, []Item, func(Progress)) (ApplyResult, error) {
+			return ApplyResult{Changed: true}, nil
+		},
+	}
+	current := Snapshot{Sources: []SourceState{
+		{ID: Applications, Configured: true, Available: true, Enabled: true, Items: []Item{{Name: "app"}}},
+	}}
+
+	got := New([]Provider{provider}, maintenance).UpdateAll(
+		context.Background(), current,
+		userprefs.Values{Applications: true, MaintenanceAfterUpdates: true},
+		nil,
+	)
+	if runs.Load() != 1 {
+		t.Fatalf("maintenance runs = %d, want 1", runs.Load())
+	}
+	if !got.MaintenanceRan || got.MaintenanceErr != nil {
+		t.Fatalf("maintenance state = ran %v err %v, want successful run", got.MaintenanceRan, got.MaintenanceErr)
+	}
+}
+
+// Post-update maintenance runs after every source finished, so no source is
+// updating; the run is still in progress (cleanup may prompt for a
+// password), and the panel read "System is up to date" with no progress
+// while it ran. Every snapshot published during maintenance stays updating.
+func TestCoordinatorStaysUpdatingWhileMaintenanceRuns(t *testing.T) {
+	var published []Snapshot
+	publish := func(snapshot Snapshot) { published = append(published, snapshot) }
+	var duringRun []Snapshot
+	maintenance := &testMaintenance{
+		run: func(_ context.Context, progress func(Progress)) error {
+			duringRun = append(duringRun, published[len(published)-1])
+			progress(Progress{Source: DeveloperTools, Message: "Removing old downloads"})
+			duringRun = append(duringRun, published[len(published)-1])
+			return nil
+		},
+	}
+	provider := &testProvider{
+		id:        Applications,
+		available: true,
+		apply: func(context.Context, []Item, func(Progress)) (ApplyResult, error) {
+			return ApplyResult{Changed: true}, nil
+		},
+	}
+	current := Snapshot{Sources: []SourceState{
+		{ID: Applications, Configured: true, Available: true, Enabled: true, Items: []Item{{Name: "app"}}},
+	}}
+
+	got := New([]Provider{provider}, maintenance).UpdateAll(
+		context.Background(), current,
+		userprefs.Values{Applications: true, MaintenanceAfterUpdates: true},
+		publish,
+	)
+	if len(duringRun) != 2 {
+		t.Fatalf("maintenance observed %d snapshots, want 2", len(duringRun))
+	}
+	for i, snapshot := range duringRun {
+		if snapshot.Phase != PhaseUpdating || snapshot.Action != ActionNone || !snapshot.Maintaining {
+			t.Errorf("snapshot %d during maintenance = phase %v action %v maintaining %v, want updating with no action",
+				i, snapshot.Phase, snapshot.Action, snapshot.Maintaining)
+		}
+	}
+	if progress := duringRun[1]; progress.Current != DeveloperTools || progress.Progress != "Removing old downloads" {
+		t.Errorf("maintenance progress = %q/%q, want the cleanup step", progress.Current, progress.Progress)
+	}
+	if got.Phase != PhaseReady || got.Maintaining {
+		t.Fatalf("final snapshot = phase %v maintaining %v, want ready once maintenance finished", got.Phase, got.Maintaining)
+	}
+}
+
+func TestCoordinatorRetriesMaintenanceWithoutReapplyingSuccessfulSources(t *testing.T) {
+	maintenanceErr := errors.New("cleanup failed")
+	var applyCalls atomic.Int32
+	var maintenanceCalls atomic.Int32
+	maintenance := &testMaintenance{
+		run: func(context.Context, func(Progress)) error {
+			if maintenanceCalls.Add(1) == 1 {
+				return maintenanceErr
+			}
+			return nil
+		},
+	}
+	provider := &testProvider{
+		id:        Applications,
+		available: true,
+		apply: func(context.Context, []Item, func(Progress)) (ApplyResult, error) {
+			applyCalls.Add(1)
+			return ApplyResult{Changed: true}, nil
+		},
+	}
+	current := Snapshot{Sources: []SourceState{
+		{ID: Applications, Configured: true, Available: true, Enabled: true, Items: []Item{{Name: "app"}}},
+	}}
+	c := New([]Provider{provider}, maintenance)
+	failed := c.UpdateAll(
+		context.Background(), current,
+		userprefs.Values{Applications: true, MaintenanceAfterUpdates: true},
+		nil,
+	)
+	if failed.MaintenanceErr == nil {
+		t.Fatal("initial maintenance failure was not retained")
+	}
+
+	retried := c.UpdateAll(
+		context.Background(), failed,
+		userprefs.Values{Applications: true, MaintenanceAfterUpdates: true},
+		nil,
+	)
+	if applyCalls.Load() != 1 {
+		t.Fatalf("successful provider apply calls = %d, want 1", applyCalls.Load())
+	}
+	if maintenanceCalls.Load() != 2 {
+		t.Fatalf("maintenance calls = %d, want 2", maintenanceCalls.Load())
+	}
+	if retried.MaintenanceErr != nil || !retried.MaintenanceRan {
+		t.Fatalf("maintenance retry state = ran %v err %v, want successful retry",
+			retried.MaintenanceRan, retried.MaintenanceErr)
+	}
+}
+
+func TestCoordinatorSkipsMaintenanceAfterFailure(t *testing.T) {
+	var runs atomic.Int32
+	maintenance := &testMaintenance{
+		run: func(context.Context, func(Progress)) error {
+			runs.Add(1)
+			return nil
+		},
+	}
+	provider := &testProvider{
+		id:        Applications,
+		available: true,
+		apply: func(context.Context, []Item, func(Progress)) (ApplyResult, error) {
+			return ApplyResult{}, errors.New("not installed")
+		},
+	}
+	current := Snapshot{Sources: []SourceState{
+		{ID: Applications, Configured: true, Available: true, Enabled: true, Items: []Item{{Name: "app"}}},
+	}}
+
+	got := New([]Provider{provider}, maintenance).UpdateAll(
+		context.Background(), current,
+		userprefs.Values{Applications: true, MaintenanceAfterUpdates: true},
+		nil,
+	)
+	if runs.Load() != 0 {
+		t.Fatal("maintenance ran after an update failure")
+	}
+	if got.MaintenanceRan {
+		t.Fatal("maintenance marked as run after an update failure")
+	}
+}
+
+func TestCoordinatorSkipsMaintenanceDuringPreview(t *testing.T) {
+	var runs atomic.Int32
+	maintenance := &testMaintenance{
+		run: func(context.Context, func(Progress)) error {
+			runs.Add(1)
+			return nil
+		},
+	}
+	provider := &testProvider{
+		id:        Applications,
+		available: true,
+		apply: func(context.Context, []Item, func(Progress)) (ApplyResult, error) {
+			return ApplyResult{Preview: true}, nil
+		},
+	}
+	current := Snapshot{Sources: []SourceState{
+		{ID: Applications, Configured: true, Available: true, Enabled: true, Items: []Item{{Name: "app"}}},
+	}}
+
+	got := New([]Provider{provider}, maintenance).UpdateAll(
+		context.Background(), current,
+		userprefs.Values{Applications: true, MaintenanceAfterUpdates: true},
+		nil,
+	)
+	if runs.Load() != 0 {
+		t.Fatal("maintenance ran during a preview")
+	}
+	if !got.Preview || got.Sources[0].Completed || got.TotalUpdates != 1 {
+		t.Fatalf("preview result = %#v, want unchanged actionable state", got)
+	}
+}
+
+func TestCoordinatorRetryPreservesPreviewPendingBeforeMaintenance(t *testing.T) {
+	maintenance := &testMaintenance{
+		run: func(context.Context, func(Progress)) error {
+			t.Fatal("maintenance ran while preview work remained pending")
+			return nil
+		},
+	}
+	var firstCalls atomic.Int32
+	var secondCalls atomic.Int32
+	first := &testProvider{
+		id:        Applications,
+		available: true,
+		apply: func(context.Context, []Item, func(Progress)) (ApplyResult, error) {
+			firstCalls.Add(1)
+			return ApplyResult{Preview: true}, nil
+		},
+	}
+	second := &testProvider{
+		id:        DeveloperTools,
+		available: true,
+		apply: func(context.Context, []Item, func(Progress)) (ApplyResult, error) {
+			if secondCalls.Add(1) == 1 {
+				return ApplyResult{}, errors.New("retry me")
+			}
+			return ApplyResult{Changed: true}, nil
+		},
+	}
+	current := Snapshot{Sources: []SourceState{
+		{ID: Applications, Configured: true, Available: true, Enabled: true, Items: []Item{{Name: "app"}}},
+		{ID: DeveloperTools, Configured: true, Available: true, Enabled: true, Items: []Item{{Name: "tool"}}},
+	}}
+	c := New([]Provider{first, second}, maintenance)
+	failed := c.UpdateAll(
+		context.Background(), current,
+		userprefs.Values{Applications: true, DeveloperTools: true, MaintenanceAfterUpdates: true},
+		nil,
+	)
+	retried := c.UpdateAll(
+		context.Background(), failed,
+		userprefs.Values{Applications: true, DeveloperTools: true, MaintenanceAfterUpdates: true},
+		nil,
+	)
+
+	if firstCalls.Load() != 1 {
+		t.Fatalf("preview provider apply calls = %d, want 1", firstCalls.Load())
+	}
+	if secondCalls.Load() != 2 {
+		t.Fatalf("failed provider apply calls = %d, want 2", secondCalls.Load())
+	}
+	if retried.Preview != true {
+		t.Fatal("retry cleared the pending preview state")
+	}
+	if len(retried.Sources[0].Items) != 1 || retried.Sources[0].Completed {
+		t.Fatalf("preview source after retry = %#v, want pending incomplete source",
+			retried.Sources[0])
+	}
+	if retried.TotalUpdates != 1 {
+		t.Fatalf("pending updates after retry = %d, want 1", retried.TotalUpdates)
+	}
+}
+
+func TestCoordinatorBusyRejectsOverlappingMutations(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	provider := &testProvider{
+		id:        Applications,
+		available: true,
+		apply: func(context.Context, []Item, func(Progress)) (ApplyResult, error) {
+			close(started)
+			<-release
+			return ApplyResult{Changed: true}, nil
+		},
+	}
+	current := Snapshot{Sources: []SourceState{
+		{ID: Applications, Configured: true, Available: true, Enabled: true, Items: []Item{{Name: "app"}}},
+	}}
+	c := New([]Provider{provider}, nil)
+
+	firstResult := make(chan Snapshot, 1)
+	go func() {
+		firstResult <- c.UpdateAll(context.Background(), current, allPreferences(), nil)
+	}()
+	<-started
+	if !c.Busy() {
+		t.Fatal("coordinator is not busy during mutation")
+	}
+
+	second := c.UpdateAll(context.Background(), current, allPreferences(), nil)
+	if second.Phase != PhaseUpdating || !c.Busy() {
+		t.Fatalf("overlapping mutation result = %#v, busy = %v", second, c.Busy())
+	}
+	close(release)
+
+	select {
+	case <-firstResult:
+	case <-time.After(time.Second):
+		t.Fatal("first mutation did not finish")
+	}
+	if c.Busy() {
+		t.Fatal("coordinator remained busy after mutation")
+	}
+}
+
+func TestCoordinatorPublishesCompleteImmutableSnapshots(t *testing.T) {
+	provider := &testProvider{
+		id:        Applications,
+		available: true,
+		check: func(context.Context) (CheckResult, error) {
+			return CheckResult{Items: []Item{{Name: "app"}}}, nil
+		},
+	}
+	c := New([]Provider{provider}, nil)
+	var publishes int
+	got := c.Check(context.Background(), allPreferences(), enabledConfiguration(), func(snapshot Snapshot) {
+		publishes++
+		if len(snapshot.Sources) != 1 {
+			t.Fatalf("published sources = %d, want 1", len(snapshot.Sources))
+		}
+		if snapshot.Sources[0].Items != nil {
+			snapshot.Sources[0].Items[0].Name = "mutated"
+		}
+		snapshot.CompletedSources = append(snapshot.CompletedSources, OperatingSystem)
+		snapshot.FailedSources = append(snapshot.FailedSources, DeveloperTools)
+	})
+	if publishes < 2 {
+		t.Fatalf("publish count = %d, want checking and final snapshots", publishes)
+	}
+	if got.Sources[0].Items[0].Name != "app" {
+		t.Fatalf("final item = %q, publish callback mutated coordinator state", got.Sources[0].Items[0].Name)
+	}
+	if len(got.CompletedSources) != 0 || len(got.FailedSources) != 0 {
+		t.Fatalf("final source sets = completed %#v failed %#v, publish callback mutated coordinator state",
+			got.CompletedSources, got.FailedSources)
+	}
+}
+
+func TestCoordinatorMaintenanceFailureIsRetained(t *testing.T) {
+	maintenanceErr := errors.New("cleanup failed")
+	maintenance := &testMaintenance{
+		run: func(context.Context, func(Progress)) error {
+			return maintenanceErr
+		},
+	}
+	provider := &testProvider{
+		id:        Applications,
+		available: true,
+		apply: func(context.Context, []Item, func(Progress)) (ApplyResult, error) {
+			return ApplyResult{Changed: true}, nil
+		},
+	}
+	current := Snapshot{Sources: []SourceState{
+		{ID: Applications, Configured: true, Available: true, Enabled: true, Items: []Item{{Name: "app"}}},
+	}}
+	got := New([]Provider{provider}, maintenance).UpdateAll(
+		context.Background(), current,
+		userprefs.Values{Applications: true, MaintenanceAfterUpdates: true},
+		nil,
+	)
+	if !got.MaintenanceRan || !errors.Is(got.MaintenanceErr, maintenanceErr) {
+		t.Fatalf("maintenance error state = ran %v err %v", got.MaintenanceRan, got.MaintenanceErr)
+	}
+	if got.Phase != PhasePartialFailure || got.Action != ActionRetryFailed {
+		t.Fatalf("phase/action = %v/%v, want partial failure/retry", got.Phase, got.Action)
+	}
+}
+
+func allPreferences() userprefs.Values {
+	return userprefs.Values{
+		OperatingSystem:  true,
+		Applications:     true,
+		DeveloperTools:   true,
+		SystemComponents: true,
+	}
+}
+
+func enabledConfiguration() map[SourceID]Policy {
+	return map[SourceID]Policy{
+		OperatingSystem:  {Configured: true, Supported: true},
+		Applications:     {Configured: true, Supported: true},
+		DeveloperTools:   {Configured: true, Supported: true},
+		SystemComponents: {Configured: true, Supported: true},
+	}
+}
+
+type testProvider struct {
+	id        SourceID
+	available bool
+	check     func(context.Context) (CheckResult, error)
+	apply     func(context.Context, []Item, func(Progress)) (ApplyResult, error)
+}
+
+func (p *testProvider) ID() SourceID { return p.id }
+
+func (p *testProvider) Available() bool { return p.available }
+
+func (p *testProvider) Check(ctx context.Context) (CheckResult, error) {
+	if p.check == nil {
+		return CheckResult{}, nil
+	}
+	return p.check(ctx)
+}
+
+func (p *testProvider) Apply(ctx context.Context, items []Item, progress func(Progress)) (ApplyResult, error) {
+	if p.apply == nil {
+		return ApplyResult{Changed: true}, nil
+	}
+	return p.apply(ctx, items, progress)
+}
+
+type testMaintenance struct {
+	run func(context.Context, func(Progress)) error
+}
+
+func (m *testMaintenance) Run(ctx context.Context, progress func(Progress)) error {
+	return m.run(ctx, progress)
+}
+
+func providerInterfaces(providers []*testProvider) []Provider {
+	result := make([]Provider, len(providers))
+	for i, provider := range providers {
+		result[i] = provider
+	}
+	return result
+}
+
+func waitForSources(t *testing.T, started <-chan SourceID, wants ...SourceID) {
+	t.Helper()
+	seen := make(map[SourceID]bool, len(wants))
+	for range wants {
+		select {
+		case got := <-started:
+			seen[got] = true
+		case <-time.After(time.Second):
+			t.Fatalf("not all sources started concurrently: seen %#v", seen)
+		}
+	}
+	for _, want := range wants {
+		if !seen[want] {
+			t.Fatalf("source %s did not start concurrently; seen %#v", want, seen)
+		}
+	}
+}
+
+// A source can only learn during Check that this host cannot back it — the
+// operating-system provider finds out bootc is not booted. That is "Not
+// available on this system", not a failed check: before this, a stage
+// script without a bootc boot turned the whole Updates page into "Unable to
+// check for updates" with the internal error as its description.
+func TestCheckTreatsUnavailableAsUnsupportedNotFailed(t *testing.T) {
+	apps := &testProvider{id: Applications, available: true, check: func(context.Context) (CheckResult, error) {
+		return CheckResult{}, nil
+	}}
+	osSource := &testProvider{id: OperatingSystem, available: true, check: func(context.Context) (CheckResult, error) {
+		return CheckResult{}, fmt.Errorf("bootc is not booted: %w", ErrUnavailable)
+	}}
+	c := New(providerInterfaces([]*testProvider{apps, osSource}), nil)
+	got := c.Check(context.Background(), allPreferences(), enabledConfiguration(), nil)
+
+	if got.Phase == PhaseCheckFailed {
+		t.Fatalf("phase = PhaseCheckFailed; an unavailable source is not a failed check")
+	}
+	source := got.Sources[1]
+	if source.Available || source.Enabled || source.CheckErr != nil {
+		t.Fatalf("unavailable source = %#v, want Available=false, Enabled=false, CheckErr=nil", source)
+	}
+}
+
+func TestCoordinatorFractionTracksStages(t *testing.T) {
+	first := &testProvider{
+		id:        Applications,
+		available: true,
+		apply: func(ctx context.Context, items []Item, progress func(Progress)) (ApplyResult, error) {
+			if progress != nil {
+				progress(Progress{Source: Applications, Message: "halfway", Fraction: 0.5})
+			}
+			return ApplyResult{Changed: true}, nil
+		},
+	}
+	second := &testProvider{
+		id:        DeveloperTools,
+		available: true,
+		apply: func(ctx context.Context, items []Item, progress func(Progress)) (ApplyResult, error) {
+			if progress != nil {
+				progress(Progress{Source: DeveloperTools, Message: "halfway", Fraction: 0.5})
+			}
+			return ApplyResult{Changed: true}, nil
+		},
+	}
+	current := Snapshot{Sources: []SourceState{
+		{ID: Applications, Configured: true, Available: true, Enabled: true, Items: []Item{{Name: "app"}}},
+		{ID: DeveloperTools, Configured: true, Available: true, Enabled: true, Items: []Item{{Name: "tool"}}},
+	}}
+	c := New([]Provider{first, second}, nil)
+
+	type updateSnapshot struct {
+		fraction float64
+		phase    Phase
+	}
+	var snaps []updateSnapshot
+	c.UpdateAll(context.Background(), current, allPreferences(), func(s Snapshot) {
+		snaps = append(snaps, updateSnapshot{fraction: s.Fraction, phase: s.Phase})
+	})
+
+	if len(snaps) == 0 {
+		t.Fatal("no snapshots published")
+	}
+
+	// Verify fractions never decrease while phase is PhaseUpdating
+	var prevFraction float64
+	for i, s := range snaps {
+		if s.phase == PhaseUpdating {
+			if s.fraction < prevFraction {
+				t.Fatalf("fraction decreased from %f to %f at snapshot %d", prevFraction, s.fraction, i)
+			}
+			prevFraction = s.fraction
+		}
+	}
+
+	// Total stages = 2. Stage 1 halfway = (0 + 0.5)/2 = 0.25; stage 1 complete = 1/2 = 0.5.
+	// Stage 2 halfway = (1 + 0.5)/2 = 0.75; stage 2 complete = 2/2 = 1.0.
+	wantFractions := []float64{0.25, 0.5, 0.75, 1.0}
+	for _, want := range wantFractions {
+		found := false
+		for _, s := range snaps {
+			diff := s.fraction - want
+			if diff > -0.001 && diff < 0.001 {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expected fraction %f not found in published snapshots", want)
+		}
+	}
+
+	// Verify clamp against decreasing fractions within a stage
+	descending := &testProvider{
+		id:        Applications,
+		available: true,
+		apply: func(ctx context.Context, items []Item, progress func(Progress)) (ApplyResult, error) {
+			if progress != nil {
+				progress(Progress{Source: Applications, Message: "sixty", Fraction: 0.6})
+				progress(Progress{Source: Applications, Message: "thirty", Fraction: 0.3})
+				progress(Progress{Source: Applications, Message: "zero", Fraction: 0.0})
+			}
+			return ApplyResult{Changed: true}, nil
+		},
+	}
+	descendingCurrent := Snapshot{Sources: []SourceState{
+		{ID: Applications, Configured: true, Available: true, Enabled: true, Items: []Item{{Name: "app"}}},
+	}}
+	descendingCoordinator := New([]Provider{descending}, nil)
+	var descendingSnaps []Snapshot
+	finalSnap := descendingCoordinator.UpdateAll(context.Background(), descendingCurrent, allPreferences(), func(s Snapshot) {
+		descendingSnaps = append(descendingSnaps, s)
+	})
+	var prevF float64
+	for _, s := range descendingSnaps {
+		if s.Phase == PhaseUpdating {
+			if s.Fraction < prevF {
+				t.Fatalf("fraction clamped failed: dropped from %f to %f", prevF, s.Fraction)
+			}
+			prevF = s.Fraction
+		}
+	}
+	if finalSnap.Fraction != 0 {
+		t.Errorf("final snapshot Fraction = %f, want 0", finalSnap.Fraction)
+	}
+
+	// Two runs: run 2 first update snapshot starts from 0
+	var run2FirstUpdateFrac float64
+	var run2Started bool
+	descendingCoordinator.UpdateAll(context.Background(), descendingCurrent, allPreferences(), func(s Snapshot) {
+		if s.Phase == PhaseUpdating && !run2Started {
+			run2FirstUpdateFrac = s.Fraction
+			run2Started = true
+		}
+	})
+	if run2FirstUpdateFrac != 0 {
+		t.Errorf("second run initial update fraction = %f, want 0", run2FirstUpdateFrac)
+	}
+	// Verify unquantified stage has Determinate == false while Fraction > 0
+	unquantifiedFirst := &testProvider{
+		id:        Applications,
+		available: true,
+		apply: func(ctx context.Context, items []Item, progress func(Progress)) (ApplyResult, error) {
+			if progress != nil {
+				progress(Progress{Source: Applications, Message: "done", Fraction: 1.0})
+			}
+			return ApplyResult{Changed: true}, nil
+		},
+	}
+	unquantifiedSecond := &testProvider{
+		id:        DeveloperTools,
+		available: true,
+		apply: func(ctx context.Context, items []Item, progress func(Progress)) (ApplyResult, error) {
+			if progress != nil {
+				// Provider reports progress message with NO fraction
+				progress(Progress{Source: DeveloperTools, Message: "working"})
+			}
+			return ApplyResult{Changed: true}, nil
+		},
+	}
+	unquantifiedCoord := New([]Provider{unquantifiedFirst, unquantifiedSecond}, nil)
+	unquantifiedCurrent := Snapshot{Sources: []SourceState{
+		{ID: Applications, Configured: true, Available: true, Enabled: true, Items: []Item{{Name: "app"}}},
+		{ID: DeveloperTools, Configured: true, Available: true, Enabled: true, Items: []Item{{Name: "tool"}}},
+	}}
+	var stage2UnquantifiedSawDeterminateFalse bool
+	unquantifiedCoord.UpdateAll(context.Background(), unquantifiedCurrent, allPreferences(), func(s Snapshot) {
+		if s.Phase == PhaseUpdating && s.Current == DeveloperTools && s.Progress == "working" {
+			if s.Fraction > 0 && !s.Determinate {
+				stage2UnquantifiedSawDeterminateFalse = true
+			}
+		}
+	})
+	if !stage2UnquantifiedSawDeterminateFalse {
+		t.Error("unquantified stage 2 should have Determinate == false while Fraction > 0 (stage floor)")
+	}
+}
+
+func TestCoordinatorResumesPulsingForUnquantifiedWork(t *testing.T) {
+	for _, maintenanceStage := range []bool{false, true} {
+		name := "provider"
+		if maintenanceStage {
+			name = "maintenance"
+		}
+		t.Run(name, func(t *testing.T) {
+			updates := []Progress{
+				{Message: "downloading", Fraction: 0.6},
+				{Message: "older fraction", Fraction: 0.3},
+				{Message: "deploying"},
+				{Message: "verifying", Fraction: 0.8},
+				{Message: "finishing"},
+			}
+			report := func(progress func(Progress)) {
+				for _, update := range updates {
+					progress(update)
+				}
+			}
+			provider := &testProvider{
+				id:        Applications,
+				available: true,
+				apply: func(_ context.Context, _ []Item, progress func(Progress)) (ApplyResult, error) {
+					if !maintenanceStage {
+						report(progress)
+					}
+					return ApplyResult{Changed: true}, nil
+				},
+			}
+			var maintenance Maintenance
+			if maintenanceStage {
+				maintenance = &testMaintenance{run: func(_ context.Context, progress func(Progress)) error {
+					report(progress)
+					return nil
+				}}
+			}
+			preferences := allPreferences()
+			preferences.MaintenanceAfterUpdates = maintenanceStage
+			current := Snapshot{Sources: []SourceState{
+				{ID: Applications, Configured: true, Available: true, Enabled: true, Items: []Item{{Name: "app"}}},
+			}}
+			var observed []Snapshot
+			final := New([]Provider{provider}, maintenance).UpdateAll(context.Background(), current, preferences, func(snapshot Snapshot) {
+				if snapshot.Progress != "" {
+					observed = append(observed, snapshot)
+				}
+			})
+			if len(observed) != len(updates) {
+				t.Fatalf("progress snapshots = %d, want %d", len(observed), len(updates))
+			}
+			wantFractions := []float64{0.6, 0.6, 0.6, 0.8, 0.8}
+			for i, snapshot := range observed {
+				wantFraction := wantFractions[i]
+				if maintenanceStage {
+					wantFraction = (1 + wantFraction) / 2
+				}
+				if snapshot.Phase != PhaseUpdating || snapshot.Maintaining != maintenanceStage {
+					t.Errorf("%s: phase = %v, maintaining = %v", snapshot.Progress, snapshot.Phase, snapshot.Maintaining)
+				}
+				if snapshot.Determinate != (updates[i].Fraction > 0) || snapshot.Fraction != wantFraction {
+					t.Errorf("%s: determinate = %v, fraction = %v; want %v, %v", snapshot.Progress,
+						snapshot.Determinate, snapshot.Fraction, updates[i].Fraction > 0, wantFraction)
+				}
+			}
+			if final.Phase != PhaseReady || final.Determinate || final.Fraction != 0 {
+				t.Errorf("completion: phase = %v, determinate = %v, fraction = %v", final.Phase, final.Determinate, final.Fraction)
+			}
+		})
+	}
+}

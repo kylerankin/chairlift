@@ -1,10 +1,67 @@
 package updexhelper
 
 import (
+	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/frostyard/updex/v2/updex"
 )
+
+// updex returns a generic error and records each component's failure only in
+// its result. The helper's failure line must name every failed component and
+// its reason, and must not list components that updated.
+func TestUpdateFailureDetailNamesEveryFailedComponent(t *testing.T) {
+	generic := errors.New("one or more components failed to update")
+	tests := []struct {
+		name    string
+		results []updex.UpdateFeaturesResult
+		want    string
+	}{
+		{
+			name: "failures across features",
+			results: []updex.UpdateFeaturesResult{
+				{Feature: "devtools", Results: []updex.UpdateResult{
+					{Component: "docker", Version: "27.1", Installed: true},
+					{Component: "incus", Error: "fetching manifest: 404 Not Found"},
+				}},
+				{Feature: "virt", Results: []updex.UpdateResult{
+					{Component: "qemu", Error: "verifying signature: bad key"},
+				}},
+			},
+			want: "one or more components failed to update: " +
+				"devtools/incus: fetching manifest: 404 Not Found; virt/qemu: verifying signature: bad key",
+		},
+		{
+			name: "no per-component detail",
+			results: []updex.UpdateFeaturesResult{
+				{Feature: "devtools", Results: []updex.UpdateResult{{Component: "docker", Installed: true}}},
+			},
+			want: "one or more components failed to update",
+		},
+		{
+			name: "no results at all",
+			want: "one or more components failed to update",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := UpdateFailureDetail(tt.results, generic)
+			if got != tt.want {
+				t.Errorf("UpdateFailureDetail() = %q, want %q", got, tt.want)
+			}
+			if strings.Contains(got, "docker") {
+				t.Errorf("UpdateFailureDetail() = %q lists a component that updated", got)
+			}
+			if strings.Contains(got, "\n") {
+				t.Errorf("UpdateFailureDetail() = %q spans lines; the GUI shows stderr as one message", got)
+			}
+		})
+	}
+}
 
 func TestParseInvocationAcceptsSupportedShapes(t *testing.T) {
 	tests := []struct {
@@ -129,6 +186,24 @@ func TestUpdateOptions(t *testing.T) {
 		got := UpdateOptions(dryRun)
 		if got.DryRun != dryRun {
 			t.Errorf("UpdateOptions(%v).DryRun = %v, want %v", dryRun, got.DryRun, dryRun)
+		}
+	}
+}
+
+// update downloads every enabled feature's sysext images, so it must not
+// share the configuration-only commands' five-minute budget (#695).
+func TestTimeoutGivesUpdateADownloadBudget(t *testing.T) {
+	if got := Timeout(CommandUpdate); got != UpdateTimeout || got < 30*time.Minute {
+		t.Fatalf("Timeout(update) = %v, want UpdateTimeout (>= 30m)", got)
+	}
+	for _, command := range []string{CommandEnableFeature, CommandDisableFeature} {
+		if got := Timeout(command); got != DefaultTimeout {
+			t.Errorf("Timeout(%s) = %v, want DefaultTimeout", command, got)
+		}
+	}
+	for _, command := range SupportedCommands() {
+		if Timeout(command) <= 0 {
+			t.Errorf("Timeout(%s) is not positive", command)
 		}
 	}
 }

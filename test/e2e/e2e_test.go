@@ -8,6 +8,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -19,6 +21,14 @@ const (
 	startupTimeout  = 30 * time.Second
 	stabilityWindow = time.Second
 	shutdownTimeout = 5 * time.Second
+	// The smoke test's descendants are reparented away from this process
+	// when their leader dies, so they can only be waited for by polling.
+	drainTimeout  = 15 * time.Second
+	drainInterval = 50 * time.Millisecond
+
+	// defaultProcTable is the kernel's process table. The membership scan
+	// below takes it as an argument so a test can point it at a fixture tree.
+	defaultProcTable = "/proc"
 )
 
 func TestApplicationHelp(t *testing.T) {
@@ -37,6 +47,9 @@ func TestApplicationHelp(t *testing.T) {
 		"Usage:",
 		"Application Options:",
 		"--dry-run",
+		"--first-run",
+		"--setup",
+		"--prompt-file",
 		"Don't make any changes to the system.",
 	} {
 		if !bytes.Contains(output, []byte(want)) {
@@ -50,13 +63,24 @@ func TestApplicationStartsInDryRun(t *testing.T) {
 	requireExecutable(t, app)
 
 	dbusRunSession := requireCommand(t, "dbus-run-session")
-	xvfbRun := requireCommand(t, "xvfb-run")
+	requireCommand(t, "mutter")
+	session := filepath.Join(repoRoot(t), "test", "e2e", "wayland_session.sh")
+	requireExecutable(t, session)
+
+	// Startup reads the user's Homebrew inventory, and `brew` populates
+	// $HOME/.cache/Homebrew while it does. Go removes this directory when the
+	// test ends, so the removal has to happen after every one of those writers
+	// is gone; the cleanup registered below is what orders the two.
+	home := t.TempDir()
+	runtimeDir := filepath.Join(home, "runtime")
+	if err := os.Mkdir(runtimeDir, 0o700); err != nil {
+		t.Fatalf("create isolated XDG_RUNTIME_DIR: %v", err)
+	}
 
 	cmd := exec.Command(
 		dbusRunSession,
 		"--",
-		xvfbRun,
-		"-a",
+		session,
 		app,
 		"--dry-run",
 	)
@@ -68,9 +92,18 @@ func TestApplicationStartsInDryRun(t *testing.T) {
 		"NO_AT_BRIDGE=1",
 		"GTK_A11Y=none",
 		"GSETTINGS_BACKEND=memory",
-		"HOME="+t.TempDir(),
+		"G_DEBUG=fatal-criticals",
+		"GDK_DEBUG=no-portals",
+		// wayland_session.sh starts its own headless Mutter in this runtime
+		// directory and hands the application that compositor's absolute
+		// socket, never a developer's live one.
+		"CHAIRLIFT_WAYLAND_LOG_DIR="+runtimeDir,
+		"HOME="+home,
+		"XDG_RUNTIME_DIR="+runtimeDir,
 	)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// A fresh session includes Homebrew children even when they create their own
+	// process groups. Never scan or signal the test runner's shared session.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	output := &lockedBuffer{}
 	cmd.Stdout = output
 	cmd.Stderr = output
@@ -78,8 +111,21 @@ func TestApplicationStartsInDryRun(t *testing.T) {
 		t.Fatalf("start ChairLift dry-run smoke process: %v", err)
 	}
 
+	// Closed as well as sent to: the readiness loop below and the cleanup both
+	// receive from this channel, and a cleanup that blocked waiting for a value
+	// the loop had already taken would hang the E2E run rather than fail it.
 	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
+	go func() {
+		done <- cmd.Wait()
+		close(done)
+	}()
+
+	// Cleanups run last-registered-first, so this one stops the workers before
+	// Go removes the temporary HOME registered above — the ordering issue #91
+	// reported as a nondeterministic `directory not empty`. Registering it
+	// rather than calling it on each exit path also covers the paths that end
+	// in t.Fatal.
+	t.Cleanup(func() { stopProcessSession(t, cmd, done) })
 
 	want := []string{
 		"Running in dry-run mode",
@@ -105,12 +151,18 @@ func TestApplicationStartsInDryRun(t *testing.T) {
 				continue
 			}
 			if time.Since(readyAt) >= stabilityWindow {
-				stopProcessGroup(t, cmd, done)
+				// SIGTERM must quit the application rather than kill it:
+				// only a normal return from main flushes GOCOVERDIR, and
+				// without it the e2e coverage flag read 0% for every GTK
+				// package (issue #306).
+				stopProcessSession(t, cmd, done)
+				if !strings.Contains(output.String(), "main: application exited") {
+					t.Errorf("ChairLift did not exit normally on SIGTERM\noutput:\n%s", output.String())
+				}
 				return
 			}
 		case <-timer.C:
 			missing := missingOutput(output.String(), want)
-			stopProcessGroup(t, cmd, done)
 			t.Fatalf("ChairLift did not become ready within %s; missing %s\noutput:\n%s",
 				startupTimeout, missing, output.String())
 		}
@@ -139,7 +191,7 @@ func TestInstalledBundleAndHelperBoundary(t *testing.T) {
 		"usr/bin/chairlift",
 		"usr/bin/chairlift-wrapper",
 		"usr/bin/chairlift-updex-helper",
-		"usr/bin/chairlift-ublue-helper",
+		"usr/bin/chairlift-helper",
 	}
 	for _, path := range executables {
 		requireExecutable(t, filepath.Join(stage, path))
@@ -148,12 +200,11 @@ func TestInstalledBundleAndHelperBoundary(t *testing.T) {
 	for _, path := range []string{
 		"usr/share/chairlift/config.yml",
 		"usr/share/applications/io.projectbluefin.chairlift.desktop",
+		"usr/share/glib-2.0/schemas/io.projectbluefin.chairlift.livery.gschema.xml",
 		"usr/share/icons/hicolor/scalable/apps/io.projectbluefin.chairlift.svg",
-		"usr/share/icons/hicolor/scalable/apps/io.projectbluefin.chairlift-flower.svg",
 		"usr/share/icons/hicolor/symbolic/apps/io.projectbluefin.chairlift-symbolic.svg",
 		"usr/share/polkit-1/actions/io.projectbluefin.chairlift.bootc.policy",
 		"usr/share/polkit-1/actions/io.projectbluefin.chairlift.updex.policy",
-		"usr/share/polkit-1/actions/io.projectbluefin.chairlift.sysupdate.policy",
 		"usr/share/polkit-1/actions/io.projectbluefin.chairlift.ublue.policy",
 		"usr/share/doc/chairlift/channels.example.yml",
 	} {
@@ -190,41 +241,55 @@ func TestInstalledBundleAndHelperBoundary(t *testing.T) {
 		{name: "updex unknown command", helper: "chairlift-updex-helper", args: []string{"unknown"}, wantStderr: "unknown command: unknown"},
 		{name: "updex missing feature", helper: "chairlift-updex-helper", args: []string{"enable-feature"}, wantStderr: "usage: chairlift-updex-helper enable-feature"},
 
-		{name: "ublue missing command", helper: "chairlift-ublue-helper", wantStderr: "usage: chairlift-ublue-helper"},
-		{name: "ublue unknown command", helper: "chairlift-ublue-helper", args: []string{"powerwash"}, wantStderr: "unknown command: powerwash"},
-		{name: "ublue channel switch without a channel", helper: "chairlift-ublue-helper", args: []string{"channel-switch"}, wantStderr: "usage: chairlift-ublue-helper channel-switch"},
-		{name: "ublue channel switch with unknown channel", helper: "chairlift-ublue-helper", args: []string{"channel-switch", "nightly"}, wantStderr: "usage: chairlift-ublue-helper channel-switch"},
+		{name: "ublue missing command", helper: "chairlift-helper", wantStderr: "usage: chairlift-helper"},
+		{name: "ublue unknown command", helper: "chairlift-helper", args: []string{"powerwash"}, wantStderr: "unknown command: powerwash"},
+		{name: "ublue channel switch without a channel", helper: "chairlift-helper", args: []string{"channel-switch"}, wantStderr: "usage: chairlift-helper channel-switch"},
+		{name: "ublue channel switch with unknown channel", helper: "chairlift-helper", args: []string{"channel-switch", "nightly"}, wantStderr: "usage: chairlift-helper channel-switch"},
 		// The argument that matters most: an image reference must never be
 		// accepted in place of a channel word, or an authenticated caller
 		// could point `bootc switch` at any registry.
-		{name: "ublue channel switch with an image ref", helper: "chairlift-ublue-helper", args: []string{"channel-switch", "ghcr.io/evil/image:latest"}, wantStderr: "usage: chairlift-ublue-helper channel-switch"},
-		{name: "ublue dx enable with a username", helper: "chairlift-ublue-helper", args: []string{"dx-enable", "root"}, wantStderr: "usage: chairlift-ublue-helper dx-enable"},
-		{name: "ublue dx disable with a group", helper: "chairlift-ublue-helper", args: []string{"dx-disable", "wheel"}, wantStderr: "usage: chairlift-ublue-helper dx-disable"},
+		{name: "ublue channel switch with an image ref", helper: "chairlift-helper", args: []string{"channel-switch", "ghcr.io/evil/image:latest"}, wantStderr: "usage: chairlift-helper channel-switch"},
+		{name: "ublue dx enable with a username", helper: "chairlift-helper", args: []string{"dx-enable", "root"}, wantStderr: "usage: chairlift-helper dx-enable"},
+		{name: "ublue dx disable with a group", helper: "chairlift-helper", args: []string{"dx-disable", "wheel"}, wantStderr: "usage: chairlift-helper dx-disable"},
 		// PKEXEC_UID is absent outside a pkexec session, so a direct
 		// invocation cannot resolve a user to modify.
-		{name: "ublue dx enable outside pkexec", helper: "chairlift-ublue-helper", args: []string{"dx-enable"}, wantStderr: "PKEXEC_UID is not set"},
+		{name: "ublue dx enable outside pkexec", helper: "chairlift-helper", args: []string{"dx-enable"}, wantStderr: "PKEXEC_UID is not set"},
+		{name: "KVM refuses account", helper: "chairlift-helper", args: []string{"kvm-enable", "root"}, wantStderr: "usage: chairlift-helper kvm-enable"},
+		{name: "KVM refuses group", helper: "chairlift-helper", args: []string{"kvm-enable", "wheel"}, wantStderr: "usage: chairlift-helper kvm-enable"},
+		{name: "KVM outside pkexec", helper: "chairlift-helper", args: []string{"kvm-enable"}, wantStderr: "PKEXEC_UID is not set"},
+		{name: "Docker enable refuses unit", helper: "chairlift-helper", args: []string{"docker-enable", "other.service"}, wantStderr: "usage: chairlift-helper docker-enable"},
+		{name: "Docker enable refuses account", helper: "chairlift-helper", args: []string{"docker-enable", "root"}, wantStderr: "usage: chairlift-helper docker-enable"},
+		{name: "Docker enable outside pkexec", helper: "chairlift-helper", args: []string{"docker-enable"}, wantStderr: "PKEXEC_UID is not set"},
+		{name: "Docker disable refuses unit", helper: "chairlift-helper", args: []string{"docker-disable", "other.service"}, wantStderr: "usage: chairlift-helper docker-disable"},
+		{name: "Docker disable refuses flag", helper: "chairlift-helper", args: []string{"docker-disable", "--force"}, wantStderr: "usage: chairlift-helper docker-disable"},
+		{name: "Docker update refuses formula", helper: "chairlift-helper", args: []string{"docker-update", "docker-engine"}, wantStderr: "usage: chairlift-helper docker-update"},
+		{name: "Docker update refuses install root", helper: "chairlift-helper", args: []string{"docker-update", "/home/linuxbrew/.linuxbrew"}, wantStderr: "usage: chairlift-helper docker-update"},
+		{name: "Docker update refuses misplaced flag", helper: "chairlift-helper", args: []string{"docker-update", "--dry-run", "--force"}, wantStderr: "usage: chairlift-helper docker-update"},
 		// Restart takes no delay and no target: either would be a value the
 		// caller controls crossing an authenticated boundary.
-		{name: "ublue restart with a delay", helper: "chairlift-ublue-helper", args: []string{"restart", "02:00"}, wantStderr: "usage: chairlift-ublue-helper restart"},
-		{name: "ublue restart with a flag", helper: "chairlift-ublue-helper", args: []string{"restart", "--force"}, wantStderr: "usage: chairlift-ublue-helper restart"},
-		{name: "ublue restart with extra argument", helper: "chairlift-ublue-helper", args: []string{"restart", "--dry-run", "now"}, wantStderr: "usage: chairlift-ublue-helper restart"},
+		{name: "ublue restart with a delay", helper: "chairlift-helper", args: []string{"restart", "02:00"}, wantStderr: "usage: chairlift-helper restart"},
+		{name: "ublue restart with a flag", helper: "chairlift-helper", args: []string{"restart", "--force"}, wantStderr: "usage: chairlift-helper restart"},
+		{name: "ublue restart with extra argument", helper: "chairlift-helper", args: []string{"restart", "--dry-run", "now"}, wantStderr: "usage: chairlift-helper restart"},
 		// Rolling back to an arbitrary image is a channel switch, not this
 		// operation.
-		{name: "ublue rollback with a target image", helper: "chairlift-ublue-helper", args: []string{"rollback", "ghcr.io/evil/image:old"}, wantStderr: "usage: chairlift-ublue-helper rollback"},
-		{name: "ublue rollback with a deployment index", helper: "chairlift-ublue-helper", args: []string{"rollback", "1"}, wantStderr: "usage: chairlift-ublue-helper rollback"},
+		{name: "ublue rollback with a target image", helper: "chairlift-helper", args: []string{"rollback", "ghcr.io/evil/image:old"}, wantStderr: "usage: chairlift-helper rollback"},
+		{name: "ublue rollback with a deployment index", helper: "chairlift-helper", args: []string{"rollback", "1"}, wantStderr: "usage: chairlift-helper rollback"},
 		// A caller-supplied unit would let an authenticated user enable or
 		// mask any systemd unit on the machine.
-		{name: "ublue auto updates with a unit", helper: "chairlift-ublue-helper", args: []string{"auto-updates-enable", "sshd.service"}, wantStderr: "usage: chairlift-ublue-helper auto-updates-enable"},
-		{name: "ublue auto updates with a flag", helper: "chairlift-ublue-helper", args: []string{"auto-updates-disable", "--now"}, wantStderr: "usage: chairlift-ublue-helper auto-updates-disable"},
+		{name: "ublue auto updates with a unit", helper: "chairlift-helper", args: []string{"auto-updates-enable", "sshd.service"}, wantStderr: "usage: chairlift-helper auto-updates-enable"},
+		{name: "ublue auto updates with a flag", helper: "chairlift-helper", args: []string{"auto-updates-disable", "--now"}, wantStderr: "usage: chairlift-helper auto-updates-disable"},
 		// The driver word is validated against a fixed set; an image
 		// reference must never stand in for it.
-		{name: "ublue driver switch with an image ref", helper: "chairlift-ublue-helper", args: []string{"driver-switch", "ghcr.io/evil/image:latest"}, wantStderr: "usage: chairlift-ublue-helper driver-switch"},
-		{name: "ublue driver switch with an unknown driver", helper: "chairlift-ublue-helper", args: []string{"driver-switch", "nouveau"}, wantStderr: "usage: chairlift-ublue-helper driver-switch"},
-		{name: "ublue driver switch without a driver", helper: "chairlift-ublue-helper", args: []string{"driver-switch"}, wantStderr: "usage: chairlift-ublue-helper driver-switch"},
+		{name: "ublue driver switch with an image ref", helper: "chairlift-helper", args: []string{"driver-switch", "ghcr.io/evil/image:latest"}, wantStderr: "usage: chairlift-helper driver-switch"},
+		{name: "ublue driver switch with an unknown driver", helper: "chairlift-helper", args: []string{"driver-switch", "nouveau"}, wantStderr: "usage: chairlift-helper driver-switch"},
+		{name: "ublue driver switch without a driver", helper: "chairlift-helper", args: []string{"driver-switch"}, wantStderr: "usage: chairlift-helper driver-switch"},
 		// A factory reset takes no argument at all; the target is always the
 		// image already booted.
-		{name: "ublue factory reset with a flag", helper: "chairlift-ublue-helper", args: []string{"factory-reset", "--force"}, wantStderr: "usage: chairlift-ublue-helper factory-reset"},
-		{name: "ublue factory reset with extra argument", helper: "chairlift-ublue-helper", args: []string{"factory-reset", "--dry-run", "now"}, wantStderr: "usage: chairlift-ublue-helper factory-reset"},
+		{name: "ublue pin refuses image reference", helper: "chairlift-helper", args: []string{"pin", "ghcr.io/evil/image:20240229"}, wantStderr: "usage: chairlift-helper pin"},
+		{name: "ublue pin refuses invalid day", helper: "chairlift-helper", args: []string{"pin", "20260230"}, wantStderr: "usage: chairlift-helper pin"},
+		{name: "ublue unpin refuses target", helper: "chairlift-helper", args: []string{"unpin", "stable"}, wantStderr: "usage: chairlift-helper unpin"},
+		{name: "ublue factory reset with a flag", helper: "chairlift-helper", args: []string{"factory-reset", "--force"}, wantStderr: "usage: chairlift-helper factory-reset"},
+		{name: "ublue factory reset with extra argument", helper: "chairlift-helper", args: []string{"factory-reset", "--dry-run", "now"}, wantStderr: "usage: chairlift-helper factory-reset"},
 	}
 
 	for _, test := range tests {
@@ -279,21 +344,212 @@ func missingOutput(output string, markers []string) string {
 	return strings.Join(missing, ", ")
 }
 
-func stopProcessGroup(t *testing.T, cmd *exec.Cmd, done <-chan error) {
+// stopProcessSession ends the smoke run and drains every subprocess in its
+// private session, including Homebrew workers in new process groups. Reaping
+// the leader alone cannot stop grandchildren still writing into temporary HOME.
+func stopProcessSession(t *testing.T, cmd *exec.Cmd, done <-chan error) {
 	t.Helper()
-	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
-		t.Errorf("terminate ChairLift smoke process group: %v", err)
+
+	group := cmd.Process.Pid
+	// Find chairlift within the private session and send SIGTERM directly to it
+	// first. If we signal the whole process group at once, the compositor and
+	// dbus-daemon die immediately, closing the Wayland connection and aborting
+	// chairlift via fatal-criticals before it can perform a normal exit and
+	// flush GOCOVERDIR.
+	if !hasExited(t, done) {
+		if members, err := liveSessionMembers(defaultProcTable, group); err == nil {
+			for _, member := range members {
+				if member.name == "chairlift" {
+					_ = syscall.Kill(member.pid, syscall.SIGTERM)
+					break
+				}
+			}
+		}
 	}
+
+	// Wait briefly for chairlift to complete its graceful exit.
 	select {
-	case <-done:
-		return
+	case err := <-done:
+		if err != nil {
+			t.Logf("ChairLift smoke session exited during graceful shutdown: %v", err)
+		}
 	case <-time.After(shutdownTimeout):
 	}
 
-	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
-		t.Errorf("kill ChairLift smoke process group: %v", err)
+	// Once chairlift has had a chance to exit normally, terminate any remaining
+	// processes in the private session.
+	if !hasExited(t, done) {
+		if err := syscall.Kill(-group, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
+			t.Errorf("terminate ChairLift smoke process group: %v", err)
+		}
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Logf("ChairLift smoke session exited after termination: %v", err)
+			}
+		case <-time.After(shutdownTimeout):
+			if err := syscall.Kill(-group, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+				t.Errorf("kill ChairLift smoke process group: %v", err)
+			}
+			if err := <-done; err != nil {
+				t.Logf("ChairLift smoke session exited after forced termination: %v", err)
+			}
+		}
 	}
-	<-done
+
+	if err := awaitSessionExit(hostDrain(), group, shutdownTimeout, drainTimeout); err != nil {
+		t.Errorf("ChairLift smoke session %d: %v", group, err)
+	}
+}
+
+func hasExited(t *testing.T, done <-chan error) bool {
+	t.Helper()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Logf("ChairLift smoke session exited: %v", err)
+		}
+		return true
+	default:
+		return false
+	}
+}
+
+// sessionDrain is what awaitSessionExit needs from the host: the process
+// table to scan and the signal to send. The smoke test hands it the kernel's,
+// so that the drain acts on the processes actually holding the temporary HOME
+// open; the unit tests hand it a fixture, so the escalation can be observed
+// without racing real processes.
+type sessionDrain struct {
+	procTable string
+	kill      func(pid int) error
+}
+
+func hostDrain() sessionDrain {
+	return sessionDrain{
+		procTable: defaultProcTable,
+		kill:      func(pid int) error { return syscall.Kill(pid, syscall.SIGKILL) },
+	}
+}
+
+// awaitSessionExit blocks until no live process is left in the private session, killing
+// whatever ignored the earlier signal once escalateAfter has passed. It kills
+// on every scan from then on rather than sweeping once: a member that forks
+// during or after a single sweep leaves a child that was never signalled, and
+// the drain would then only poll to its own timeout while that child keeps
+// writing into the temporary HOME.
+//
+// The session's leader must already have been reaped: its PID is the session
+// id, and once the kernel is free to reuse that PID an unrelated process might
+// wear it. The leader PID itself is never counted or signalled here.
+func awaitSessionExit(drain sessionDrain, sessionID int, escalateAfter, timeout time.Duration) error {
+	start := time.Now()
+	for {
+		members, err := liveSessionMembers(drain.procTable, sessionID)
+		if err != nil {
+			return err
+		}
+		if len(members) == 0 {
+			return nil
+		}
+
+		elapsed := time.Since(start)
+		if elapsed >= escalateAfter {
+			for _, member := range members {
+				// By PID, not by group: signalling the leader's recycled
+				// process-group ID could reach an unrelated process. A member
+				// can still exit between this scan and the signal, so this is
+				// subject to the ordinary kill-by-PID race
+				// on a recycled PID; ESRCH is the expected outcome there, and
+				// repeating SIGKILL on a PID already killed is harmless.
+				if err := drain.kill(member.pid); err != nil && !errors.Is(err, syscall.ESRCH) {
+					return fmt.Errorf("kill %s: %w", member, err)
+				}
+			}
+		}
+		if elapsed >= timeout {
+			return fmt.Errorf("still running %s after %s: %s", plural(len(members), "process"), timeout, describeMembers(members))
+		}
+		time.Sleep(drainInterval)
+	}
+}
+
+// sessionMember is one entry of the kernel's process table.
+type sessionMember struct {
+	pid  int
+	name string
+}
+
+func (member sessionMember) String() string {
+	return fmt.Sprintf("%s (pid %d)", member.name, member.pid)
+}
+
+func describeMembers(members []sessionMember) string {
+	described := make([]string, 0, len(members))
+	for _, member := range members {
+		described = append(described, member.String())
+	}
+	return strings.Join(described, ", ")
+}
+
+func plural(count int, noun string) string {
+	if count == 1 {
+		return fmt.Sprintf("%d %s", count, noun)
+	}
+	return fmt.Sprintf("%d %ss", count, noun)
+}
+
+// liveSessionMembers reports processes under procTable in the private session,
+// even if a child changed process group with Setpgid. Zombies cannot write to
+// HOME and are excluded. The session leader PID is excluded because it was
+// reaped before this scan and may have been recycled.
+func liveSessionMembers(procTable string, sessionID int) ([]sessionMember, error) {
+	entries, err := os.ReadDir(procTable)
+	if err != nil {
+		return nil, fmt.Errorf("read the process table at %s: %w", procTable, err)
+	}
+
+	members := make([]sessionMember, 0, 4)
+	for _, entry := range entries {
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil || pid == sessionID {
+			continue
+		}
+		// A process that exits between the listing and the read is exactly
+		// what this function is waiting for, so a missing stat is not an error.
+		stat, err := os.ReadFile(filepath.Join(procTable, entry.Name(), "stat"))
+		if err != nil {
+			continue
+		}
+		name, state, session, ok := parseProcessStat(string(stat))
+		if !ok || session != sessionID || state == "Z" {
+			continue
+		}
+		members = append(members, sessionMember{pid: pid, name: name})
+	}
+	sort.Slice(members, func(i, j int) bool { return members[i].pid < members[j].pid })
+	return members, nil
+}
+
+// parseProcessStat reads the command name, run state, and session out of
+// a /proc/<pid>/stat line. The command is parenthesized and may itself contain
+// spaces and parentheses, so the fixed fields are taken after the final ')'
+// rather than by splitting the whole line.
+func parseProcessStat(stat string) (name, state string, session int, ok bool) {
+	open := strings.Index(stat, "(")
+	closed := strings.LastIndex(stat, ")")
+	if open < 0 || closed < open {
+		return "", "", 0, false
+	}
+	fields := strings.Fields(stat[closed+1:])
+	if len(fields) < 4 {
+		return "", "", 0, false
+	}
+	session, err := strconv.Atoi(fields[3])
+	if err != nil {
+		return "", "", 0, false
+	}
+	return stat[open+1 : closed], fields[0], session, true
 }
 
 func repoRoot(t *testing.T) string {

@@ -263,6 +263,42 @@ sleep 300`)
 	}
 }
 
+func TestRunFlatpakCommandAtBoundsMutationOutput(t *testing.T) {
+	t.Run("successful mutation discards stdout", func(t *testing.T) {
+		script := fakeFlatpak(t, "printf '%s' '"+strings.Repeat("x", commandOutputTailLimit+1)+"'")
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		out, err := runFlatpakCommandAt(ctx, script, "update")
+		if err != nil {
+			t.Fatalf("runFlatpakCommandAt: %v", err)
+		}
+		if out != "" {
+			t.Fatalf("stdout = %q, want discarded mutation output", out)
+		}
+	})
+
+	t.Run("failed mutation falls back to stdout tail", func(t *testing.T) {
+		stdout := "prefix-marker" + strings.Repeat("x", commandOutputTailLimit) + "tail-marker"
+		script := fakeFlatpak(t, "printf '%s' '"+stdout+"'\nexit 3")
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		_, err := runFlatpakCommandAt(ctx, script, "update")
+		if err == nil {
+			t.Fatal("runFlatpakCommandAt = nil error, want failure")
+		}
+		if strings.Contains(err.Error(), "prefix-marker") {
+			t.Fatalf("error retained dropped prefix: %q", err.Error())
+		}
+		if !strings.Contains(err.Error(), "tail-marker") {
+			t.Fatalf("error = %q, want retained tail marker", err.Error())
+		}
+	})
+}
+
 // waitForPID polls pidFile until the fake script has recorded its background
 // helper's PID, failing rather than hanging if it never does.
 func waitForPID(t *testing.T, pidFile string) int {
@@ -276,4 +312,48 @@ func waitForPID(t *testing.T, pidFile string) int {
 	}
 	t.Fatalf("fake script never wrote a PID to %s", pidFile)
 	return 0
+}
+
+// TestUpdatePropagatesContextCancellation proves the Update All fix: the Flatpak
+// phase runs under the run's context, so cancelling the run stops the in-flight
+// update instead of the command ignoring the parent and running to its own
+// 30-minute budget.
+func TestUpdatePropagatesContextCancellation(t *testing.T) {
+	// A fake flatpak that sleeps far past the cancellation: a version of Update
+	// that ignored the context would run to its 30-minute mutation budget. The
+	// script is named "flatpak" so the command resolves it on PATH.
+	dir := t.TempDir()
+	script := filepath.Join(dir, "flatpak")
+	pidFile := filepath.Join(dir, "self.pid")
+	content := "#!/bin/sh\necho $$ > \"" + pidFile + "\"\nsleep 30\n"
+	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if pid, err := readPID(pidFile); err == nil {
+			killPID(pid)
+		}
+	})
+	// Resolve the fake "flatpak" on PATH while keeping the real tools the
+	// script's `sleep` still needs.
+	origPath := os.Getenv("PATH")
+	t.Setenv("PATH", filepath.Dir(script)+string(os.PathListSeparator)+origPath)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- Update(ctx, "", true) }()
+
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+
+	err := awaitErr(t, done)
+	if err == nil {
+		t.Fatal("Update = nil error, want cancellation failure")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("Update error = %v, want errors.Is(err, context.Canceled)", err)
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		t.Error("Update error must not classify as a deadline")
+	}
 }

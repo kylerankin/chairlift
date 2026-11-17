@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/projectbluefin/chairlift/internal/dryrun"
+	"github.com/projectbluefin/chairlift/internal/outputtail"
 )
 
 const (
@@ -29,13 +31,34 @@ const (
 	// stdout/stderr pipes, so a straggler could otherwise hold Wait open
 	// forever even though the command itself is gone.
 	waitDelay = 5 * time.Second
+	// commandOutputTailLimit bounds retained mutation output used only for
+	// diagnostics after a command fails. Successful mutation output is discarded.
+	commandOutputTailLimit = 64 * 1024
 )
+
+type commandOutputWriter interface {
+	Write([]byte) (int, error)
+	String() string
+}
+
+func commandOutputWriters(args []string) (commandOutputWriter, commandOutputWriter, bool) {
+	if isStateChanging(args) {
+		return outputtail.New(commandOutputTailLimit), outputtail.New(commandOutputTailLimit), true
+	}
+	return &bytes.Buffer{}, &bytes.Buffer{}, false
+}
 
 // Error represents a Homebrew-related error. Err, when non-nil, carries the
 // underlying cause (for example context.DeadlineExceeded or
 // context.Canceled) so callers can classify it with errors.Is.
+//
+// Detail, when non-empty, is the one-line diagnosis a failed state-changing
+// command printed — what brew said went wrong, without Message's
+// "Brew command failed:" framing — so a view can say why an install failed
+// without parsing Message.
 type Error struct {
 	Message string
+	Detail  string
 	Err     error
 }
 
@@ -59,7 +82,16 @@ func (e *NotFoundError) Error() string {
 
 // Package represents an installed Homebrew package
 type Package struct {
-	Name               string   `json:"name"`
+	Name string `json:"name"`
+	// FullName is the package's qualified name: the bare name for a
+	// homebrew/core package, and "owner/repo/name" for one from a tap.
+	// A Brewfile names a tap package in that qualified form, so the
+	// inventory can be matched against a collection entry exactly
+	// instead of guessing from the bare name alone.
+	FullName string `json:"full_name"`
+	// Tap is the package's source: homebrew/core for formulae,
+	// homebrew/cask for casks, or owner/repository for a third-party tap.
+	Tap                string   `json:"tap"`
 	Version            string   `json:"version"`
 	InstalledOnRequest bool     `json:"installed_on_request"`
 	Pinned             bool     `json:"pinned"`
@@ -67,28 +99,36 @@ type Package struct {
 	Dependencies       []string `json:"dependencies,omitempty"`
 }
 
-// SearchResult represents a search result
-type SearchResult struct {
-	Name string
-	Kind PackageKind
+// QualifiedName is the name a Brewfile would use for this package: the
+// qualified name when the package comes from a tap, the bare name
+// otherwise.
+func (p Package) QualifiedName() string {
+	if p.FullName != "" {
+		return p.FullName
+	}
+	return p.Name
 }
 
-// PackageKind identifies which Homebrew install namespace a search result
-// belongs to. Formulae and casks can share a name, so the kind must travel
-// with the result all the way to the install command.
+// CoreTap is the tap field Homebrew reports for a package that comes from
+// homebrew/core rather than from a third-party tap.
+const CoreTap = "homebrew/core"
+
+// CaskTap is Homebrew's official cask repository, not a third-party source.
+const CaskTap = "homebrew/cask"
+
+// FromTap reports whether the package comes from a third-party source rather
+// than Homebrew's official formula or cask repositories.
+func (p Package) FromTap() bool {
+	return p.Tap != "" && p.Tap != CoreTap && p.Tap != CaskTap
+}
+
+// PackageKind identifies the Homebrew formula or cask namespace.
 type PackageKind string
 
 const (
 	Formula PackageKind = "formula"
 	Cask    PackageKind = "cask"
 )
-
-func (k PackageKind) DisplayName() string {
-	if k == Cask {
-		return "Cask"
-	}
-	return "Formula"
-}
 
 // stateChangingCommands are commands that modify system state
 var stateChangingCommands = map[string]bool{
@@ -108,10 +148,73 @@ var stateChangingCommands = map[string]bool{
 	"tap": true,
 }
 
+// bundleSubcommand returns the first non-flag word after "bundle", or
+// "install" for a bare `brew bundle`, which is what brew itself defaults to.
+// It returns "" when args is not a bundle invocation.
+func bundleSubcommand(args []string) string {
+	if len(args) == 0 || args[0] != "bundle" {
+		return ""
+	}
+	for _, arg := range args[1:] {
+		if strings.HasPrefix(arg, "-") {
+			continue
+		}
+		return arg
+	}
+	return "install"
+}
+
+// isBundleInstall reports whether a brew invocation is `brew bundle install`.
+// It is derived from argv, which no command output can influence, and that is
+// the point: it is the gate on the stdout-derived untrusted-tap
+// reclassification in runBrewCommandAt.
+func isBundleInstall(args []string) bool {
+	return bundleSubcommand(args) == "install"
+}
+
+// isStateChanging reports whether a brew invocation modifies system state
+// (requiring mutationTimeout, bounded diagnostic output, and dry-run skipping)
+// or is read-only (using readTimeout, full output, and active under dry-run).
+func isStateChanging(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	cmd := args[0]
+	if bundleSubcommand(args) != "" {
+		// Reclassify brew bundle subcommands: check and list are read-only,
+		// while install, dump, and any unrecognized subcommand remain
+		// state-changing.
+		return !isReadOnlyBundle(args)
+	}
+	if isTrustListing(args) {
+		return false
+	}
+	return stateChangingCommands[cmd]
+}
+
+// isTrustListing reports whether args is exactly `brew trust --json=v1`,
+// which prints the trust store and changes nothing. Any other `brew trust`
+// argv, including one naming a target, stays state-changing.
+func isTrustListing(args []string) bool {
+	return len(args) == 2 && args[0] == "trust" && args[1] == "--json=v1"
+}
+
+// isReadOnlyBundle reports whether args is a read-only `brew bundle`
+// subcommand (check or list). Install, dump, and any unrecognized
+// subcommand are not.
+func isReadOnlyBundle(args []string) bool {
+	switch bundleSubcommand(args) {
+	case "check", "list":
+		return true
+	default:
+		return false
+	}
+}
+
 // commandTimeout returns the timeout class for a brew invocation: the
 // mutation timeout for state-changing commands, the read timeout otherwise.
 func commandTimeout(args []string) time.Duration {
-	if len(args) > 0 && stateChangingCommands[args[0]] {
+	if isStateChanging(args) {
 		return mutationTimeout
 	}
 	return readTimeout
@@ -119,37 +222,72 @@ func commandTimeout(args []string) time.Duration {
 
 // runBrewCommand executes a brew command and returns the output
 func runBrewCommand(args ...string) (string, error) {
-	if len(args) > 0 && stateChangingCommands[args[0]] && dryrun.Enabled() {
+	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout(args))
+	defer cancel()
+
+	return runBrewCommandCtx(ctx, args...)
+}
+
+// runBrewCommandCtx is the single dry-run gate for brew: it applies the skip
+// (before any exec.Cmd exists) and otherwise runs the command under ctx.
+// runBrewCommand supplies its own timeout context; context-taking exported
+// entry points such as Update supply the caller's context already narrowed to
+// the mutation budget, so cancellation propagates without a second gate that
+// could drift out of sync.
+//
+// The executable comes from brewExecutable, the same resolution IsInstalled
+// reports through, so visibility and execution cannot name different binaries.
+func runBrewCommandCtx(ctx context.Context, args ...string) (string, error) {
+	if isStateChanging(args) && dryrun.Enabled() {
 		msg := fmt.Sprintf("[DRY-RUN] Would execute: brew %s", strings.Join(args, " "))
 		log.Println(msg)
 		return msg, nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout(args))
-	defer cancel()
-
-	return runBrewCommandAt(ctx, "brew", args...)
+	return runBrewCommandAt(ctx, brewExecutable(), args...)
 }
 
-// runBrewCommandAt runs exe with args under ctx and returns its stdout. The
+// runBrewCommandAt runs exe with args under ctx. Read-only commands return
+// full stdout for parsers; state-changing commands discard successful output
+// and retain only bounded stdout/stderr tails for failure diagnostics. The
 // executable and context are parameters so tests can drive a fake script and
-// control the deadline; runBrewCommand is the only production caller and
-// always passes "brew".
+// control the deadline; the sole production caller (runBrewCommandCtx) passes
+// the path brewExecutable resolved, so the binary that runs is the one
+// ExecutablePath reported as installed.
 //
 // The command runs in its own process group and cancellation signals the
 // whole group, so brew's helper processes (git, curl, download workers) die
 // with it rather than being orphaned. cmd.Run still reaps the child.
 func runBrewCommandAt(ctx context.Context, exe string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, exe, args...)
+	// brew's own children (a cask preflight's rpm2cpio | cpio) resolve
+	// tools on $PATH, which a direct launch does not give Homebrew.
+	cmd.Env = WithBrewPath(os.Environ(), exe)
+	if len(args) > 0 && args[0] == "tap-info" {
+		// tap-info's JSON includes each tap's "private" flag, which brew
+		// looks up on the GitHub API. On Linux its credential probe pipes
+		// into `git credential-osxkeychain`, which does not exist, and brew
+		// intermittently dies with "Error: Broken pipe" (Homebrew 7.0.8;
+		// 2 of 6 ChairLift launches on Dakota). ChairLift reads only
+		// "trusted", which is local, so the API lookup is switched off.
+		cmd.Env = append(cmd.Env, "HOMEBREW_NO_GITHUB_API=1")
+	}
+	if isReadOnlyBundle(args) {
+		// brew runs `brew update --auto-update` before every `bundle`
+		// subcommand, including the read-only check the Apps page runs for
+		// each collection on load. A read must not fetch and rewrite tap
+		// state (or do so under --dry-run), so it skips the auto-update.
+		cmd.Env = append(cmd.Env, "HOMEBREW_NO_AUTO_UPDATE=1")
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
 		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
 	cmd.WaitDelay = waitDelay
 
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	stdout, stderr, boundedOutput := commandOutputWriters(args)
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
 
 	err := cmd.Run()
 	if err != nil {
@@ -172,12 +310,76 @@ func runBrewCommandAt(ctx context.Context, exe string, args ...string) (string, 
 				Err:     context.Canceled,
 			}
 		}
+		stderrText := stderr.String()
+		diagnosticText := stderrText
+		if boundedOutput {
+			// A state-changing command splits its diagnosis across both
+			// streams — `brew bundle install` replays a failing entry's own
+			// installer output on stdout and prints its summary on stderr —
+			// so keeping only the non-empty one dropped the root cause
+			// whenever the other stream also had content.
+			diagnosticText = joinCommandStreams(stdout.String(), stderrText)
+		}
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
-			if isUntrustedTapMessage(stderr.String()) {
-				return "", &UntrustedTapError{Message: fmt.Sprintf("Brew command failed: %s", stderr.String())}
+			// The message below is distilled to one line for the UI, so the
+			// full retained output is logged here: it is the evidence a bug
+			// report needs, and nothing else preserves it.
+			// Only for state-changing commands: a read-only `brew search`
+			// exits 1 with "No formulae or casks found" when one namespace
+			// has no matches, and searchKind treats that as an empty result,
+			// not a failure worth a log line.
+			if boundedOutput {
+				if trimmed := strings.TrimSpace(diagnosticText); trimmed != "" {
+					log.Printf("Command '%s' failed:\n%s", display, trimmed)
+				}
 			}
-			return "", &Error{Message: fmt.Sprintf("Brew command failed: %s", stderr.String()), Err: err}
+			// Only a state-changing command is distilled to one line: its
+			// full output is in the log above and its stdout replay is what
+			// made the message unreadable. A read-only command keeps its
+			// whole stderr in the error, as before, since nothing else
+			// preserves it and callers such as searchKind match on it.
+			message := diagnosticText
+			if boundedOutput {
+				message = summarizeDiagnostic(diagnosticText)
+			}
+			// Only `brew bundle install` replays a third-party installer's
+			// own stdout into the diagnostic, and only it prints the
+			// parseable "from untrusted tap <user>/<tap>" line on stdout
+			// while stderr carries just the bundle summary. Everything
+			// derived from stdout is therefore gated on argv — which no
+			// command output can influence — so a formula that prints a
+			// forged "Error: ... from untrusted tap attacker/tap" line
+			// during an ordinary `brew install`/`upgrade` cannot turn an
+			// unrelated failure into a `brew trust` suggestion for a tap it
+			// chose.
+			bundleInstall := isBundleInstall(args)
+			if isUntrustedTapMessage(stderrText) {
+				// brew's own stderr corroborates the classification here;
+				// the tap name still comes from stderr when it names one.
+				tap, ok := untrustedTapFromErrorLine(stderrText)
+				if !ok && bundleInstall {
+					tap, _ = untrustedTapFromErrorLine(diagnosticText)
+				}
+				return "", &UntrustedTapError{Message: fmt.Sprintf("Brew command failed: %s", message), Tap: tap}
+			}
+			if bundleInstall {
+				if tap, ok := untrustedTapFromErrorLine(diagnosticText); ok {
+					return "", &UntrustedTapError{Message: fmt.Sprintf("Brew command failed: %s", message), Tap: tap}
+				}
+			}
+			// Gated on argv like the bundle check above: only an uninstall
+			// prints Homebrew's dependents refusal, read from its stderr.
+			if len(args) > 0 && args[0] == "uninstall" {
+				if dependents, ok := uninstallDependents(stderrText); ok {
+					return "", &DependentsError{Message: fmt.Sprintf("Brew command failed: %s", message), Dependents: dependents}
+				}
+			}
+			brewErr := &Error{Message: fmt.Sprintf("Brew command failed: %s", message), Err: err}
+			if boundedOutput {
+				brewErr.Detail = message
+			}
+			return "", brewErr
 		}
 		// exec.ErrNotFound covers a bare name missing from $PATH;
 		// fs.ErrNotExist covers an explicit path that does not exist.
@@ -187,15 +389,30 @@ func runBrewCommandAt(ctx context.Context, exe string, args ...string) (string, 
 		return "", &Error{Message: err.Error(), Err: err}
 	}
 
+	if boundedOutput {
+		return "", nil
+	}
 	return stdout.String(), nil
 }
 
-// IsInstalled checks if Homebrew is installed and accessible
+// IsInstalled checks if Homebrew is installed and accessible.
+//
+// It asks ExecutablePath where brew is instead of assuming $PATH, so a host
+// whose Homebrew is only reachable at the Linuxbrew install path — reached by
+// a direct binary launch, which bypasses data/chairlift-wrapper.sh and the
+// `brew shellenv` it runs — is reported as installed exactly when
+// runBrewCommandCtx would find a binary to run (issue #207). An absent
+// Homebrew short-circuits rather than exec'ing a command that cannot resolve.
 func IsInstalled() bool {
+	exe := ExecutablePath()
+	if exe == "" {
+		return false
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "brew", "--version")
+	cmd := exec.CommandContext(ctx, exe, "--version")
 	err := cmd.Run()
 	return err == nil
 }
@@ -238,6 +455,8 @@ func parsePackagesJSON(jsonData string, isFormula bool) ([]Package, error) {
 	var data struct {
 		Formulae []struct {
 			Name     string `json:"name"`
+			FullName string `json:"full_name"`
+			Tap      string `json:"tap"`
 			Versions struct {
 				Stable string `json:"stable"`
 			} `json:"versions"`
@@ -250,6 +469,8 @@ func parsePackagesJSON(jsonData string, isFormula bool) ([]Package, error) {
 		} `json:"formulae"`
 		Casks []struct {
 			Token     string `json:"token"`
+			FullToken string `json:"full_token"`
+			Tap       string `json:"tap"`
 			Version   string `json:"version"`
 			Installed string `json:"installed"`
 			Outdated  bool   `json:"outdated"`
@@ -269,6 +490,8 @@ func parsePackagesJSON(jsonData string, isFormula bool) ([]Package, error) {
 			}
 			packages = append(packages, Package{
 				Name:               f.Name,
+				FullName:           f.FullName,
+				Tap:                f.Tap,
 				Version:            f.Installed[0].Version,
 				InstalledOnRequest: f.Installed[0].InstalledOnRequest,
 				Pinned:             f.Pinned,
@@ -279,6 +502,8 @@ func parsePackagesJSON(jsonData string, isFormula bool) ([]Package, error) {
 		for _, c := range data.Casks {
 			packages = append(packages, Package{
 				Name:     c.Token,
+				FullName: c.FullToken,
+				Tap:      c.Tap,
 				Version:  c.Installed,
 				Outdated: c.Outdated,
 			})
@@ -333,55 +558,6 @@ func ListOutdated() ([]Package, error) {
 	return packages, nil
 }
 
-// Search searches both Homebrew namespaces and returns typed results.
-func Search(query string) ([]SearchResult, error) {
-	return searchWith(runBrewCommand, query)
-}
-
-func searchWith(run func(...string) (string, error), query string) ([]SearchResult, error) {
-	query = strings.TrimSpace(query)
-	if query == "" {
-		return nil, nil
-	}
-
-	formulae, err := searchKind(run, query, "--formula", Formula)
-	if err != nil {
-		return nil, err
-	}
-	casks, err := searchKind(run, query, "--cask", Cask)
-	if err != nil {
-		return nil, err
-	}
-	return append(formulae, casks...), nil
-}
-
-func searchKind(run func(...string) (string, error), query, flag string, kind PackageKind) ([]SearchResult, error) {
-	output, err := run("search", flag, query)
-	if err != nil {
-		// Homebrew exits 1 when one namespace has no matches, even if the
-		// other namespace may have results. Treat only that documented
-		// no-result diagnostic as an empty category.
-		if strings.Contains(err.Error(), "No formulae or casks found") {
-			return nil, nil
-		}
-		return nil, err
-	}
-
-	return parseSearchOutput(output, kind), nil
-}
-
-func parseSearchOutput(output string, kind PackageKind) []SearchResult {
-	var results []SearchResult
-	lines := strings.Split(strings.TrimSpace(output), "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line != "" && !strings.HasPrefix(line, "==>") {
-			results = append(results, SearchResult{Name: line, Kind: kind})
-		}
-	}
-	return results
-}
-
 // Tap adds a third-party tap. It is required before installing a package by
 // its qualified user/tap/name: brew refuses the shorthand for a tap that is
 // not already present, rather than silently trusting it.
@@ -402,6 +578,28 @@ func Install(name string, isCask bool) error {
 	return err
 }
 
+// InstallMany installs several packages of one kind in a single Homebrew
+// transaction: `brew install [--cask] <name>…`. One transaction per kind
+// keeps a partially selected collection's install to one command per
+// package manager, instead of one command per package.
+//
+// An empty list is a no-op: Homebrew refuses `brew install` with no
+// argument, so the caller must never reach it.
+func InstallMany(names []string, isCask bool) error {
+	if len(names) == 0 {
+		return nil
+	}
+
+	args := []string{"install"}
+	if isCask {
+		args = append(args, "--cask")
+	}
+	args = append(args, names...)
+
+	_, err := runBrewCommand(args...)
+	return err
+}
+
 // Uninstall removes a package
 func Uninstall(name string, isCask bool) error {
 	args := []string{"uninstall"}
@@ -414,20 +612,30 @@ func Uninstall(name string, isCask bool) error {
 	return err
 }
 
-// Upgrade upgrades a package or all packages
-func Upgrade(name string) error {
+// Upgrade upgrades one package or all packages. The caller's context also
+// bounds the mutation so Update All cancellation stops an in-flight upgrade.
+func Upgrade(ctx context.Context, name string) error {
 	args := []string{"upgrade"}
 	if name != "" {
 		args = append(args, name)
 	}
 
-	_, err := runBrewCommand(args...)
+	runCtx, cancel := context.WithTimeout(ctx, mutationTimeout)
+	defer cancel()
+	_, err := runBrewCommandCtx(runCtx, args...)
 	return err
 }
 
-// Update updates Homebrew itself
-func Update() error {
-	_, err := runBrewCommand("update")
+// Update updates Homebrew itself. It runs under ctx so an enclosing run's
+// cancellation — Update All, for example — propagates into the command and
+// stops it, instead of the command ignoring the parent deadline and running to
+// its own 30-minute budget. The mutation budget is still applied on top, so a
+// lone caller stays bounded by whichever deadline is nearer.
+func Update(ctx context.Context) error {
+	runCtx, cancel := context.WithTimeout(ctx, mutationTimeout)
+	defer cancel()
+
+	_, err := runBrewCommandCtx(runCtx, "update")
 	return err
 }
 
@@ -466,6 +674,118 @@ func BundleInstall(path string) error {
 
 	_, err := runBrewCommand(args...)
 	return err
+}
+
+// BundleStatus represents the multi-state status of a Brewfile bundle.
+type BundleStatus string
+
+const (
+	BundleInstalled       BundleStatus = "installed"
+	BundleUpdateAvailable BundleStatus = "update_available"
+	BundleNotInstalled    BundleStatus = "not_installed"
+	BundleIndeterminate   BundleStatus = "indeterminate"
+)
+
+// DisplayName returns a human-readable representation of the bundle status.
+func (s BundleStatus) DisplayName() string {
+	switch s {
+	case BundleInstalled:
+		return "Installed"
+	case BundleUpdateAvailable:
+		return "Update Available"
+	case BundleNotInstalled:
+		return "Not Installed"
+	default:
+		return "Indeterminate"
+	}
+}
+
+type exitCoder interface {
+	ExitCode() int
+}
+
+func exitCode(err error) int {
+	var ec exitCoder
+	if errors.As(err, &ec) {
+		return ec.ExitCode()
+	}
+	return -1
+}
+
+func isMalformedManifestError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	for _, term := range []string{
+		"syntax error",
+		"undefined method",
+		"loaderror",
+		"malformed",
+		"failed to parse",
+		"cannot load such file",
+	} {
+		if strings.Contains(msg, term) {
+			return true
+		}
+	}
+	return false
+}
+
+// BundleCheck checks the multi-state status of a Brewfile bundle using a two-pass check:
+// 1. Pass 1: `brew bundle check --file=<path>` -> exit 0: Installed.
+// 2. Pass 2: If exit != 0, re-run with `--no-upgrade` -> exit 0: Update Available; exit 1: Not Installed.
+// 3. Other errors (timeout, malformed manifest) -> Indeterminate/Error.
+func BundleCheck(path string) (BundleStatus, error) {
+	return bundleCheckWith(runBrewCommand, path)
+}
+
+func bundleCheckWith(run func(...string) (string, error), path string) (BundleStatus, error) {
+	pass1Args := []string{"bundle", "check"}
+	if path != "" {
+		pass1Args = append(pass1Args, "--file="+path)
+	}
+
+	_, err1 := run(pass1Args...)
+	if err1 == nil {
+		return BundleInstalled, nil
+	}
+
+	if errors.Is(err1, context.DeadlineExceeded) || errors.Is(err1, context.Canceled) {
+		return BundleIndeterminate, err1
+	}
+	if isMalformedManifestError(err1) {
+		return BundleIndeterminate, err1
+	}
+
+	code1 := exitCode(err1)
+	if code1 != 1 {
+		return BundleIndeterminate, err1
+	}
+
+	pass2Args := []string{"bundle", "check", "--no-upgrade"}
+	if path != "" {
+		pass2Args = append(pass2Args, "--file="+path)
+	}
+
+	_, err2 := run(pass2Args...)
+	if err2 == nil {
+		return BundleUpdateAvailable, nil
+	}
+
+	if errors.Is(err2, context.DeadlineExceeded) || errors.Is(err2, context.Canceled) {
+		return BundleIndeterminate, err2
+	}
+	if isMalformedManifestError(err2) {
+		return BundleIndeterminate, err2
+	}
+
+	code2 := exitCode(err2)
+	if code2 == 1 {
+		return BundleNotInstalled, nil
+	}
+
+	return BundleIndeterminate, err2
 }
 
 // Cleanup removes old versions, outdated downloads, and clears cache

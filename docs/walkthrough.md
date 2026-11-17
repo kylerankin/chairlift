@@ -1,86 +1,512 @@
-# ChairLift walkthrough
+# Control Center walkthrough
 
-Every screen in ChairLift, captured from the real app by `make screenshots`
-(see [below](#how-these-are-made)) — not mockups.
+The screenshots below come from the real application, not mockups. They are
+committed captures, not a live report of this checkout; the isolated Dakota
+capture command and release refresh workflow are documented [below](#how-these-are-made).
+Screenshots can show optional groups that the shipped profile hides; available
+controls also depend on this computer's tools and administrator configuration.
 
-One app for Snow Linux and the Bluefin family (Bluefin, Bluefin LTS, Dakota).
+One app for the Bluefin family (Bluefin, Bluefin LTS, Dakota).
 Everything here is one control per decision — no strategy pickers, no
 schedule choosers, no feature grids.
 
 ---
 
-## Updates
+## Setup Assistant
 
-![Updates](screenshots/3-updates.png)
+![Setup Assistant](screenshots/0-setup.png)
 
-**Update All** updates your system, your apps, and your packages in one
-click, and tells you when it's done. It only asks you to restart if something
-actually needs one. **Automatic Updates** keeps everything up to date in the
-background. The Flatpak and Homebrew groups below let you update just one
-thing if you prefer.
-
-**System Updates** adds **Roll Back**, which returns you to the previous
-version if an update went badly, and **What's Changing**, which lists exactly
-what software a pending update will add, remove, or upgrade. That group only
-appears on systems that update as a whole, so it's not in the shot above.
+Setup Assistant never opens automatically. Choose **Setup Assistant…** from
+the menu, `chairlift --setup`, or its `--first-run` alias to open Welcome, then
+walk **Livery**, **Features**, **Apps**, and **Agents**. Welcome presents the
+Bluefin wordmark, an introduction confirming the system is ready and guiding
+developer-tool, automated-troubleshooting, and system-default customization,
+and the Zavala quote. Unavailable pages are skipped;
+the ordinary page controls perform actions. **Bluefin CLI** is selected by
+default for Bash unless previously disabled; **Next** from Features applies
+that choice and waits for completion. Failures stay on Features for retry.
+**Back** only navigates and preserves the choice. Other **Next** steps only
+navigate. The matching conclusion quotes Edith Wharton. **Finish** saves
+completion and returns to Control Center; a save failure reports an
+error toast. **Dismiss Setup**
+(or Escape) records a skip without undoing previous completion.
 
 ---
 
-## System
+## Updates
 
-![System](screenshots/4-system.png)
+![Updates](screenshots/1-updates.png)
 
-Your system details, what's installed now, and what's queued for the next
-restart. **Release Channel** switches between the stable version and the
-early one. **Graphics Driver** switches you to the NVIDIA driver if your card
-wants it. Neither appears unless there's actually something to switch to.
-**Mission Center** opens the system monitor.
+The Bluefin wordmark leads the page, with the one action button directly
+under it and a single line of status under the button: **Up to date ·
+checked at** a time, how many updates are available, or **Restart to finish
+updating**. If something went wrong, a second line says what. **System
+Updates** groups System Components and Operating System; **Apps and Tools**
+groups Applications, Developer Tools and, on computers that can run printer
+drivers, Printer Drivers. Each row shows its own state, so you
+can see which source is holding you up without opening anything. Only the
+sources this computer can manage are listed at all, so a source it does not
+update is absent rather than explained at length, and a group whose sources all
+drop out goes with them.
+**Preferences** (Ctrl+,) has a switch per source: a source you turn off there
+says **Disabled in preferences** as soon as you change it, and a source you
+cannot turn on shows its switch off, greyed out, with **Disabled by
+administrator** or **Not available on this computer** saying which fact
+excludes it.
+
+One button covers all of them. It reads **Check Again** when nothing is
+pending, **Update All** when something is, and **Retry Failed** if a source
+didn't finish. A staged system version adds its own **Restart Now** to the
+right of the **Operating System** row, so the header offers no button then;
+the source that fails does not stop the others. A run long enough that you
+wandered off finishes with a desktop notification.
+While checking or installing, an animated activity bar takes the button's
+place and stays moving even when the underlying tool has no new output. It
+does not claim a percentage.
+
+Long work stays visible whatever page you move to. While a check, an update,
+a system download, switch or rollback, **Free Up Space**, or an app
+collection install is running, a bar with a spinner appears across the top of
+the window, above both the sidebar and the page, so it stays in reach in a
+narrow window that shows only one of them; its tooltip names the task, or
+counts them. Clicking it opens **Activity**, which lists every running task
+with what it is doing now (for a system download, the downloader's latest
+message), a percentage when the task can measure one, and roughly how long is
+left once that measure is steady. When the last task ends, the bar goes away
+and the list says **No Tasks Running**.
+
+Everything else on the page sits below the sources, each part only where it
+applies (not all of it fits in the shot above).
+
+**Automatic Updates** is the one switch for whether this system keeps itself
+up to date in the background. It appears only on systems that ship the
+unattended-update timer, and it's a choice about the future — updating right
+now is the button above.
+
+**Your System** is a compact line saying what's installed now and what's
+queued for the next restart; the exact build identifiers sit behind
+**Details** for when you need to quote them in a bug report.
+
+On systems that update as a whole, **Operating System** holds
+**System Updates**, which downloads the next system version by itself, and
+**What's Changing**, which lists exactly what software a pending update will
+add, remove, or upgrade once you press **Compare**. **Roll Back** — returning to
+the previous version if an update went badly — lives under **Powerwash**, and
+only appears where a previous deployment actually exists.
+
+Each other source keeps its own group for when you want to update just one
+thing: **Apps** lists the Flatpak updates waiting, and **Developer Tools**
+lists the command-line tools you installed with Homebrew, with a button to
+check for new versions. If a Homebrew package came from an unofficial source,
+**Manage Source Trust** asks you to trust that source before it will keep
+updating it, with one row per source that opens to show each program with
+its own Trust button, and a Trust Tap button that trusts every program you
+installed from that source.
+
+**Advanced** sits last and holds the two choices that replace the operating
+system itself, because both land through an update and both need a restart.
+The Release Channel switch, **Get Updates Early**, moves between the stable
+version and the early one, and **Graphics Driver** switches you to the NVIDIA
+driver if your card wants it. Neither offers a change unless there is
+actually something to switch to.
+
+There is no separate System page. What this computer *is* — its name, memory,
+disk, and hardware — is GNOME Settings' job, and Control Center does not
+duplicate it.
+
+---
+
+## Apps
+
+![Apps](screenshots/2-applications.png)
+
+**App Collections** lead the page. Each collection expands into the apps and
+tools it holds, and every one of them carries a checkbox on its right edge,
+so you choose what you want rather than a whole collection at once. A
+**Select All** button at the end of the collection's title checks everything
+in it in one press, and each entry says where it comes from — **from
+Homebrew**, **from Brew Tap** or **from Flathub**. An app that is already on
+the system is checked and cannot be chosen again, and says **Installed from
+…** instead.
+
+The **Install Selected** button at the top installs exactly what you
+checked. A collection you selected in full installs as a whole, the way its
+own definition says; a partly selected one installs just the entries you
+picked. Where an app comes from a source this computer does not trust yet,
+the app is trusted on its own first, and the confirmation that follows says
+how much was trusted. Installs show stepped progress while they run, using
+the same controls in the explicit setup flow. App Store and VS Code entries
+are not selectable and are never installed implicitly with a collection.
+A collection whose apps and tools are all already on the system reads
+**(Installed)** when the page loads, not only after an install in the same
+session.
+
+Monospace Fonts is under **Features → Developer Mode**, with its own entry
+choices and Install action. Installing it does not enable Developer Mode.
+Its entries start unchecked, including in the Setup Assistant; Next and Back
+preserve choices and never install this collection. If Developer Mode is disabled,
+the collection is offered on Apps instead. Bluefin CLI has a separate Features
+switch rather than a legacy terminal collection.
+
+**Installed Apps** and **Command-Line Tools** follow: installed casks first,
+then explicitly requested formulae (the packages Homebrew manages).
+Dependency-only formulae do not crowd the inventory. Removing a package asks
+first; formulae also offer pin and unpin actions. There is no Flatpak list,
+external catalog launcher, or package search here — a collection entry may
+say that a Flatpak is already installed, but Flatpaks are not listed as
+their own group.
+
+Finally, **Backup** contains **Export app list**, which saves a list of your
+apps and tools to your home folder (named Brewfile, replacing any file already
+there) so you can reinstall them later.
+Export shows **Exporting…** and an activity spinner until it finishes, then
+becomes available again, including after a failed export.
+
+---
+
+## Agents
+
+![Agents](screenshots/3-agents.png)
+
+**Agent Mode** is one switch that runs AI models on this computer. Its owned
+server binds only to loopback, disables peers and prompt history, and does not
+offload inference. A client such as Goose can separately use a cloud provider;
+check that client's settings before sending sensitive information.
+Turning Agent Mode on installs the llmman model server from Homebrew,
+downloads the engine that suits your hardware, and starts it on this computer
+only. Turning it off stops the server and keeps the software and any models you
+downloaded. The row shows an activity spinner throughout setup and shutdown, then
+restores the switch if the operation fails.
+
+**Active Model** lets you choose among models downloaded with `llmman`, becoming usable
+only when the local server is ready. **Manage Models** opens llmman's own models page so users pull,
+remove, and try models there. The connection address is directly selectable, not hidden in Details.
+
+**Troubleshooting** sits below Agent Mode where Homebrew is installed. Its
+**Goose** row is the Agent Mode desktop GUI with read-only tools for this
+computer's logs, services, and network, plus searches of the Project Bluefin
+knowledge base, which go online. While Goose Desktop or linux-mcp-server is
+missing, the row offers **Set Up**, which installs them with Homebrew (Goose
+Desktop is published for x86_64 computers only). Once they are installed it
+asks for Agent Mode, then a model, and then offers **Launch**. Goose runs in a
+profile Control Center writes for it on every launch, so your own Goose
+configuration is never read or changed, and one session runs at a time. The
+desktop shortcut and `chairlift --ask-bluefin` launch Goose Desktop directly
+when ready, or open Control Center to the Agents page naming the missing
+requirement. **Show Ask Bluefin in Menu** toggles the distribution's shortcut
+in GNOME's top panel menu, and reads on only when the menu actually lists it. Apps and terminals opened
+after Agent Mode is on receive `OLLAMA_HOST`; already-open ones need restarting.
+Everything here runs in your own account, without an administrator password.
+
+**Contribute to Bluefin** runs the Hive contributor appliance in a terminal to
+contribute tasks to Project Bluefin. Before launch, preflight verifies that
+`xdg-terminal-exec`, `ujust`, the `contribute` recipe, and `podman` are
+available, and that a Hive registration file is present. When a requirement is
+missing, the row says in plain words what is needed and keeps the action
+button unavailable until ready; a missing sign-up also shows **Registration Guide**,
+which opens the setup instructions. In dry-run mode, it previews the launch
+without opening a terminal.
 
 ---
 
 ## Features
 
-![Features](screenshots/5-features.png)
+![Features](screenshots/4-features.png)
 
-**Developer Mode** gives your account access to containers, virtual machines,
-and serial devices. **Gaming Mode** installs Steam and the tools that make
-games run well. **Local AI** runs an AI model on your own machine instead of
-in the cloud, using your graphics card if you have one — the first start
-downloads several GB. **Enhanced Troubleshooting** sets up an AI assistant
-that can read your logs, services, and network to help work out what's wrong,
-then launches it — the row says which AI service answers your questions,
-since the default one is Google's. **System Features** is Snow Linux's
-feature manager, and is empty elsewhere.
+**Game Mode** leads the page and stages a change between the standard and
+gaming system images. The Steam, Gamescope, Open Gaming Collective kernel,
+and reboot warning remains explicit. Your Flatpaks stay untouched in both
+directions, including apps installed by older releases.
+
+**Bluefin CLI** in **Terminal** is one switch for the Bash terminal experience.
+It installs command-line tools (including `ugrep`), enables Starship, zoxide,
+direnv and mise, and provides eza/bat/ug aliases. Expand it to inspect the tools.
+Chairlift owns the package definition and Bash scripts independently of the
+image. Turning it off removes managed Bash integration and keeps installed
+tools. Personal configuration is preserved; recognized legacy Common blocks
+are migrated on enable. Open a new Bash terminal after changing the switch.
+Fish and Zsh are explicitly unsupported and are not changed.
+
+Expand **Developer Mode**, **WSL Mode**, or **Enable Docker**
+to read the packages and changes involved, like App collections on Apps.
+Clicking the row expands it; the separate switch starts the action. Package
+disclosures are informational, not a live package log. Developer Mode also
+contains **Monospace Fonts** as an independent collection choice with its own
+explicit installation action; expanding or switching Developer Mode does not
+install this collection.
+
+**Desktop Integrations** offers **Tailscale Integration** and **Sync Folder
+Integration** switches for GNOME Quick Settings. Tailscale's initial switch
+position is on and Sync Folder's is off; once GNOME answers, the switches show
+its actual saved choices. Sync Folder is labelled experimental. A missing
+extension or GNOME session leaves its switch off and unavailable and explains
+why.
+Changing a switch enables or disables that extension for your account; it does
+not install software or start Tailscale or Sync Folder services. Preview mode
+leaves GNOME preferences unchanged.
+
+**Developer tools** start with **Developer Mode**, which lets you run containers
+and virtual machines, and use USB and serial hardware, without being asked for permission each time. It needs
+your administrator password, and takes effect after you log out and back in.
+Switching it on also installs the Dev Container CLI (`devcontainer`) when
+Homebrew is available; if that install fails you are told, and developer access
+stays on.
+A distribution may also configure it to install the Pulp feed reader and stage
+a curated list of developer feeds in your home folder once you switch it on —
+both are off by default, and turning Developer Mode back off never removes the
+reader, the file, or anything you imported from it.
+Developer options also offer **WSL Mode** (nsl persistent Linux machines by
+default on x86-64 Linux, with Lima Ubuntu LTS as an alternative on amd64 or arm64)
+and **Enable Docker**. Turning either on first enables Developer Mode if it
+is off, using the same administrator authentication as its own switch. If
+authentication is canceled or fails, WSL or Docker setup does not start. Refused
+authorization is shown as Failed, not Canceled.
+Once developer access is granted, a later WSL or Docker failure leaves it
+granted; retry the child action after fixing its reported requirement.
+Turning either child off does not turn Developer Mode off. Preview mode
+changes none of the observed switch states.
+WSL also needs hardware virtualization and access to `/dev/kvm`; nsl also needs
+membership in the `kvm` group. Granting `/dev/kvm` access requires a new login;
+adding only `kvm` group membership does not.
+
+If WSL setup or a state check fails, open **Details** on its row in the
+**Developer Mode** detail page to read the actual action, inventory or shell
+probe error. After addressing the problem, **Recheck** refreshes inventory and,
+in live mode, shell readiness without restarting Control Center; a successful
+check clears Details. Preview skips shell probes for both engines and reports a
+running machine's readiness as unchecked. In live mode, NSL's `run` probe may
+start a VM that stops between listing and probing, so Recheck is not guaranteed
+to leave a stopped VM stopped. It never automatically repairs, migrates, resets
+or deletes a machine. A failed read keeps that engine's last confirmed switch
+state, including the option to stop a known running guest. A live stop still
+requires a fresh successful inventory read; preview mode only logs the intended
+stop.
+
+**Enable Docker** sets up the same rootful Docker that Bluefin DX ships: a
+system Docker service for the computer, membership in the `docker` group for
+you, and the `docker` command with buildx and compose. Its expanded package
+list names the Homebrew formulae involved, with the daemon's labelled
+**Homebrew, installed for the whole computer**. If your system image already
+includes Docker, that Docker is used. Otherwise administrator approval lets the
+fixed Docker helper download Homebrew's packages itself, check them against
+Homebrew's signature, and install them in a system location; nothing your
+account can change is ever run as administrator. This needs a network
+connection and can ask for authentication again after Developer Mode. The
+`docker` command itself is installed into your Homebrew afterwards. A rootless
+Docker set up by an earlier release is turned off once system Docker is on.
+Newly granted access requires logging out and back in. Until then,
+**Awaiting new login** is not ready. If Docker is already running but your
+account cannot use it, the switch shows off and says so; turn it on to get
+access. A responding `/var/run/docker.sock`, not installed CLI tools or an
+active unit alone, confirms readiness. Turning Docker off stops both system
+units for all accounts but keeps containers, installed packages, group
+membership, and Developer Mode. New Docker engine versions arrive through
+**Update all** with your other developer tools. Masked system units or
+missing helper actions require an image or administrator fix. A known running
+daemon stays stoppable even if its socket check fails.
+
+Enable also attempts native Microsoft VS Code setup separately; it does not
+install the editor. It seeds defaults only if settings are absent and installs
+Bluefin's Dev Containers, Remote SSH, and Container Tools extensions. Existing
+settings, including JSONC comments and symlinks, stay untouched. Successful setup
+records the upstream version-1 marker; later runs check extension IDs rather
+than trusting that marker alone. Without native VS Code this step is skipped;
+an editor setup error stays retryable without undoing Docker or developer
+access. Preview writes no
+settings or marker and launches no editor CLI.
+Use **Virtual Machine Engine** to choose the built-in engine or Lima;
+both run Ubuntu. An external documentation button beside the chooser opens the
+engine's documentation. An existing Lima Ubuntu machine is kept as the choice
+only when a successful inventory confirms no built-in machine exists, rather
+than creating a second one. A failed inventory is not evidence of absence.
+Likewise, a Debian machine the built-in engine made in an earlier release
+keeps being used, and the chooser says so, instead of an Ubuntu machine being
+created beside it.
+**Gaming** offers **Game Mode** to switch between standard and gaming OS variants
+(including Steam, Gamescope, and an Open Gaming Collective kernel with a reboot
+confirmation). Switching images never installs, removes, or cleans up your
+Flatpaks; there is no separate gaming-tools installer or removal switch.
+**Printers** is one switch per printer driver family — Ghostscript,
+PostScript, HP (HPLIP), and Gutenprint — offering extra drivers for printers
+that don't work on their own. Each runs as a small container in your own account and only
+this computer can use it: other computers on your network can't print to it
+or reach its settings page. When one is running, its row names the local web
+page where you add and manage printers, with a **Manage** button that opens
+it in your default browser. Under each driver, **USB Printer** chooses the
+printer plugged into this computer that the driver may use. The choice is
+remembered, and the driver finds the printer again each time you log in,
+even after a reboot gives it a new place. If you plug it back in while
+logged in, pick the printer again. One printer can belong to only one driver. Turning a driver on checks that its image was
+signed by its publisher and keeps that exact version. Turn it off and back on
+to migrate an older installation, or use **Printer Drivers** on the Updates
+page to check for and apply a newer verified image. There is no background
+schedule. The rows evaluate systemd state,
+journal logs, and container images to diagnose and surface actionable failures
+— device access permissions, image availability, plugin verification, or
+service crashes — rather than displaying a false enabled or running state.
+Printing through a real device has not yet been verified against hardware.
+**Compass** is one switch that installs Compass, TunaOS's fast,
+keyboard-first launcher for apps, files, and commands, bound to Super+Space without a background service, for every account on
+the computer. It comes from FlatPark, the community Flatpak remote the system
+already lists, and may ask for an administrator password. Turning it off asks
+first, then removes Compass and keeps your Compass settings, releasing the Super+Space shortcut. Where FlatPark is
+not set up, the row says so and the switch cannot install anything. Compass
+is published for x86_64 computers only; on other computers the row says so.
+**Optional Features** is the distribution's own feature manager; it is hidden
+where the distribution ships none. When a computer offers none of these —
+no Developer Mode, no Game Mode, no Printers, no Compass, no optional features — the page
+says **Nothing to Set Up Here** rather than showing an empty screen.
+
+Agent Mode and Troubleshooting have their own **Agents** page.
+Open the **Developer Mode** detail from Features for Developer Mode, WSL, and
+Docker controls, or use `--dx-mode` to enter it directly. **Development Apps**
+shows source, installed status, and an individual **Install** action for Visual
+Studio Code, VSCodium, and JetBrains Toolbox (`ublue-os` Homebrew taps only),
+Cursor and Antigravity (system FlatPark), and Zed (system Flathub): six entries.
+Sublime Text is deliberately excluded for now by user approval. No Bazaar launch
+or enabled Developer Mode toggle is required. **Back to Features** returns to
+Gaming and other features.
+Developer and Gaming operations each retain their own
+Setup activity checklist; errors are shown immediately rather than hidden behind
+an older message.
 
 ---
 
-## Applications
+## Livery
 
-![Applications](screenshots/1-applications.png)
+![Livery](screenshots/5-livery.png)
 
-Your installed apps and Homebrew packages, search across both, **Bundles**
-for installing a whole set at once, and a prompt before using an unofficial
-Homebrew tap.
+Choose your profile picture, set up wallpapers, and customize the icons around your desktop.
+Every profile-picture, app launcher icon, top-bar icon, and Files icon choice
+has a visual preview. Search results fetch artwork for at most twelve visible
+catalog entries; searching the rest does not download the whole catalog.
+Rotation changes the real login schedule with its preferences, and a failed
+save restores confirmed state.
+
+**Profile Picture** is the picture on your login and lock screens. Pick one of
+Project Bluefin's dinosaurs and Control Center shows its picture from the copy
+bundled with the app; nothing changes until you press Apply. If the picture
+cannot be shown or the change fails, the chooser says so and your old picture
+stays put. Where AccountsService is unavailable the picture is saved to your
+home folder instead and appears after you log out and back in, and the
+confirmation says which of the two happened.
+
+**Wallpapers** is directly below Profile Picture. Its **More Dinosaurs**
+checkbox starts checked; press its **Install** button to set it up, or uncheck
+it to skip setup. Merely opening Livery changes nothing. Expanding the row shows
+the Valhalla slideshow app and extra Bluefin wallpapers. It does not install
+Damask from an older image's App collection definition; wallpaper setup is absent from Apps.
+Setup converts extra SVG/JPEG XL/AVIF backgrounds to PNG in your own data folder,
+adds that folder to Valhalla's manual folders, and selects its manual source,
+keeping any folders you already chose. The original wallpaper files are kept.
+Valhalla's native SVG/JPEG XL support is tracked in
+[Valhalla #99](https://github.com/tunix/valhalla/issues/99).
+The row reads **(Installed)** only when its wallpaper source and settings are
+ready, not simply because the app is installed. A setup failure shows its cause
+and leaves the control available to retry. A dry-run preview changes neither
+files nor settings. Setup does not open Valhalla; open it when you are ready
+to use the slideshow.
+
+During installation, **Setup activity** shows the current step: installing the
+app, installing extra wallpapers, preparing images, configuring the slideshow,
+and verifying setup. Its progress bar pulses while work is running rather than
+guessing a percentage. Completed steps stay visible if a later step fails;
+the failed step and Retry action make the next action clear. Preview is labeled
+as preview, never as completed installation.
+
+**App Launcher Icon**, **Top Bar Icon**, and **Files Icon** start collapsed.
+Expand a section to reveal its switch, picker, and any rotation controls.
+Expanding a section does not apply or change an icon.
+
+**App Launcher Icon** is your own mark on the Show Applications button on
+GNOME. On KDE Plasma, the same chooser updates each configured Kickoff applet;
+if no Kickoff applet is present, the group reports unavailable instead of
+pretending the setting can be applied. Search all 3,461 brands
+[Simple Icons](https://simpleicons.org/) publishes — your project, your
+employer, whatever you answer to — and Control Center fetches the one you pick.
+You set it once; it never changes on its own, because a personal mark that
+rotated would stop being personal. Turning the mark off resets the Kickoff applet
+to Plasma's default icon.
+
+On GNOME, **Top Bar Icon** puts a foundation's mark in the top bar:
+CNCF, the Linux Foundation, GNOME, freedesktop.org, Apache, Rust, Universal
+Blue, Bazzite, Aurora, or the Open Gaming Collective. This section is omitted
+on Plasma, which has no corresponding top-bar surface. On a gaming image the
+collective's mark is the one you start with, since that is whose work the
+image ships — pick any other and it stays picked.
+Apache uses the foundation's current official oak-leaf mark, shown in monochrome
+like the other symbolic choices.
+
+**Files Icon** marks the Files application on GNOME or Dolphin on KDE Plasma with
+the project you actually work on. Every CNCF project that publishes artwork
+is in the list — 214 of them, Kubernetes through bootc — so the picker searches
+rather than scrolls, and each one arrives as the project's own color icon
+straight from
+[cncf/artwork](https://github.com/cncf/artwork).
+
+Both **Top Bar Icon** and **Files Icon** can **Rotate at Login**, which moves
+one step down the list each time you log in — so you stand somewhere slightly
+different every day without ever picking again.
+
+Any section will also take an SVG of your own, which is the way in for
+anything not on the list.
+
+Three things worth knowing. The top-bar section needs the Custom Command Menu
+GNOME extension; without it the section is not shown at all rather than
+offering a control that does nothing. On GNOME, the Files mark is shared
+everywhere — the dock, the app grid, the window switcher — because GNOME keeps
+one icon per app, not one per place; Plasma's Dolphin is a separate surface.
+Only the Files icon is in color: GNOME's top bar and app-grid glyph draw
+single-color silhouettes, recolored to match your theme.
+
+On GNOME, turning a section off restores the previous override or resets to
+the distribution default. On KDE Plasma, turning App Grid Livery off removes
+ChairLift's icon key from Kickoff applets still using it, restoring Plasma's
+default; an applet changed to another icon is left alone.
 
 ---
 
 ## Maintenance
 
-![Maintenance](screenshots/2-maintenance.png)
+![Maintenance](screenshots/6-maintenance.png)
 
-Clean up files you no longer need, plus anything else your distribution added
-here. **Reset** holds the two you can't undo, so each asks first: Powerwash
-removes everything you installed, and Factory Reset puts the system back to
-how it shipped. It's switched off normally, and turned on above so you can
-see it.
+One button. **Free Up Space** deletes old downloads and app parts nothing uses,
+and leaves your apps, files, and containers alone. It
+tells you how much it reclaimed only when it could measure it. An activity
+spinner remains visible while cleanup is running. Below it sit any
+**Maintenance Tasks** whoever set up this computer added. **Powerwash**
+holds the actions you can't undo (under **Maintenance → Powerwash**): **Roll Back**
+returns to the previous version if an update caused problems, **Powerwash**
+removes your Flatpak apps and Distrobox containers (everything on the Apps page
+stays), and **Factory Reset** reinstalls the operating system, warning first
+that its reset method is still experimental.
+Those stay hidden normally until turned on or until a rollback exists; the
+Powerwash entry's subtitle names only what the detail currently offers, and
+when the reset actions are off the detail says so at the top.
 
 ---
 
 ## Help
 
-![Help](screenshots/6-help.png)
+![Help](screenshots/7-help.png)
 
-Links to the distribution's website, issues, and discussions.
+**Troubleshooting**, the AI troubleshooting assistant, is on the Agents page.
+
+Three links, each shown only when it is configured: **Browse Documentation**
+(the `website` URL), **Report a Problem** (the `issues` URL, where bug reports
+go), and **Ask for Help** (the `chat` URL, Ask Bluefin on Bluefin).
+
+A **Diagnostics** group offers a **System Diagnostics** row that copies
+details about this computer — OS, image, system version, full build digest,
+kernel, desktop, and GPU, without your user name or home folder — to the
+clipboard for a help request.
+The version and digest come from the same unprivileged status read as the
+Updates page's Details row, and are omitted where no deployment is readable.
+
+When the configuration turns on something this computer cannot run — Flatpak
+or Homebrew is absent, or the machine is not a native A/B install — **Feature
+Availability** appears with one collapsed row, **Why Is Something Missing?**,
+that names each such feature and what it needs.
 
 ---
 
@@ -90,15 +516,40 @@ Links to the distribution's website, issues, and discussions.
 make screenshots
 ```
 
-Builds the app, runs it headless under Xvfb, and writes one cropped PNG per
-page to `docs/screenshots/`. Always `--dry-run`, so nothing on the capture
-machine changes. Hardware the runner doesn't have is stubbed, and `make ci`
-checks no released binary can read those stubs.
+Builds the app, runs it inside the Dakota image on a private headless Mutter
+Wayland session — the compositor Bluefin runs — and writes one PNG per page to
+`docs/screenshots/`. The session's virtual monitor is the window's default
+900×700, so each capture is exactly the window. Keys go through Mutter's
+RemoteDesktop API and frames through its ScreenCast API. Always `--dry-run`,
+so nothing on the capture machine changes. Hardware the runner doesn't have
+is stubbed, and `make ci` checks no released binary can read those stubs.
+
+The capture session is not a booted OS-update target, and its system Docker
+units may be unavailable. A dry-run capture never installs, starts, or stops
+Docker. Live activation belongs to `make e2e-docker`
+(`TestIntegrationDockerSystem` in `test/e2e/docker_system_test.go`), not screenshot
+evidence. Its real authentication prompt receives EOF, and the summary reports
+the actual outcome and exit code: exit 127 with "Not authorized" proves refusal,
+not live cancellation. Only exit 126 or "Request dismissed" proves a dismissed
+prompt. The gate starts from an image without Docker, so its real helper
+installs Docker from Homebrew's verified packages over the network.
+Readiness still requires a real new-group session and HTTP 200 from the
+system daemon. Capture needs podman and Go on the host.
 
 Run it locally when something's appearance changes and you want to preview
 before a release. It isn't regenerated per commit, since font and theme
-drift would churn the repo — instead, `.github/workflows/release-screenshots.yml`
-runs it automatically after each published GitHub Release (building from that
-release's tag) and commits any changed PNGs to `main`, so what ships is what's
-pictured here without anyone remembering to do it by hand. `make ci` checks
+drift would churn the repo — instead, [the release screenshot workflow](../.github/workflows/release-screenshots.yml)
+runs after a successful `goreleaser` workflow (or a manual dispatch), builds
+from the selected release tag, and opens a `release-screenshots` pull request
+against `main` with changed PNGs. The release-completion trigger is
+`workflow_run`, not `release: published`. That pull request goes through the merge queue
+like any other and still needs one approval.
+
+A pull request that changes the UI can get its own screenshots without a
+local podman: a maintainer comments `/screenshots` on it (or runs
+[the pull request screenshot workflow](../.github/workflows/pr-screenshots.yml)
+by hand with its number). That workflow captures from the pull request's head
+commit with `make screenshots` and commits any changed PNGs to its branch;
+the push re-runs CI. It runs on request rather than per push for the same
+drift reason, and handles branches in this repository only. `make ci` checks
 that every page and configurable group has a screenshot and an entry here.

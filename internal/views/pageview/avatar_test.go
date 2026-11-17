@@ -1,0 +1,133 @@
+package pageview
+
+import (
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+
+	"github.com/projectbluefin/chairlift/internal/avatar"
+)
+
+// A download is not an account update, and a face-file write is not a live
+// one: each route's toast must claim exactly what happened.
+func TestAvatarAppliedClaimsOnlyWhatTheRouteDid(t *testing.T) {
+	entry := avatar.Avatar{CommonName: "Bob", Species: "Torosaurus latus"}
+	tests := []struct {
+		route      avatar.Route
+		want       string
+		notContain string
+	}{
+		{avatar.RouteBusctl, "is now your profile picture", "log out"},
+		{avatar.RouteFaceFile, "after you log out and back in", "is now"},
+		{avatar.RouteDryRun, "not applied", "is now"},
+		{"", "not applied", "is now"},
+	}
+	for _, tt := range tests {
+		got := AvatarApplied(tt.route, entry)
+		if !strings.Contains(got, "Bob") || !strings.Contains(got, tt.want) || strings.Contains(got, tt.notContain) {
+			t.Errorf("AvatarApplied(%q) = %q, want it to name Bob, contain %q, and not %q",
+				tt.route, got, tt.want, tt.notContain)
+		}
+	}
+}
+
+// Both failure banners must tell the user the old picture is still theirs.
+func TestAvatarFailuresSayThePictureWasKept(t *testing.T) {
+	entry := avatar.Avatar{CommonName: "Bob"}
+	for _, msg := range []string{AvatarPreviewFailed(entry), AvatarApplyFailed(entry)} {
+		if !strings.Contains(msg, "Bob") || !strings.Contains(msg, "not changed") {
+			t.Errorf("failure message %q must name the entry and say the picture was not changed", msg)
+		}
+	}
+}
+
+func TestAvatarCurrentRowPrecedence(t *testing.T) {
+	entry := avatar.Avatar{CommonName: "Bob", Species: "Torosaurus latus"}
+	if got := AvatarCurrentRow(true, &entry); got != (Row{Title: "Bob", Subtitle: "Torosaurus latus"}) {
+		t.Errorf("an entry applied this session must name it, got %+v", got)
+	}
+	if got := AvatarCurrentRow(false, &entry); got.Title != "Bob" {
+		t.Errorf("an applied entry wins even before its file is observed, got %+v", got)
+	}
+	existing, none := AvatarCurrentRow(true, nil), AvatarCurrentRow(false, nil)
+	if existing == none {
+		t.Errorf("an existing picture and no picture must read differently, both %+v", existing)
+	}
+}
+
+// TestAvatarApplyNeedsArtworkAndNoApplyInFlight holds the chooser's Apply
+// rule. An apply that completes after the user picked another entry whose
+// download has not landed once re-enabled Apply unconditionally, offering a
+// button that silently did nothing.
+func TestAvatarApplyNeedsArtworkAndNoApplyInFlight(t *testing.T) {
+	tests := []struct {
+		applying, hasArtwork, want bool
+	}{
+		{false, true, true},
+		{false, false, false},
+		{true, true, false},
+		{true, false, false},
+	}
+	for _, tc := range tests {
+		if got := AvatarApplyEnabled(tc.applying, tc.hasArtwork); got != tc.want {
+			t.Errorf("AvatarApplyEnabled(applying=%v, hasArtwork=%v) = %v, want %v", tc.applying, tc.hasArtwork, got, tc.want)
+		}
+	}
+}
+
+// TestAvatarChooserDecidesApplyThroughOneRule holds every Apply sensitivity
+// change in profile_picture.go to AvatarApplyEnabled, so the completion that
+// once set it unconditionally cannot return.
+func TestAvatarChooserDecidesApplyThroughOneRule(t *testing.T) {
+	_, filename, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller could not locate avatar_test.go")
+	}
+	data, err := os.ReadFile(filepath.Join(filepath.Dir(filename), "..", "profile_picture.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := strings.Count(string(data), "p.apply.SetSensitive(")
+	ruled := strings.Count(string(data), "p.apply.SetSensitive(pageview.AvatarApplyEnabled(")
+	if calls == 0 || calls != ruled {
+		t.Errorf("%d of %d Apply sensitivity changes bypass AvatarApplyEnabled", calls-ruled, calls)
+	}
+	if !strings.Contains(string(data), "pageview.AvatarApplyEnabled(false, p.loaded)") {
+		t.Error("the apply completion no longer requires a landed preview before re-offering Apply")
+	}
+}
+
+// TestAvatarPreviewFailureClearsTheStaleImage holds the chooser to the one
+// thing that keeps the failure banner honest. Selecting keeps the previous
+// picture up until the new one lands, so a preview that never lands leaves
+// another entry's dinosaur in the widget beside a banner naming this one;
+// the failure branch has to clear it.
+func TestAvatarPreviewFailureClearsTheStaleImage(t *testing.T) {
+	_, filename, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller could not locate avatar_test.go")
+	}
+	data, err := os.ReadFile(filepath.Join(filepath.Dir(filename), "..", "profile_picture.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(data)
+
+	// AvatarPreviewFailed is named in exactly one place: the branch that
+	// the preview failure reaches. The clear has to be inside that same
+	// branch, ahead of the banner that explains it.
+	end := strings.Index(src, "pageview.AvatarPreviewFailed(entry)")
+	if end < 0 {
+		t.Fatal("the preview failure no longer names the entry it could not show")
+	}
+	start := strings.LastIndex(src[:end], "if err != nil {")
+	if start < 0 {
+		t.Fatal("the preview failure is no longer reached from an err check")
+	}
+	const clear = "p.preview.SetCustomImage((*gdk.PaintableBase)(nil))"
+	if !strings.Contains(src[start:end], clear) {
+		t.Error("a failed preview leaves the previous entry's picture in the chooser")
+	}
+}

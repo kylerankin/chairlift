@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -62,8 +63,8 @@ func TestRecordWritesOneLinePerEntry(t *testing.T) {
 	withSink(t, path)
 
 	Record("channel-switch", map[string]string{"channel": "testing"},
-		[]string{"pkexec", "/usr/bin/chairlift-ublue-helper", "channel-switch", "testing"}, SuppressedDryRun)
-	Record("restart", nil, []string{"pkexec", "/usr/bin/chairlift-ublue-helper", "restart"}, SuppressedNone)
+		[]string{"pkexec", "/usr/bin/chairlift-helper", "channel-switch", "testing"}, SuppressedDryRun)
+	Record("restart", nil, []string{"pkexec", "/usr/bin/chairlift-helper", "restart"}, SuppressedNone)
 
 	entries := readEntries(t, path)
 	if len(entries) != 2 {
@@ -77,7 +78,7 @@ func TestRecordWritesOneLinePerEntry(t *testing.T) {
 	if first.Args["channel"] != "testing" {
 		t.Errorf("first entry args = %v, want channel=testing", first.Args)
 	}
-	wantArgv := []string{"pkexec", "/usr/bin/chairlift-ublue-helper", "channel-switch", "testing"}
+	wantArgv := []string{"pkexec", "/usr/bin/chairlift-helper", "channel-switch", "testing"}
 	if len(first.WouldRun) != len(wantArgv) {
 		t.Fatalf("first entry WouldRun = %v, want %v", first.WouldRun, wantArgv)
 	}
@@ -177,4 +178,106 @@ func TestResetClearsTheSequenceCounter(t *testing.T) {
 	if len(entries) != 1 || entries[0].Seq != 1 {
 		t.Fatalf("after Reset, sequence did not restart: %+v", entries)
 	}
+}
+
+func TestRecordOutcomeAppendsEntry(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "journal.jsonl")
+	withSink(t, path)
+
+	Record("channel-switch", map[string]string{"channel": "testing"},
+		[]string{"pkexec", "/usr/bin/chairlift-helper", "channel-switch", "testing"}, SuppressedNone)
+
+	executed := [][]string{{"bootc", "switch", "--enforce-container-sigpolicy", "ghcr.io/projectbluefin/dakota:testing"}}
+	RecordOutcome("channel-switch", OutcomeSucceeded, nil, executed)
+
+	code126 := 126
+	Record("restart", nil, []string{"pkexec", "/usr/bin/chairlift-helper", "restart"}, SuppressedNone)
+	RecordOutcome("restart", OutcomeRefused, &code126, nil)
+
+	code1 := 1
+	Record("rollback", nil, []string{"pkexec", "/usr/bin/chairlift-helper", "rollback"}, SuppressedNone)
+	RecordOutcome("rollback", OutcomeFailed, &code1, [][]string{{"bootc", "rollback"}})
+
+	Record("pin", map[string]string{"day": "20261003"}, []string{"pkexec", "/usr/bin/chairlift-helper", "pin", "20261003"}, SuppressedNone)
+	RecordOutcome("pin", OutcomeTimedOut, nil, nil)
+
+	Record("factory-reset", nil, []string{"pkexec", "/usr/bin/chairlift-helper", "factory-reset"}, SuppressedNone)
+	RecordOutcome("factory-reset", OutcomeCancelled, nil, nil)
+
+	twoCmds := [][]string{
+		{"usermod", "-aG", "docker", "testuser"},
+		{"systemctl", "enable", "--now", "docker.socket", "docker.service"},
+	}
+	Record("docker-enable", nil, []string{"pkexec", "/usr/bin/chairlift-helper", "docker-enable"}, SuppressedNone)
+	RecordOutcome("docker-enable", OutcomeSucceeded, nil, twoCmds)
+
+	entries := readEntries(t, path)
+	if len(entries) != 12 {
+		t.Fatalf("journal has %d entries, want 12", len(entries))
+	}
+
+	// Verify outcome entries
+	out1 := entries[1]
+	if out1.Seq != 2 || out1.Action != "channel-switch" || out1.Outcome != OutcomeSucceeded {
+		t.Errorf("out1 = %+v, want seq 2, action channel-switch, outcome succeeded", out1)
+	}
+	if !reflect.DeepEqual(out1.Executed, executed) {
+		t.Errorf("out1.Executed = %v, want %v", out1.Executed, executed)
+	}
+	if out1.ExitCode != nil {
+		t.Errorf("out1.ExitCode = %v, want nil", out1.ExitCode)
+	}
+
+	out2 := entries[3]
+	if out2.Seq != 4 || out2.Action != "restart" || out2.Outcome != OutcomeRefused {
+		t.Errorf("out2 = %+v, want seq 4, action restart, outcome refused", out2)
+	}
+	if out2.ExitCode == nil || *out2.ExitCode != 126 {
+		t.Errorf("out2.ExitCode = %v, want 126", out2.ExitCode)
+	}
+
+	out3 := entries[5]
+	if out3.Seq != 6 || out3.Action != "rollback" || out3.Outcome != OutcomeFailed {
+		t.Errorf("out3 = %+v, want seq 6, action rollback, outcome failed", out3)
+	}
+	if out3.ExitCode == nil || *out3.ExitCode != 1 {
+		t.Errorf("out3.ExitCode = %v, want 1", out3.ExitCode)
+	}
+	if !reflect.DeepEqual(out3.Executed, [][]string{{"bootc", "rollback"}}) {
+		t.Errorf("out3.Executed = %v, want [[bootc rollback]]", out3.Executed)
+	}
+
+	out4 := entries[7]
+	if out4.Seq != 8 || out4.Action != "pin" || out4.Outcome != OutcomeTimedOut {
+		t.Errorf("out4 = %+v, want seq 8, action pin, outcome timed-out", out4)
+	}
+
+	out5 := entries[9]
+	if out5.Seq != 10 || out5.Action != "factory-reset" || out5.Outcome != OutcomeCancelled {
+		t.Errorf("out5 = %+v, want seq 10, action factory-reset, outcome cancelled", out5)
+	}
+
+	out6 := entries[11]
+	if out6.Seq != 12 || out6.Action != "docker-enable" || out6.Outcome != OutcomeSucceeded {
+		t.Errorf("out6 = %+v, want seq 12, action docker-enable, outcome succeeded", out6)
+	}
+	if !reflect.DeepEqual(out6.Executed, twoCmds) {
+		t.Errorf("out6.Executed = %v, want %v", out6.Executed, twoCmds)
+	}
+}
+
+func TestRecordOutcomeWithNoSinkIsNoOp(t *testing.T) {
+	t.Setenv(PathEnv, "")
+	Reset()
+	t.Cleanup(Reset)
+
+	RecordOutcome("restart", OutcomeSucceeded, nil, nil)
+	// No panic, no write
+}
+
+func TestRecordOutcomeToleratesAnUnwritableSink(t *testing.T) {
+	withSink(t, filepath.Join(t.TempDir(), "does-not-exist", "journal.jsonl"))
+
+	RecordOutcome("restart", OutcomeSucceeded, nil, [][]string{{"systemctl", "reboot"}})
+	// No panic, no write
 }

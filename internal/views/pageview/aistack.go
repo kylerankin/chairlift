@@ -1,35 +1,101 @@
 package pageview
 
-import "fmt"
+import "github.com/projectbluefin/chairlift/internal/aistack"
 
-// AIStackRow returns the local-AI row text. accelerator names the compute
-// stack selected for this machine's hardware ("CUDA", "ROCm", "CPU"), and
-// accelerated is false when no GPU was found.
-func AIStackRow(accelerator string, accelerated bool) Row {
-	row := Row{Title: "Local AI Model Server"}
-	if accelerated {
-		row.Subtitle = fmt.Sprintf("Runs on this machine's %s hardware — nothing leaves the device", accelerator)
-		return row
+func AgentModeGroupTitle() string {
+	return "Local AI"
+}
+
+func AgentModeGroupDescription() string {
+	return "Run models on this computer. Prompts are not saved."
+}
+
+func AgentModeRowTitle() string {
+	return "Agent Mode"
+}
+
+// Readiness is observed, not inferred from installed software.
+func AgentModeSubtitle(s aistack.State) string {
+	switch s {
+	case aistack.StateUnavailable:
+		return "This computer is missing a part Agent Mode needs."
+	case aistack.StateProvisioning:
+		return "Checking…"
+	case aistack.StateReady:
+		return "Ready. Restart open apps to use it."
+	case aistack.StateDegraded:
+		return "Agent Mode isn't responding. Turn it off and on again."
+	case aistack.StateDisabled:
+		return "Off. Your downloaded models were kept."
+	default:
+		return "Turn on to download and set up Agent Mode."
 	}
-	// A GPU-less host still gets a working stack, but saying so without
-	// saying it is slow would set the wrong expectation for a first run.
-	row.Subtitle = "No GPU detected — runs on the CPU, which is considerably slower"
-	return row
 }
 
-// AIStackUnavailableSubtitle returns the subtitle for a host that cannot run
-// the stack at all.
-func AIStackUnavailableSubtitle() string {
-	return "Podman is not installed, so there is nothing to run the container with"
-}
-
-// AIStackResultSubtitle returns the subtitle after the switch is toggled.
-// port is the published API port.
-func AIStackResultSubtitle(enabled bool, port int) string {
-	if enabled {
-		// The port is the whole point of the feature — without it the user
-		// has a running container and no idea how to reach it.
-		return fmt.Sprintf("Serving on http://localhost:%d — the first start downloads several GB", port)
+func AgentModeWorkingSubtitle(enabling bool) string {
+	if enabling {
+		return "Setting up… The first time can take several minutes."
 	}
-	return "Stopped and removed — the downloaded model was kept"
+	return "Turning off…"
 }
+
+// A failure may occur before or after the files changed. The view re-observes
+// the actual state instead of claiming every failed disable is still running.
+func AgentModeFailureToast(enabling bool) string {
+	if enabling {
+		return "Couldn't turn on Agent Mode. Try again."
+	}
+	return "Couldn't turn off Agent Mode. Try again."
+}
+
+func AgentModeActiveModelTitle() string {
+	return "Active Model"
+}
+
+func AgentModeActiveModelSubtitle(modelRef string) string {
+	if modelRef == "" {
+		return "No model selected. Use Manage Models to pick one."
+	}
+	return modelRef
+}
+
+func AgentModeModelUnavailable(s aistack.State) string {
+	if s == aistack.StateProvisioning {
+		return "Waiting for Agent Mode…"
+	}
+	if s == aistack.StateDegraded {
+		return "Available when Agent Mode is ready."
+	}
+	return "Turn on Agent Mode to see the current model."
+}
+
+func AgentModeNoModelsStoredSubtitle() string {
+	return "No models downloaded — use Manage Models to pull models."
+}
+
+func GooseRowTitle() string {
+	return "Goose"
+}
+
+func GooseLaunchButtonLabel() string {
+	return "Launch"
+}
+
+func AskBluefinMenuRowTitle() string {
+	return "Show Ask Bluefin in Menu"
+}
+
+func AskBluefinMenuRowSubtitle() string {
+	return "Show Ask Bluefin in the top bar menu."
+}
+
+// AgentModeManageTitle titles the row that opens llmman's models page.
+func AgentModeManageTitle() string { return "Manage Models" }
+
+// AgentModeManageSubtitle says what the web UI is for.
+func AgentModeManageSubtitle() string {
+	return "Open llmman's web UI to pull, remove, or chat with models."
+}
+
+// AgentModeManageLabel is the button that opens the models page.
+func AgentModeManageLabel() string { return "Manage Models" }

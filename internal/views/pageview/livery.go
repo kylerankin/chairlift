@@ -1,0 +1,375 @@
+package pageview
+
+import (
+	"fmt"
+	"strings"
+
+	"github.com/projectbluefin/chairlift/internal/branding"
+	"github.com/projectbluefin/chairlift/internal/livery"
+)
+
+// LiveryPageDescription introduces the tasks the current page can actually
+// perform.
+const LiveryPageDescription = "Choose a profile picture, set up wallpapers, and customize the icons on your desktop."
+
+// Each section names the surface it changes rather than the old Livery
+// taxonomy. Configuration identities remain the original livery_page groups.
+const (
+	LiveryAppGridFragment = "The button that shows all apps."
+	LiveryPanelFragment   = "The menu button in the top left corner."
+	LiveryDockFragment    = "The Files app, wherever it appears."
+)
+
+const (
+	LiveryAppGridTitle = "App Launcher Icon"
+	LiveryPanelTitle   = "Top Bar Icon"
+	LiveryDockTitle    = "Files Icon"
+)
+
+// LiveryChoice is the combo-row model for a foundation section: the labels in
+// display order and the index of the current selection.
+type LiveryChoice struct {
+	Labels   []string
+	Selected uint
+}
+
+// customLabel is the trailing entry that points at the user's own file.
+const customLabel = "Custom SVG…"
+
+// LiveryChoices builds the combo model for a foundation selection.
+//
+// The custom entry is always last so the shipped catalog's order is never
+// disturbed by it. An id the catalog does not contain selects the default
+// rather than leaving the combo unselected: dconf is writable by anything
+// running as the user, and a stale or hand-edited value should land the page
+// somewhere valid instead of blank.
+func LiveryChoices(selectedID string) LiveryChoice {
+	foundations := livery.Foundations()
+	labels := make([]string, 0, len(foundations)+1)
+	for _, f := range foundations {
+		labels = append(labels, f.Name)
+	}
+	labels = append(labels, customLabel)
+
+	if selectedID == livery.CustomID {
+		return LiveryChoice{Labels: labels, Selected: uint(len(labels) - 1)}
+	}
+	if i := livery.IndexOfID(selectedID); i >= 0 {
+		return LiveryChoice{Labels: labels, Selected: uint(i)}
+	}
+	return LiveryChoice{Labels: labels, Selected: uint(livery.IndexOfID(livery.DefaultID))}
+}
+
+// LiveryCustomResultID is the sentinel row that opens a file chooser.
+//
+// It lives inside each picker rather than as a fourth row in every section:
+// choosing a mark is one decision, so it belongs in one place, and three
+// sections each carrying a separate "Custom SVG…" row made the page taller
+// than the window.
+const LiveryCustomResultID = "\x00custom"
+
+// LiveryPickerResult is one row in a search-picker dialog.
+type LiveryPickerResult struct {
+	ID       string
+	Name     string
+	Selected bool
+}
+
+// LiveryProjectResult is retained as the dock's result alias.
+type LiveryProjectResult = LiveryPickerResult
+
+// LiveryProjectResultLimit caps how many result rows the picker draws.
+//
+// The picker is a scrolling dialog rather than part of the page, so it can
+// afford a long list; the cap exists to keep a bare query from building 214
+// rows on every keystroke. An empty query returns the head of the catalog, so
+// the list is populated before the user types.
+const LiveryProjectResultLimit = 50
+
+// LiveryProjectPickerTitle names the chooser dialog.
+const LiveryProjectPickerTitle = "Choose a Project"
+
+// LiveryFoundationResults returns the panel picker's rows for a query.
+//
+// The foundation catalog is ten entries, so its "search" mostly just lists
+// them — but it is the same dialog as the other two, which is what lets every
+// section be the same shape.
+func LiveryFoundationResults(query, selectedID string) []LiveryPickerResult {
+	q := strings.ToLower(strings.TrimSpace(query))
+	out := make([]LiveryPickerResult, 0, len(livery.Foundations())+1)
+	for _, f := range livery.Foundations() {
+		if q != "" && !strings.Contains(strings.ToLower(f.Name), q) && !strings.Contains(f.ID, q) {
+			continue
+		}
+		out = append(out, LiveryPickerResult{ID: f.ID, Name: f.Name, Selected: f.ID == selectedID})
+	}
+	return out
+}
+
+// LiveryFoundationTiles is the Top Bar Icon gallery's model: every foundation
+// in catalog order, so tile i is grid child i, with the confirmed selection
+// marked. A custom file or an unknown id marks no tile.
+func LiveryFoundationTiles(selectedID string) []LiveryPickerResult {
+	return LiveryFoundationResults("", selectedID)
+}
+
+// LiveryFoundationSelectedLabel names the badge on the selected gallery tile.
+const LiveryFoundationSelectedLabel = "Selected"
+
+// LiveryChooserEscapeCloses reports whether Escape in the chooser's search
+// field closes the dialog. GtkSearchEntry consumes Escape as stop-search, so
+// the chooser decides: a typed query is cleared first, and an empty field —
+// the state the chooser opens in — closes it.
+func LiveryChooserEscapeCloses(query string) bool {
+	return query == ""
+}
+
+// LiveryProjectResults returns the dock picker's rows for a query.
+func LiveryProjectResults(query, selectedID string) []LiveryPickerResult {
+	projects := livery.SearchCNCF(query, LiveryProjectResultLimit)
+	out := make([]LiveryPickerResult, 0, len(projects))
+	for _, p := range projects {
+		out = append(out, LiveryPickerResult{ID: p.ID, Name: p.Name, Selected: p.ID == selectedID})
+	}
+	return out
+}
+
+// LiveryBrandResults returns the app-grid picker's rows for a query.
+//
+// The brand catalog is simpleicons.org's 3,461 marks — fifteen times the
+// project catalog — which is precisely why this is a search dialog and not a
+// text field the user has to already know the answer for.
+func LiveryBrandResults(query, selectedSlug string) []LiveryPickerResult {
+	icons := livery.SearchSimpleIcons(query, LiveryProjectResultLimit)
+	out := make([]LiveryPickerResult, 0, len(icons))
+	for _, icon := range icons {
+		out = append(out, LiveryPickerResult{ID: icon.Slug, Name: icon.Title, Selected: icon.Slug == selectedSlug})
+	}
+	return out
+}
+
+// LiveryBrandPickerTitle names the brand chooser dialog.
+const LiveryBrandPickerTitle = "Choose a Brand"
+
+// LiveryBrandSearchPlaceholder is the brand search box's placeholder.
+const LiveryBrandSearchPlaceholder = "Search brands…"
+
+// LiverySelectedBrandRow describes the current app-grid selection. A custom
+// selection names its file, exactly as the row read right after the pick.
+func LiverySelectedBrandRow(slug, customPath string) Row {
+	if slug == livery.CustomID {
+		return Row{Title: "Brand", Subtitle: LiveryCustomRow(customPath).Subtitle}
+	}
+	if icon, ok := livery.LookupSimpleIcon(slug); ok {
+		return Row{Title: "Brand", Subtitle: icon.Title}
+	}
+	return Row{Title: "Brand", Subtitle: "Choose a brand mark"}
+}
+
+// LiverySelectedProjectRow describes the current dock selection. A custom
+// selection names its file, exactly as the row read right after the pick.
+func LiverySelectedProjectRow(selectedID, customPath string) Row {
+	if selectedID == livery.CustomID {
+		return Row{Title: "Project", Subtitle: LiveryCustomRow(customPath).Subtitle}
+	}
+	if project, ok := livery.LookupCNCF(selectedID); ok {
+		return Row{Title: "Project", Subtitle: project.Name}
+	}
+	return Row{Title: "Project", Subtitle: "Choose a project"}
+}
+
+// LiveryNoResultsRow is shown when a query matches nothing, so the section
+// never renders as an empty box. It names the catalog the chooser for surface
+// actually searched: the brand chooser searches Simple Icons and the mark
+// chooser the foundation marks, so blaming cncf/artwork there would send the
+// user looking in the wrong place.
+func LiveryNoResultsRow(surface livery.Surface, query string) Row {
+	switch surface {
+	case livery.AppGrid:
+		return Row{
+			Title:    "No Matching Brand",
+			Subtitle: fmt.Sprintf("No brand matches %q.", query),
+		}
+	case livery.Panel:
+		return Row{
+			Title:    "No Matching Mark",
+			Subtitle: fmt.Sprintf("No mark matches %q.", query),
+		}
+	default:
+		return Row{
+			Title:    "No Matching Project",
+			Subtitle: fmt.Sprintf("No project matches %q.", query),
+		}
+	}
+}
+
+// LiveryIDForIndex maps a combo position back to a selection id.
+func LiveryIDForIndex(index uint) string {
+	foundations := livery.Foundations()
+	if int(index) >= len(foundations) {
+		return livery.CustomID
+	}
+	return foundations[index].ID
+}
+
+// LiveryAppGridRow is the app-grid section's switch row text.
+// The subtitle does not name the dash alone, because view-app-grid-symbolic
+// is a shared Adwaita name: overriding it changes that glyph wherever GNOME
+// draws it.
+func LiveryAppGridRow() Row {
+	return Row{
+		Title:    "Customize the App Launcher Icon",
+		Subtitle: "Use a brand logo on the button that shows all your apps.",
+	}
+}
+
+// LiveryAppGridGroupDescription explains when Plasma has no Kickoff applet
+// configuration ChairLift can update.
+func LiveryAppGridGroupDescription(available bool) string {
+	if !available {
+		return "Not available on this desktop."
+	}
+	return LiveryAppGridFragment
+}
+
+// LiveryPanelRow is the panel section's switch row text. A host without the
+// Custom Command Menu extension never shows the section, so there is no
+// unavailable variant.
+func LiveryPanelRow() Row {
+	return Row{Title: "Customize the Top Bar Icon", Subtitle: "Use a logo on the menu button in the top bar."}
+}
+
+// LiveryDockRow is the dock section's switch row text.
+//
+// The subtitle names the full reach on purpose. GNOME stores one icon per
+// application, so shadowing the Files mark changes it in the dash, the app
+// grid, the window switcher, notifications, and every Open With menu — not
+// only on the dock. A subtitle saying "dock" alone would be a quiet lie.
+func LiveryDockRow() Row {
+	return Row{
+		Title:    "Customize the Files Icon",
+		Subtitle: "Changes the Files icon everywhere, including the dock, app grid, and window switcher.",
+	}
+}
+
+// LiveryRotationRow is a section's rotation switch text.
+//
+// A source build gets a different subtitle, because the login unit it writes
+// points at the binary's current path. That path is stable for an installed
+// build and disposable for a source one, and a unit whose ExecStart has gone
+// away fails into the journal while the switch still reads "on".
+func LiveryRotationRow(systemInstall bool) Row {
+	if !systemInstall {
+		return Row{
+			Title:    "Rotate at Login",
+			Subtitle: "Stops working if this copy of " + branding.AppName + " is moved or reinstalled.",
+		}
+	}
+	return Row{
+		Title:    "Rotate at Login",
+		Subtitle: "Show the next logo each time you log in.",
+	}
+}
+
+// LiveryRotationAvailable reports whether a section's rotation switch may be
+// operated.
+//
+// A custom mark is not part of a cycle: livery.Rotate refuses to advance a
+// section pinned to the user's own SVG, so leaving the switch sensitive for
+// that selection would offer a setting that does nothing. sectionAvailable
+// carries the section's own conditions — the master switch, and for the panel
+// whether the extension is installed.
+func LiveryRotationAvailable(sectionAvailable bool, selectionID string) bool {
+	return sectionAvailable && selectionID != livery.CustomID
+}
+
+// LiveryCustomRow shows which file a custom selection points at.
+func LiveryCustomRow(path string) Row {
+	if path == "" {
+		return Row{Title: "Custom SVG", Subtitle: "No file chosen"}
+	}
+	return Row{Title: "Custom SVG", Subtitle: path}
+}
+
+// LiveryCNCFArtworkRow links to where the dock marks come from.
+func LiveryCNCFArtworkRow() Row {
+	return Row{
+		Title:    "Browse CNCF Artwork",
+		Subtitle: "See where these project logos come from.",
+	}
+}
+
+// CNCFArtworkURL is the repository the CNCF row opens.
+const CNCFArtworkURL = livery.CNCFArtworkURL
+
+// LiveryProjectSearchPlaceholder is the search box's placeholder text.
+const LiveryProjectSearchPlaceholder = "Search projects…"
+
+// LiveryCustomResult is the chooser row every picker ends with.
+func LiveryCustomResult(selected bool) LiveryPickerResult {
+	return LiveryPickerResult{ID: LiveryCustomResultID, Name: LiveryCustomRowTitle, Selected: selected}
+}
+
+// LiveryFoundationPickerTitle names the foundation chooser.
+const LiveryFoundationPickerTitle = "Choose a Mark"
+
+// LiveryFoundationSearchPlaceholder is its placeholder text.
+const LiveryFoundationSearchPlaceholder = "Search marks…"
+
+// LiverySelectedFoundationRow describes the current panel selection.
+func LiverySelectedFoundationRow(id, customPath string) Row {
+	if id == livery.CustomID {
+		return Row{Title: "Mark", Subtitle: LiveryCustomRow(customPath).Subtitle}
+	}
+	if f, ok := livery.Lookup(id); ok {
+		return Row{Title: "Mark", Subtitle: f.Name}
+	}
+	return Row{Title: "Mark", Subtitle: "Choose a mark"}
+}
+
+// LiveryFileChooserTitle names the custom-SVG chooser.
+const LiveryFileChooserTitle = "Choose an SVG"
+
+// LiveryFileChooserFilterName labels its file filter.
+const LiveryFileChooserFilterName = "SVG Images"
+
+// LiveryCustomRowTitle labels the row that opens the chooser.
+const LiveryCustomRowTitle = "Custom SVG…"
+
+// LiveryCustomRowSubtitle describes what a custom mark is for.
+//
+// It names the constraint rather than leaving it to be discovered: the panel
+// and app-grid surfaces draw silhouettes, so a full-colour SVG will arrive
+// flattened, and a user who supplies one should know that before they are
+// surprised by it.
+const LiveryCustomRowSubtitle = "Use your own file instead of the list above"
+
+// LiverySchemaMissingMessage is shown when ChairLift's GSettings schemas are
+// not on the schema search path. Most people who see it did not build from
+// source: a Homebrew cask install that copied the binary but never compiled
+// the schemas produces the same condition, so it tells them to reinstall.
+// (`make schemas` is the source-checkout remedy; docs/reference.md says so.)
+// It is deliberately not phrased as a configuration error.
+const LiverySchemaMissingMessage = "Livery settings are unavailable. Reinstall " + branding.AppName + " to fix this."
+
+// LiverySectionName is the object of a preview toggle's consequence.
+func LiverySectionName(surface livery.Surface) string {
+	switch surface {
+	case livery.AppGrid:
+		return "the app launcher icon"
+	case livery.Panel:
+		return "the top bar icon"
+	default:
+		return "the Files icon"
+	}
+}
+
+// LiveryFailure is the toast for a failed Livery change. what is the
+// log's description of the step; downloads get a network hint and every
+// other step a plain retry, so no raw error reaches the user.
+func LiveryFailure(what string) string {
+	if strings.HasPrefix(what, "fetching") {
+		return "Couldn't download that icon. Check your internet connection."
+	}
+	return "Couldn't change the icon. Try again."
+}

@@ -2,55 +2,111 @@
 
 This page is the entry point for auditing ChairLift's current quality signals.
 It links to live reports rather than copying pass rates or coverage percentages
-that would immediately become stale. The [public metrics catalog](metrics/)
-collects those read-only sources and their interpretation boundaries.
+that would immediately become stale. [PR metrics](metrics.md) defines the
+outcome query and its interpretation boundaries.
 
 [![Tests](https://github.com/projectbluefin/chairlift/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/projectbluefin/chairlift/actions/workflows/test.yml?query=branch%3Amain)
-[![Codecov](https://codecov.io/gh/projectbluefin/chairlift/branch/main/graph/badge.svg)](https://app.codecov.io/gh/projectbluefin/chairlift)
 
 ## Live signals
 
 | Signal | What it reports | Source |
 |---|---|---|
-| Tests workflow | Latest lint, unit-test, race-detection, verification, and cross-architecture build results | [GitHub Actions](https://github.com/projectbluefin/chairlift/actions/workflows/test.yml) |
+| Tests workflow | Latest lint, filtered unit tests, race detection, E2E, sharded AT-SPI, verification, and cross-architecture build results | [GitHub Actions](https://github.com/projectbluefin/chairlift/actions/workflows/test.yml) |
 | Nightly compliance | Daily full CI, E2E, and known-vulnerability scan results for the default branch | [GitHub Actions](https://github.com/projectbluefin/chairlift/actions/workflows/nightly-compliance.yml) |
-| Issue triage | Deterministic labels applied from structured issue titles and bodies | [GitHub Actions](https://github.com/projectbluefin/chairlift/actions/workflows/triage.yml) |
+| Live system Docker | Nightly/manual real PolicyKit, verified Homebrew-bottle install, system-daemon readiness, new-login, retained-data, and no-op update checks in an isolated Dakota fixture | [GitHub Actions](https://github.com/projectbluefin/chairlift/actions/workflows/docker-system.yml) |
+| Prow | `/command` handling, `needs-kind`, reviewer assignment, label sync, and merge-queue entry on `lgtm` + `approved` | [GitHub Actions](https://github.com/projectbluefin/chairlift/actions/workflows/prow.yml) |
 | Pull request checks | Gate results attached to each proposed change, including reruns and logs | Open a pull request and select its **Checks** tab |
 | Claude code review | Maintainer-triggered, read-only AI review comments for a selected pull request | [GitHub Actions](https://github.com/projectbluefin/chairlift/actions/workflows/claude-code-review.yml) |
 | PR acceptance | Accepted and closed pull request counts over a rolling 90-day cohort | [Metric definition and reproducible query](metrics.md) |
-| Coverage | Line coverage produced by tests under `internal/...` | [Codecov](https://app.codecov.io/gh/projectbluefin/chairlift) |
 | Build artifacts | Seven-day Linux binaries for the workflow's amd64 and arm64 matrix | Open a successful workflow run and view **Artifacts** |
 | Release history | Published versions and release assets | [GitHub Releases](https://github.com/projectbluefin/chairlift/releases) |
 
-`codecov.yml` compares project coverage with the pull request's base and fails
-its project status only when coverage drops by more than one percentage point.
-It deliberately has no fixed project target or patch target. The upload step
-remains non-blocking, so a missing Codecov report does not mean tests failed,
-and a green Tests workflow does not prove that coverage was uploaded. Use the
-workflow's **Unit Tests** log to distinguish those outcomes.
+The CI alert workflow opens or reopens one issue per workflow for failures on
+`main` pushes of Tests, tag pushes of goreleaser, and scheduled Nightly
+compliance and Live system Docker runs. A successful run closes its workflow's
+alert; Tests must also match the current `main` commit. Pull requests, merge
+groups, and manual runs do not create or close alerts.
 
 ## Enforced checks
 
-The repository's `Tests` workflow runs on pushes and pull requests targeting
-`main`. Its jobs provide these independent signals:
+The repository's `Tests` workflow runs on pushes to `main`, on pull requests
+targeting `main`, and on every merge group the merge queue builds. Its jobs
+provide these independent signals:
 
-- **Lint** — `golangci-lint` over the Go source.
+- **Lint** — `golangci-lint` over the Go source, and
+  [zizmor](https://docs.zizmor.sh/) over the workflows, composite actions and
+  Dependabot configuration at medium severity and medium confidence
+  (projectbluefin/actions#674). Accepted findings are listed, each with its
+  reason, in `.github/zizmor.yml`.
 - **Unit Tests** — headless tests under `internal/...`, with atomic coverage.
 - **Race Detection** — the same internal test scope under the race detector.
+- **E2E** — `make e2e` under a headless GTK runtime, with the walkthrough
+  screenshots uploaded as an artifact.
+- **AT-SPI** — `make e2e-atspi`: the behave + dogtail AT-SPI suite
+  (`test/e2e/features`) driving every destination inside the Dakota `testing`
+  image pinned by digest in `test/e2e/dakota-image.sh` (currently
+  linux/amd64), split into parallel shards (`AT-SPI (<shard>)`) by behave tag
+  expression, each uploading its results as `atspi-results-<shard>`.
+  It builds only the tagged GUI (`build-e2e-gui`) rather than the installed
+  helpers (`build-e2e`), which are exercised by the separate `e2e` job.
 - **Verify** — tidy-module, `go vet`, and `gofmt` checks.
 - **Build** — Linux builds for amd64 and arm64.
+- **Tests Passed** — an aggregating job that succeeds only when every job
+  above succeeded.
 
-`make ci` mirrors those credential-free checks locally in fail-fast order and
-also rebuilds the native binaries at the end. It is the pre-submission quality
-gate documented in `AGENTS.md`; Codecov's remote project status is additional
-and cannot be reproduced by that target.
+## AT-SPI build cache
+
+The `atspi` job in [test.yml](../.github/workflows/test.yml) uses a dedicated
+`setup-go` cache fingerprint (`cache-dependency-path`) for its module and
+build caches. An ordinary `CGO_ENABLED=0 make build` (such as in the `Build`
+job) does not compile `./test/e2e`; if that production-only build seeds the
+immutable default cache key first, subsequent test runs cannot save the
+compiled harness dependencies into it.
+All AT-SPI shards share the workload-specific key tracking module inputs, the
+Makefile, the Dakota runner script, and its image pin. It isolates AT-SPI from
+production-only cache writers without invalidating on every source revision:
+Go validates changed sources itself, while the shared dependencies remain
+cached. `make e2e-atspi` retains `-count=1`. Release publishing remains
+cache-free as described under [Release gating](#release-gating).
+
+## The merge queue's gate
+
+`main` merges through a merge queue, which validates a candidate on a
+temporary `gh-readonly-queue/main/pr-<n>-<sha>` ref rather than on the pull
+request's own head. That is a distinct `merge_group` event: neither `push` nor
+`pull_request` fires for it, so a workflow that does not declare
+`merge_group` produces no checks for the merge group at all, and the queue has
+nothing to wait for.
+
+Two pieces have to agree for the queue to gate:
+
+1. `.github/workflows/test.yml` declares `merge_group`, deliberately with no
+   branch filter — `github.ref` there is the queue ref, never `main`, so a
+   `branches: [main]` filter would match nothing and silently disable queue
+   validation.
+2. The default-branch ruleset requires the **Tests Passed** check from the
+   GitHub Actions app. It is the only required context by design: the
+   individual job names are free to change (`Build` alone expands per matrix
+   entry), while this one fans out to all of them through `needs`, so branch
+   protection cannot drift out of step with CI.
+
+`Tests Passed` runs with `if: always()` because GitHub counts a *skipped*
+required check as a passing one; a gate that ran only when its dependencies
+succeeded would report success for a run whose tests failed.
+`internal/installcheck`'s `TestMergeQueueGateWaitsForEveryTestJob` holds both
+properties and fails when a job is added to the workflow without being wired
+into the gate.
+
+`make ci` mirrors the **host-independent** checks locally in fail-fast order
+and also rebuilds native binaries at the end. It does not run E2E or AT-SPI;
+use `make e2e` and `make e2e-atspi` separately on a host with podman and Go.
+The command definitions live in [`Makefile`](../Makefile).
 
 ```bash
 make ci
 ```
 
-To inspect the same coverage scope locally without relying on the external
-upload, run:
+To inspect the unit coverage scope locally, run:
 
 ```bash
 go test ./internal/... \
@@ -70,10 +126,11 @@ logic belongs in a pure package under `internal/`, as required by `AGENTS.md`.
 
 The `Nightly compliance` workflow runs every day at 04:17 UTC and can also be
 started manually. It checks out the current default branch, runs the complete
-host-independent `make ci` gate, installs the same GTK/Xvfb runtime used by the
-hosted E2E job and runs `make e2e`, then runs `govulncheck ./...` against the
-current Go vulnerability database. This catches dependency disclosures and
-environment drift even when no pull request is active.
+host-independent `make ci` gate, runs `make e2e` and `make e2e-atspi` inside
+the Dakota image under a private headless Mutter Wayland session (the same
+`test/e2e/dakota.sh` the hosted E2E job uses), then runs `govulncheck ./...`
+against the current Go vulnerability database. This catches dependency
+disclosures and environment drift even when no pull request is active.
 
 The workflow has read-only repository permission, persists no checkout
 credentials, consumes no repository secrets, and publishes nothing. Its
@@ -81,11 +138,45 @@ third-party actions are pinned to commits and its Go compliance tools are
 installed at explicit versions. A nightly failure is an investigation signal;
 it does not replace pull-request checks or authorize an automatic merge.
 
-Every external action used by any workflow is pinned to a full 40-character
-commit SHA; trailing comments retain the corresponding version or source ref
-for maintainers. `TestWorkflowActionsUseImmutableCommitSHAs` scans every `.yml` and
-`.yaml` file in `.github/workflows/`, so adding a floating tag or branch fails
-the ordinary unit-test gate.
+Third-party actions use full 40-character commit SHAs with reviewed version
+comments. Shared `projectbluefin/actions` production uses managed `@v1`. The
+workflow security scan enforces both the immutable third-party boundary and
+this constrained first-party authority.
+
+## Live system-Docker observation
+
+The independent [`Live system Docker` workflow](../.github/workflows/docker-system.yml)
+runs `make e2e-docker` nightly at 05:17 UTC and on manual dispatch. It is not a
+required merge-queue check. The runner supplies normal netfilter and overlay
+kernel modules; the daemon runs with its normal firewall policy inside rootless
+Podman's private namespace, using the pinned Dakota image unchanged. That image
+ships no Docker, so the real fixed helper installs it from Homebrew's signed
+index and bottles; the job therefore needs network access to
+`formulae.brew.sh` and `ghcr.io`, and a Homebrew outage fails it.
+Missing prerequisites fail the job rather than skip it. Only flat diagnostic
+logs, journals, JSON, and screenshots are uploaded; user homes, runtime sockets,
+and daemon data are excluded. Standard `make e2e` and dry-run AT-SPI results do
+not prove this live path.
+
+## Release gating
+
+The `goreleaser` workflow runs on pushed tags (`*`). Before any release or
+asset can be published, publication is gated on two required verification jobs:
+
+- **Host-independent quality gate** (`gate`) — runs with read-only repository
+  permission and executes `make ci` (tidy-module, vet, formatting,
+  `golangci-lint`, unit tests, race detector, and cross-architecture builds).
+- **End-to-end quality gate** (`e2e`) — runs with read-only repository
+  permission and executes `make e2e` and `make e2e-atspi` inside the Dakota
+  image under a private headless Mutter Wayland session.
+
+The `goreleaser` publishing job depends on both gate jobs (`needs: [gate, e2e]`)
+and receives `contents: write` and `id-token: write` (for keyless cosign signing)
+only after both have succeeded. It explicitly disables Go setup caching
+(`cache: false`) so build or module caches populated during test and E2E gate
+jobs cannot reach the release build. A failure in either gate stops publication.
+Passing those checks is evidence for the tagged commit, not proof that every
+hardware combination or failure mode has been exercised.
 
 ## Reviewing agent changes
 
@@ -111,42 +202,26 @@ non-draft pull request, the workflow posts one deduplicated `@copilot` fix
 request linked to that review. A review without inline findings does not start
 a fix cycle.
 
-`.github/workflows/ai-fix-requested.yml` handles explicit implementation
-requests on issues. When the `ai-fix-requested` label is applied to an open
-issue, it posts one deduplicated `@copilot` request linked to that issue.
-Reapplying the label does not start a duplicate fix cycle.
-
-The review workflow receives read-only contents and pull-requests write
-permissions; the issue workflow receives only issues write permission. Each
-uses its write permission only to create the request comment. Neither workflow
-checks out or executes repository code, interpolates review or issue text into
-a shell, approves, merges, or bypasses required checks. Copilot's resulting
-changes must still pass the ordinary quality gates and human review; review
+An `ai-fix-requested` label is an intent marker, not acceptance or dispatch.
+A maintainer accepts the issue with `/triage accepted` and Hive assigns the
+work; `needs-human`, `blocked` and `hold` keep agents off it.
+The review-feedback workflow receives read-only contents and pull-requests
+write permission. It creates only a deduplicated request comment; it does not
+approve, merge, bypass checks, or grant issue implementation acceptance.
+Copilot's resulting changes still pass ordinary quality gates and human review;
 findings that should not be applied must be explained on the pull request.
 
-## Automated issue triage
+## Prow
 
-`.github/workflows/triage.yml` applies conservative, additive labels when an
-issue is opened or edited. Its deterministic rules are:
-
-| Structured input | Labels |
-|---|---|
-| An `[ACMM L…]` title plus an `acmm:` criterion field | `acmm`, `ai-fix-requested` |
-| A `[guide]` title or guide-agent filing marker | `documentation`, `agent/guide` |
-| A `[quality]` title or quality-agent filing marker | `agent/quality` |
-| Explicit bug, documentation, feature/enhancement, or question title prefixes | The matching standard category label |
-| A `Documentation Gap` or `Feature Request` body heading | `documentation` or `enhancement` |
-
-Triage never removes a label, so an edit cannot erase a maintainer decision. It
-checks that configured labels still exist, skips labels already present, and
-leaves ambiguous issues for humans. Issue text is bounded and matched only as
-data by a commit-pinned API action: the workflow checks out and executes no
-issue-controlled code, receives no secrets, and has only read-only contents
-plus issue-label write permission.
-
-Reusable implementation and review prompts are available in the
-[agent prompt catalog](prompts/index.md). They are aids only; repository
-instructions and human review remain authoritative.
+Issues and pull requests are driven by Prow
+([`prow.yml`](../.github/workflows/prow.yml), cncf/prow-github-actions pinned
+to a commit). Approvers come from [`OWNERS`](../OWNERS), which is generated
+from `projectbluefin/.project`; labels and plugin settings come from the org
+config in `projectbluefin/.project/prow.yaml`. Prow merges by entering the
+merge queue once a pull request has `lgtm` and `approved` and no `hold`; the
+queue still waits for **Tests Passed**, and the ruleset's required approving
+review still applies. See
+[how issues and PRs work here](https://github.com/projectbluefin/common/blob/main/docs/skills/label-workflow.md).
 
 ## Maintainer-triggered Claude review
 
@@ -176,7 +251,7 @@ A repository administrator must configure the `ANTHROPIC_API_KEY` Actions
 secret before the first review:
 
 ```bash
-gh secret set ANTHROPIC_API_KEY --repo frostyard/chairlift
+gh secret set ANTHROPIC_API_KEY --repo projectbluefin/chairlift
 ```
 
 Until the secret exists, a dispatch records a notice and exits without

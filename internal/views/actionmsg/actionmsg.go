@@ -11,10 +11,10 @@
 // headless host. A test binary for a package that imports puregotk panics
 // while resolving GTK/graphene shared libraries at package init — before any
 // test function runs — so logic that must be tested cannot live in the view
-// packages. See docs/agents/skills/gtk-headless-tests.md.
+// packages. See docs/skills/gtk-headless-testing/SKILL.md.
 //
 // Functions whose result only selects display text (BundleDump, Cleanup,
-// Install, Uninstall, Pin, Upgrade, Update, SelfUpdate, BootcStage,
+// Install, Uninstall, Pin, Upgrade, Update, SelfUpdate, SystemStage,
 // FeatureUpdate) return a plain string: the state-changing/no-op decision for
 // those actions is already made and already tested inside their wrapper
 // package (internal/homebrew, internal/flatpak, internal/bootc,
@@ -23,88 +23,60 @@
 // precisely so the gated decision — not just the wording of the toast that
 // follows it — is what a table-driven test in actionmsg_test.go asserts.
 // MaintenanceScript decides whether a configured custom script executes at
-// all. BundleInstall decides whether its row becomes permanently installed
-// or resets after a dry-run preview. TapTrust decides whether the Untrusted
+// all. TapTrust decides whether the Untrusted
 // Homebrew Taps view removes a row, changes group visibility, and refreshes.
 // FeatureToggle decides whether a feature switch confirms its new visual
-// state. Those latter three UI-side decisions have no wrapper-package
+// state. Those latter two UI-side decisions have no wrapper-package
 // equivalent even though the wrappers already gate their underlying
 // command.
 package actionmsg
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
 
-// BundleDump returns the toast text for a Homebrew Brewfile dump. When dryRun
-// is true, homebrew.BundleDump itself never runs `brew bundle dump` (bundle
-// is one of homebrew's stateChangingCommands, skipped entirely under dry-run)
-// so path is never actually written, and the toast must say so rather than
-// unconditionally claiming the file was saved.
-func BundleDump(dryRun bool, path string) string {
+	"github.com/projectbluefin/chairlift/internal/pkexec"
+)
+
+// BundleDump returns the toast text for exporting the installed package list.
+// When dryRun is true, homebrew.BundleDump itself never runs `brew bundle
+// dump` (bundle is one of homebrew's stateChangingCommands, skipped entirely
+// under dry-run) so nothing is written, and the toast must say so rather than
+// unconditionally claiming the list was saved. The destination is not named:
+// it is a fixed file in the person's home folder, and a path in a toast is
+// something they can neither act on nor change.
+func BundleDump(dryRun bool) string {
 	if dryRun {
-		return fmt.Sprintf("[DRY-RUN] Preview: Brewfile would be saved to %s — no changes made", path)
+		return "[DRY-RUN] Preview: your app list would be saved to your home folder — no changes made"
 	}
-	return fmt.Sprintf("Brewfile saved to %s", path)
+	return "Saved your app list to your home folder."
 }
 
-// BundleInstallDecision is the result of installing one configured Brew
-// bundle. Complete is false under dry-run because homebrew.BundleInstall
-// skipped the command; the row must become clickable again instead of
-// claiming the bundle is installed.
-type BundleInstallDecision struct {
-	Complete bool
-	Toast    string
-}
-
-// BundleInstall decides whether a successful wrapper return represents a real
-// completed install and supplies the corresponding toast. The caller must use
-// Complete for both its InstallGate transition and button state.
-func BundleInstall(dryRun bool, name string) BundleInstallDecision {
-	if dryRun {
-		return BundleInstallDecision{
-			Complete: false,
-			Toast:    fmt.Sprintf("[DRY-RUN] Preview: Brew bundle %s would be installed — no changes made", name),
-		}
-	}
-	return BundleInstallDecision{
-		Complete: true,
-		Toast:    fmt.Sprintf("Brew bundle %s installed", name),
-	}
-}
-
-// Cleanup returns the toast text for a Homebrew or Flatpak cleanup action.
-// The wrapper package (internal/homebrew or internal/flatpak) already skips
-// the state-changing cleanup command under dry-run and returns a mock
-// message as output — this function only selects which string to show: the
-// wrapper's mock output when dryRun is true, or a fixed completion message
-// when the cleanup actually ran.
-func Cleanup(dryRun bool, tool string, output string) string {
-	if dryRun {
-		return output
-	}
-	return fmt.Sprintf("%s cleanup completed", tool)
-}
-
-// Install returns the toast text for a Homebrew package install. The
-// wrapper package (internal/homebrew) already skips the state-changing
-// `brew install` command under dry-run — install is one of homebrew's
-// stateChangingCommands — so this function only selects which string to
-// show: a preview when dryRun is true, or a fixed completion message when
-// the install actually ran.
-func Install(dryRun bool, pkgName string) string {
-	if dryRun {
-		return fmt.Sprintf("[DRY-RUN] Preview: %s would be installed — no changes made", pkgName)
-	}
-	return fmt.Sprintf("%s installed", pkgName)
-}
-
-// Uninstall returns toast text for a Homebrew package or Flatpak application
-// uninstall. Both wrappers skip their state-changing uninstall command under
-// dry-run.
+// Uninstall returns toast text for a Homebrew package uninstall.
+// The wrapper skips the state-changing command under dry-run.
 func Uninstall(dryRun bool, name string) string {
 	if dryRun {
 		return fmt.Sprintf("[DRY-RUN] Preview: %s would be uninstalled — no changes made", name)
 	}
 	return fmt.Sprintf("%s uninstalled", name)
+}
+
+// UninstallFailure returns the error toast for a failed Homebrew uninstall.
+// When Homebrew refused because installed packages still need it,
+// dependents names them: a bare "Couldn't uninstall" left a retry that
+// fails the same way as the only thing to try. Any other failure keeps its
+// detail in the log.
+func UninstallFailure(name string, dependents []string) string {
+	switch len(dependents) {
+	case 0:
+		return fmt.Sprintf("Couldn't uninstall %s", name)
+	case 1:
+		return fmt.Sprintf("Couldn't uninstall %s because %s needs it", name, dependents[0])
+	default:
+		last := len(dependents) - 1
+		return fmt.Sprintf("Couldn't uninstall %s because %s and %s need it",
+			name, strings.Join(dependents[:last], ", "), dependents[last])
+	}
 }
 
 // Pin returns toast text for a formula pin or unpin.
@@ -156,47 +128,26 @@ func SelfUpdate(dryRun bool, tool string) string {
 	return fmt.Sprintf("%s updated successfully", tool)
 }
 
-// BootcStage returns the toast text for a click of the Updates page's
-// "Check for Updates" bootc stage button, after bootc.StageUpdate's
-// wg.Wait() returns. bootc.StageUpdate already gates the state-changing
-// part correctly: under dry-run it never invokes pkexec, emitting a
-// synthetic "[DRY-RUN] would run ..."/"Dry run complete" event pair
-// instead (internal/bootc/stage.go, tested in internal/bootc/stage_test.go).
-// But the handler's final toast used to be computed purely from a live
-// bootc.GetStatus() re-read, regardless of dryRun — so a dry-run click
-// could show "System update staged. Restart to apply." or "System is up to
-// date", either of which reads as a verified completion claim about a click
-// that, under dry-run, checked and changed nothing. When dryRun is true,
-// BootcStage returns a single, unambiguous preview string regardless of
-// staged, since staged reflects whatever bootc.GetStatus() reports about
-// real system state, not anything this click did. When dryRun is false, it
-// returns the existing staged/not-staged completion strings unchanged.
-func BootcStage(dryRun bool, staged bool) string {
+// SystemStage returns the completion toast for bootc staging. Staging skips
+// pkexec under dry-run, so a status re-read then describes existing system
+// state, not work done by this click. Always report a preview under dry-run;
+// retain the staged and current live messages.
+func SystemStage(dryRun bool, staged bool) string {
 	if dryRun {
 		return "[DRY-RUN] Preview: no changes made — system state was not checked or modified by this click"
 	}
 	if staged {
-		return "System update staged. Restart to apply."
+		return "Update downloaded. Restart to install it."
 	}
 	return "System is up to date"
 }
 
-// SysupdateStage returns the toast text for a click of the Updates page's
-// native A/B "Check for Updates" stage button, after sysupdate.StageUpdate's
-// wg.Wait() returns. It follows BootcStage's contract exactly: under
-// dry-run, sysupdate.StageUpdate never invokes pkexec and staged reflects a
-// re-read of real system state rather than anything this click did, so the
-// dry-run branch returns a single unambiguous preview string regardless of
-// staged.
-func SysupdateStage(dryRun bool, staged bool) string {
-	if dryRun {
-		return "[DRY-RUN] Preview: no changes made — system state was not checked or modified by this click"
-	}
-	if staged {
-		return "System update staged. Restart to apply."
-	}
-	return "System is up to date"
-}
+// UpdateAllPreview is the toast for an Update all run that only previewed
+// its sources (dry-run). The panel returns to "Updates available" because
+// nothing was installed, which without this toast reads like a failed or
+// silently ignored run; a live run reports through its completion
+// notification and the panel instead.
+const UpdateAllPreview = "[DRY-RUN] Preview: updates would be installed — no changes made"
 
 // TapTrustDecision is the result of deciding whether trusting a Homebrew tap
 // should mutate the Untrusted Homebrew Taps UI (remove the tap's row, hide
@@ -236,7 +187,37 @@ func TapTrust(dryRun bool, tapName string) TapTrustDecision {
 	}
 	return TapTrustDecision{
 		MutateUI: true,
-		Toast:    fmt.Sprintf("Trusted %s. Its packages can update again.", tapName),
+		Toast:    fmt.Sprintf("Trusted %s. Its software can update again.", tapName),
+	}
+}
+
+// PackageTrustDecision is the result of trusting one package from an
+// untrusted tap (the per-package Trust button next to each formula/cask
+// inside the Manage source trust group). MutateUI is true when the package
+// was actually trusted (homebrew.TrustFormula/TrustCask ran `brew trust` for
+// real) and the per-package row should disappear; it is exactly !dryRun,
+// following the same shape TapTrust uses for the broader trust path.
+type PackageTrustDecision struct {
+	MutateUI bool
+	Toast    string
+}
+
+// PackageTrust decides whether trusting one Homebrew package (the
+// per-package button inside a tap's expander row) should mutate the Manage
+// source trust UI: remove the now-trusted package's row, and remove the tap
+// itself once its last package is trusted. It mirrors TapTrust but for the
+// finer-grained action; MutateUI is exactly !dryRun, and under dry-run the
+// package is not actually trusted so the row must not vanish.
+func PackageTrust(dryRun bool, packageName string) PackageTrustDecision {
+	if dryRun {
+		return PackageTrustDecision{
+			MutateUI: false,
+			Toast:    fmt.Sprintf("[DRY-RUN] Preview: %s would be trusted — no changes made", packageName),
+		}
+	}
+	return PackageTrustDecision{
+		MutateUI: true,
+		Toast:    fmt.Sprintf("Trusted %s. It can update again.", packageName),
 	}
 }
 
@@ -271,6 +252,20 @@ func MaintenanceScript(dryRun bool, title string) ScriptDecision {
 		Execute: true,
 		Toast:   fmt.Sprintf("%s completed", title),
 	}
+}
+
+// MaintenanceScriptFailure words a failed configured maintenance script.
+// A sudo script runs through pkexec, and pkexec exits 126 when the user
+// dismissed the authentication prompt; the script never ran, so that is the
+// brief "Authentication canceled" toast (isError false) every other
+// privileged view shows, not a pinned "failed: exit status 126". The script
+// runner captures no stderr, so the exit status is the only signal. A script
+// run without pkexec owns its own exit statuses, so its 126 stays a failure.
+func MaintenanceScriptFailure(title string, sudo bool, err error) (text string, isError bool) {
+	if sudo && pkexec.IsAuthDismissed(err) {
+		return pkexec.CancelledMessage, false
+	}
+	return fmt.Sprintf("%s failed: %v", title, err), true
 }
 
 // FeatureToggleDecision is the result of deciding whether toggling a system
@@ -314,13 +309,81 @@ func FeatureToggle(dryRun bool, enable bool, name string) FeatureToggleDecision 
 	if enable {
 		return FeatureToggleDecision{
 			Confirm: true,
-			Toast:   fmt.Sprintf("%s enabled. Update to download, reboot to apply.", name),
+			Toast:   fmt.Sprintf("%s turned on. Update, then restart to use it.", name),
 		}
 	}
 	return FeatureToggleDecision{
 		Confirm: true,
-		Toast:   fmt.Sprintf("%s disabled. Update to apply, reboot to complete.", name),
+		Toast:   fmt.Sprintf("%s turned off. Update, then restart to finish.", name),
 	}
+}
+
+// LiveryDecision is the result of deciding whether a finished Livery action —
+// a section master switch (LiveryToggle), a mark selection (LiverySelection),
+// or a rotate-at-login switch (LiveryRotation), all in
+// internal/views/livery_actions.go — may advance the page's own view of that
+// section, and what toast to show for the decision.
+type LiveryDecision struct {
+	// MutateUI is true when the new value was really persisted and the page
+	// may mirror it: advance the section's in-memory state, change its
+	// sub-rows, and leave the control where the user put it. It is exactly
+	// !dryRun — under dry-run livery.SetBool and livery.SetString return
+	// before touching gsettings (internal/livery/settings.go), so the stored
+	// value never moved and the page must neither mirror nor display a
+	// change that did not happen. The caller must not independently
+	// recompute that condition: the same decision value drives the mirror,
+	// the control restore, and the toast below.
+	MutateUI bool
+	// Toast is the message to show once the action's work has finished. It
+	// is empty on a live run, where the changed control is its own
+	// confirmation and the page has never shown a toast for one; only the
+	// preview needs words, because the control visibly springs back.
+	Toast string
+}
+
+// LiveryToggle decides whether a Livery section master switch may advance the
+// page's visible and in-memory state, and supplies the preview toast when it
+// may not. MutateUI is exactly !dryRun. name is the section's display name
+// (pageview.LiverySectionName), never a livery.Surface value or a gsettings
+// key.
+func LiveryToggle(dryRun bool, enable bool, name string) LiveryDecision {
+	if dryRun {
+		return LiveryDecision{Toast: liveryPreview(name + " would be " + liveryTurned(enable))}
+	}
+	return LiveryDecision{MutateUI: true}
+}
+
+// LiverySelection decides whether a brand, project, foundation mark, or
+// custom-file pick may replace the section's confirmed selection. Under
+// dry-run the chooser closes and the row keeps its old value, so the preview
+// toast is what says the pick was understood. name is as for LiveryToggle.
+func LiverySelection(dryRun bool, name string) LiveryDecision {
+	if dryRun {
+		return LiveryDecision{Toast: liveryPreview(name + " would change")}
+	}
+	return LiveryDecision{MutateUI: true}
+}
+
+// LiveryRotation decides whether a rotate-at-login switch may advance the
+// confirmed rotation pair. Under dry-run the switch springs back after its
+// spinner, so the preview toast says what would have been scheduled. name is
+// as for LiveryToggle.
+func LiveryRotation(dryRun bool, enable bool, name string) LiveryDecision {
+	if dryRun {
+		return LiveryDecision{Toast: liveryPreview("rotating " + name + " at login would be " + liveryTurned(enable))}
+	}
+	return LiveryDecision{MutateUI: true}
+}
+
+func liveryTurned(enable bool) string {
+	if enable {
+		return "turned on"
+	}
+	return "turned off"
+}
+
+func liveryPreview(what string) string {
+	return fmt.Sprintf("[DRY-RUN] Preview: %s — no changes made", what)
 }
 
 // FeatureUpdate returns the toast text for the Features page's "Update"
@@ -334,7 +397,7 @@ func FeatureUpdate(dryRun bool) string {
 	if dryRun {
 		return "[DRY-RUN] Preview: features would be updated — no changes made"
 	}
-	return "Features updated. Changes apply after reboot."
+	return "Features updated. Restart to apply."
 }
 
 // ChannelSwitch decides whether the Testing Channel switch should confirm
@@ -353,9 +416,37 @@ func ChannelSwitch(dryRun bool, toTesting bool) FeatureToggleDecision {
 			Toast:   fmt.Sprintf("[DRY-RUN] Preview: would switch to the %s channel — no changes made", channel),
 		}
 	}
+	state := "off"
+	if toTesting {
+		state = "on"
+	}
 	return FeatureToggleDecision{
 		Confirm: true,
-		Toast:   fmt.Sprintf("Switched to the %s channel. Restart to apply.", channel),
+		Toast:   fmt.Sprintf("Early updates are %s. Restart to finish.", state),
+	}
+}
+
+// GameModeSwitch decides whether the Game Mode switch should confirm its new
+// state, and what toast to show. Confirm is exactly !dryRun because under dry-run
+// no bootc switch occurred.
+func GameModeSwitch(dryRun bool, enable bool) FeatureToggleDecision {
+	target := "standard mode"
+	if enable {
+		target = "Game Mode"
+	}
+	if dryRun {
+		return FeatureToggleDecision{
+			Confirm: false,
+			Toast:   fmt.Sprintf("[DRY-RUN] Preview: would switch to %s — no changes made", target),
+		}
+	}
+	state := "off"
+	if enable {
+		state = "on"
+	}
+	return FeatureToggleDecision{
+		Confirm: true,
+		Toast:   fmt.Sprintf("Game Mode is %s. Restart to finish.", state),
 	}
 }
 
@@ -363,7 +454,17 @@ func ChannelSwitch(dryRun bool, toTesting bool) FeatureToggleDecision {
 // new state, and what toast to show. The live toasts name the re-login
 // requirement because supplementary group membership only takes effect in a
 // new session — the switch flipping is not the whole story.
-func DeveloperMode(dryRun bool, enable bool) FeatureToggleDecision {
+//
+// skipped lists the developer groups the helper reported it could not
+// change. An enable that skipped some is a partial grant: it still confirms
+// (the account did join the others) and its toast names each group not
+// granted, so the user does not assume access to Docker or Incus they lack
+// (#495). The toast is an ordinary one, not a persistent error: on images
+// that ship neither group (Dakota) every enable skips them, and a persistent
+// "enabled" banner outlived a later disable. An ordinary toast's title is a
+// single ellipsized line, so the note stays short enough that the group
+// names are not cut off.
+func DeveloperMode(dryRun bool, enable bool, skipped []string) FeatureToggleDecision {
 	verb := "disabled"
 	if enable {
 		verb = "enabled"
@@ -374,71 +475,16 @@ func DeveloperMode(dryRun bool, enable bool) FeatureToggleDecision {
 			Toast:   fmt.Sprintf("[DRY-RUN] Preview: developer mode would be %s — no changes made", verb),
 		}
 	}
-	return FeatureToggleDecision{
-		Confirm: true,
-		Toast:   fmt.Sprintf("Developer mode %s. Log out and back in to apply.", verb),
+	if enable && len(skipped) > 0 {
+		return FeatureToggleDecision{
+			Confirm: true,
+			Toast:   fmt.Sprintf("Developer Mode is on (no %s). Log out and back in.", strings.Join(skipped, ", ")),
+		}
 	}
-}
-
-// GamingMode decides whether the Gaming Mode switch should confirm its new
-// state, and what toast to show.
-//
-// Gaming mode differs from the other two toggles in one way that matters
-// here: it installs user-scope Flatpaks one at a time, so a live run can
-// partly succeed. Confirm therefore is not simply !dryRun — a live run that
-// changed nothing, or whose every component failed, must not confirm either.
-//
-// skipped counts components the image preinstalled system-wide, which
-// removal leaves alone. Those are neither a change nor a failure, so they
-// are reported separately: telling a user "0 removed" with no explanation
-// when the components are still visibly installed is the confusing outcome.
-func GamingMode(dryRun bool, enable bool, changed, failed, skipped int) FeatureToggleDecision {
-	verb := "removed"
 	if enable {
-		verb = "installed"
+		return FeatureToggleDecision{Confirm: true, Toast: "Developer Mode turned on. Log out and back in to use it."}
 	}
-
-	if dryRun {
-		return FeatureToggleDecision{
-			Confirm: false,
-			Toast:   fmt.Sprintf("[DRY-RUN] Preview: gaming components would be %s — no changes made", verb),
-		}
-	}
-
-	suffix := ""
-	if skipped > 0 {
-		suffix = fmt.Sprintf(" %d component(s) installed system-wide were left in place.", skipped)
-	}
-
-	switch {
-	case changed == 0 && failed > 0:
-		return FeatureToggleDecision{
-			Confirm: false,
-			Toast:   fmt.Sprintf("No gaming components could be %s (%d failed).%s", verb, failed, suffix),
-		}
-	case changed == 0 && skipped > 0:
-		// Nothing was removed, but only because everything present belongs
-		// to the system image. The switch must not claim gaming mode is off.
-		return FeatureToggleDecision{
-			Confirm: false,
-			Toast:   fmt.Sprintf("Nothing to remove.%s", suffix),
-		}
-	case changed == 0:
-		return FeatureToggleDecision{
-			Confirm: true,
-			Toast:   "Gaming mode is already in the requested state.",
-		}
-	case failed > 0:
-		return FeatureToggleDecision{
-			Confirm: true,
-			Toast:   fmt.Sprintf("%d gaming component(s) %s, %d failed.%s", changed, verb, failed, suffix),
-		}
-	default:
-		return FeatureToggleDecision{
-			Confirm: true,
-			Toast:   fmt.Sprintf("%d gaming component(s) %s.%s", changed, verb, suffix),
-		}
-	}
+	return FeatureToggleDecision{Confirm: true, Toast: "Developer Mode turned off. Log out and back in to finish."}
 }
 
 // Rollback decides whether the rollback row should adopt its
@@ -450,12 +496,12 @@ func Rollback(dryRun bool) FeatureToggleDecision {
 	if dryRun {
 		return FeatureToggleDecision{
 			Confirm: false,
-			Toast:   "[DRY-RUN] Preview: would roll back to the previous system image — no changes made",
+			Toast:   "[DRY-RUN] Preview: would go back to the previous version — no changes made",
 		}
 	}
 	return FeatureToggleDecision{
 		Confirm: true,
-		Toast:   "Rolled back. Restart to boot the previous image.",
+		Toast:   "Restart to use the previous version.",
 	}
 }
 
@@ -466,37 +512,43 @@ func FactoryReset(dryRun bool) FeatureToggleDecision {
 	if dryRun {
 		return FeatureToggleDecision{
 			Confirm: false,
-			Toast:   "[DRY-RUN] Preview: would factory reset this system — no changes made",
+			Toast:   "[DRY-RUN] Preview: would reset this computer — no changes made",
 		}
 	}
 	return FeatureToggleDecision{
 		Confirm: true,
-		Toast:   "Factory reset applied. Restart to complete it.",
+		Toast:   "Restart to finish resetting this computer.",
 	}
 }
 
 // Powerwash decides whether the Powerwash row should show its outcome, and
 // what toast to display. Unlike Rollback and FactoryReset, Powerwash runs
 // two independent, unprivileged steps that can each succeed, fail, or be
-// skipped (a tool not installed), so Confirm is not simply !dryRun — a live
-// run in which nothing was actually removed must not claim success, the same
-// distinction internal/views/actionmsg.GamingMode already makes.
+// skipped (a tool not installed, or nothing in the account), so Confirm is
+// not simply !dryRun — a live run in which nothing was actually removed must
+// not claim success, the same distinction internal/views/actionmsg.GamingMode
+// already makes. A preview reads the same inventory, so it previews only a
+// removal that would happen.
 func Powerwash(dryRun bool, succeeded, failed int) FeatureToggleDecision {
 	if dryRun {
-		return FeatureToggleDecision{
-			Confirm: false,
-			Toast:   "[DRY-RUN] Preview: would remove your Flatpaks and Distrobox containers — no changes made",
+		toast := "[DRY-RUN] Preview: would remove your Flatpak apps and containers — no changes made"
+		switch {
+		case failed > 0:
+			toast = "[DRY-RUN] Preview: could not read everything Powerwash would remove — no changes made"
+		case succeeded == 0:
+			toast = "[DRY-RUN] Preview: nothing is installed to remove — no changes made"
 		}
+		return FeatureToggleDecision{Confirm: false, Toast: toast}
 	}
 	switch {
 	case succeeded == 0 && failed == 0:
-		return FeatureToggleDecision{Confirm: true, Toast: "Nothing was installed to remove."}
+		return FeatureToggleDecision{Confirm: true, Toast: "There was nothing to remove."}
 	case failed > 0 && succeeded == 0:
-		return FeatureToggleDecision{Confirm: false, Toast: "Powerwash failed — nothing was removed."}
+		return FeatureToggleDecision{Confirm: false, Toast: "Couldn't remove anything. Try again."}
 	case failed > 0:
-		return FeatureToggleDecision{Confirm: true, Toast: "Powerwash finished with problems."}
+		return FeatureToggleDecision{Confirm: true, Toast: "Some apps or containers couldn't be removed. Try again."}
 	default:
-		return FeatureToggleDecision{Confirm: true, Toast: "Powerwash complete."}
+		return FeatureToggleDecision{Confirm: true, Toast: "Removed your Flatpak apps and containers."}
 	}
 }
 
@@ -522,6 +574,32 @@ func AutomaticUpdates(dryRun bool, enable bool) FeatureToggleDecision {
 	}
 }
 
+// AutomaticUpdatesResumeOutdated returns the supplementary toast a
+// post-action resume-timer probe (#558) wants to show above the
+// automatic-updates switch. The probe only matters when the user just
+// turned automatic updates *off* and the on-image helper predates the
+// resume-timer mask work in #543: the main timer is silenced, the switch
+// reads "off", but uupd-resume.timer still fires uupd.service twenty
+// minutes after every resume. The toast names the action the user has
+// to take (re-pull the image) rather than offering a one-click fix
+// inside the GUI, because the only place the new helper lives is the
+// image's next pull.
+//
+// enabled is the switch position the user just asked for; resumeOutdated
+// is the post-probe skew signal. The toast is returned non-empty only
+// when both: the user disabled auto-updates AND the resume timer is
+// still armed. enable=true means the user turned auto-updates back on,
+// so a "still armed" warning would be wrong. enable=true with
+// resumeOutdated=true (the resume timer is enabled while the main timer
+// is not) is not a skew: that is the helper's own "enable" path, which
+// only unmasks the resume timer without enabling it.
+func AutomaticUpdatesResumeOutdated(enabled, resumeOutdated bool) string {
+	if enabled || !resumeOutdated {
+		return ""
+	}
+	return "Updates still run after suspend. Re-pull this image to get the helper that silences the resume timer."
+}
+
 // DriverSwitch decides whether the graphics-driver row should adopt its
 // switched subtitle, and what toast to show. Confirm is exactly !dryRun, for
 // the same reason as ChannelSwitch: under dry-run ublue.runHelper
@@ -535,33 +613,81 @@ func DriverSwitch(dryRun bool, driver string) FeatureToggleDecision {
 	}
 	return FeatureToggleDecision{
 		Confirm: true,
-		Toast:   fmt.Sprintf("Switched to the %s image. Restart to apply.", driver),
+		Toast:   fmt.Sprintf("Switched to the %s driver. Restart to finish.", driver),
 	}
 }
 
-// AIStack returns the toast for the local-AI switch. accelerator names the
-// compute stack the hardware selected, so the toast confirms which image was
-// installed rather than just that something was.
-func AIStack(dryRun bool, enable bool, accelerator string) FeatureToggleDecision {
+// AgentMode returns the decision for the Agent Mode switch. A dry run never
+// confirms: nothing was installed, written, or started.
+func AgentMode(dryRun bool, enable bool) FeatureToggleDecision {
 	if dryRun {
-		verb := "removed"
+		verb := "turned off"
 		if enable {
-			verb = "installed"
+			verb = "turned on"
 		}
 		return FeatureToggleDecision{
 			Confirm: false,
-			Toast:   fmt.Sprintf("[DRY-RUN] Preview: the %s AI stack would be %s — no changes made", accelerator, verb),
+			Toast:   fmt.Sprintf("[DRY-RUN] Preview: Agent Mode would be %s — no changes made", verb),
 		}
 	}
-
 	if enable {
+		return FeatureToggleDecision{Confirm: true, Toast: "Agent Mode is on."}
+	}
+	return FeatureToggleDecision{Confirm: true, Toast: "Agent Mode is off. Your models were kept."}
+}
+
+// PrinterApp returns the decision for one printer application family's
+// switch on the Features page, after printerapp.Enable or Disable returned
+// nil. rowTitle is the row's own title so three families' toasts read apart.
+// A dry run never confirms: no quadlet was written, started, stopped, or
+// removed. A live disable says the driver image and the printer's settings
+// were kept, because they were — printerapp.Disable removes only the unit.
+func PrinterApp(dryRun bool, enable bool, rowTitle string) FeatureToggleDecision {
+	if dryRun {
+		verb := "turned off"
+		if enable {
+			verb = "turned on"
+		}
 		return FeatureToggleDecision{
-			Confirm: true,
-			Toast:   fmt.Sprintf("Local AI server started on the %s stack — the first model download runs in the background", accelerator),
+			Confirm: false,
+			Toast:   fmt.Sprintf("[DRY-RUN] Preview: %s would be %s — no changes made", rowTitle, verb),
 		}
 	}
-	return FeatureToggleDecision{
-		Confirm: true,
-		Toast:   "Local AI server stopped and removed",
+	if enable {
+		return FeatureToggleDecision{Confirm: true, Toast: rowTitle + " is on."}
 	}
+	return FeatureToggleDecision{Confirm: true, Toast: rowTitle + " is off. Your printer settings were kept."}
+}
+
+// AskBluefinMenuDecision is the outcome of flipping the Agents page's "Show
+// Ask Bluefin in menu" switch.
+type AskBluefinMenuDecision struct {
+	// Active is the position the switch must show: the observed visibility
+	// when it was read back, otherwise the last known one (!requested).
+	Active bool
+	// Toast is empty when the requested change was observed applied.
+	Toast string
+	// Error selects an error toast rather than an ordinary one.
+	Error bool
+}
+
+// AskBluefinMenu decides what the Ask Bluefin menu switch shows after
+// devmenu.SetAskBluefinVisible (err) and the read-back
+// devmenu.AskBluefinState (observed, readErr). A preview says nothing
+// changed, and a write that did not take effect is reported rather than
+// silently snapping the switch back.
+func AskBluefinMenu(dryRun, requested, observed bool, err, readErr error) AskBluefinMenuDecision {
+	switch {
+	case readErr != nil && err != nil:
+		return AskBluefinMenuDecision{Active: !requested, Toast: "Couldn't update the Ask Bluefin menu entry.", Error: true}
+	case readErr != nil:
+		return AskBluefinMenuDecision{Active: !requested, Toast: "Couldn't verify the Ask Bluefin menu entry.", Error: true}
+	case err != nil:
+		return AskBluefinMenuDecision{Active: observed, Toast: "Couldn't update the Ask Bluefin menu entry.", Error: true}
+	case dryRun:
+		return AskBluefinMenuDecision{Active: observed, Toast: "Preview only — the menu entry was not changed."}
+	case observed != requested:
+		return AskBluefinMenuDecision{Active: observed, Toast: "The Ask Bluefin menu entry did not change.", Error: true}
+	}
+	return AskBluefinMenuDecision{Active: observed}
 }

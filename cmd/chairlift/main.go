@@ -3,38 +3,105 @@
 package main
 
 import (
+	"context"
 	"log"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
+	"codeberg.org/puregotk/puregotk/v4/glib"
+	sgtk "github.com/frostyard/snowkit/gtk"
+
 	"github.com/projectbluefin/chairlift/internal/app"
+	"github.com/projectbluefin/chairlift/internal/deskenv"
+	"github.com/projectbluefin/chairlift/internal/firstrun"
+	"github.com/projectbluefin/chairlift/internal/livery"
+	"github.com/projectbluefin/chairlift/internal/printerapp"
 	"github.com/projectbluefin/chairlift/internal/version"
 )
 
-// Build information set via ldflags by goreleaser
-var (
-	buildVersion = "dev"
-	buildCommit  = "unknown"
-	buildDate    = "unknown"
-	buildBy      = "unknown"
-)
+// Application version set via ldflags by goreleaser
+var buildVersion = "dev"
 
 func main() {
 	processStart := time.Now()
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 	log.Println("main: process start")
 
-	// Set version info for use by the rest of the application
 	version.Version = buildVersion
-	version.Commit = buildCommit
-	version.Date = buildDate
-	version.BuiltBy = buildBy
+	if err := deskenv.ConfigureSettingsModules(); err != nil {
+		log.Printf("main: configuring native settings backend: %v", err)
+	}
+	// CGO-disabled os.Setenv updates child commands, not libc's environment.
+	// Native GSettings must discover the same modules as those commands.
+	if modules := os.Getenv("GIO_EXTRA_MODULES"); modules != "" && !glib.Setenv("GIO_EXTRA_MODULES", modules, true) {
+		log.Fatal("main: could not configure native settings modules")
+	}
+
+	// Rotation runs headless, from the systemd user unit the Livery page
+	// installs. It must short-circuit before app.New(), which brings up GTK
+	// and would otherwise try to open a display from a oneshot service.
+	if len(os.Args) == 2 && os.Args[1] == livery.RotateFlag {
+		ctx, cancel := livery.RotationContext()
+		defer cancel()
+		if err := livery.Rotate(ctx); err != nil {
+			log.Printf("livery: rotation: %v", err)
+			os.Exit(1)
+		}
+		return
+	}
+	// The printers' USB lookup runs headless too, from the login unit
+	// printerapp installs while a printer driver is on.
+	if len(os.Args) == 2 && os.Args[1] == printerapp.ResolveUSBFlag {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		if err := printerapp.ResolveUSBPrintersAtLogin(ctx); err != nil {
+			log.Printf("printerapp: login USB lookup: %v", err)
+			os.Exit(1)
+		}
+		return
+	}
+	// A gaming image's panel mark is applied here, off the main thread,
+	// rather than waiting for the user to open the Livery page.
+	go func() {
+		ctx, cancel := livery.DefaultContext()
+		defer cancel()
+		if err := livery.EnsureGamingPanelDefault(ctx); err != nil {
+			log.Printf("livery: gaming panel default: %v", err)
+		}
+	}()
 
 	application := app.New()
 	defer application.Unref()
 	log.Printf("main: application created in %s", time.Since(processStart))
 
-	if code := application.Run(int32(len(os.Args)), os.Args); code > 0 {
+	// SIGTERM (session logout, the E2E harness) and SIGINT quit the
+	// application instead of killing the process, so Run returns, the
+	// cleanup below runs, and a coverage build flushes GOCOVERDIR. The
+	// handler is dropped after the first signal so a second one still
+	// terminates a process whose shutdown has hung.
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGTERM, os.Interrupt)
+	go func() {
+		sig := <-signals
+		signal.Stop(signals)
+		log.Printf("main: %v received, quitting", sig)
+		sgtk.RunOnMainThread(application.Quit)
+	}()
+
+	code := application.Run(int32(len(os.Args)), os.Args)
+	log.Printf("main: application exited with status %d", code)
+
+	// The Updates wordmark extracts embedded SVGs into a process-scoped temp
+	// directory; removing it here keeps a run from
+	// leaving one behind. os.Exit below skips deferred calls, so this
+	// cannot be a defer.
+	if err := firstrun.CleanupAssets(); err != nil {
+		log.Printf("main: %v", err)
+	}
+
+	if code > 0 {
 		os.Exit(int(code))
 	}
 }

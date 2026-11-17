@@ -2,14 +2,16 @@ package views
 
 import (
 	"context"
-	"fmt"
 	"log"
 
+	"github.com/projectbluefin/chairlift/internal/bootc"
 	"github.com/projectbluefin/chairlift/internal/distrobox"
 	"github.com/projectbluefin/chairlift/internal/dryrun"
 	"github.com/projectbluefin/chairlift/internal/flatpak"
+	"github.com/projectbluefin/chairlift/internal/pkexec"
 	"github.com/projectbluefin/chairlift/internal/powerwash"
 	"github.com/projectbluefin/chairlift/internal/ublue"
+	"github.com/projectbluefin/chairlift/internal/ubluehelper"
 	"github.com/projectbluefin/chairlift/internal/views/actionmsg"
 	"github.com/projectbluefin/chairlift/internal/views/pageview"
 
@@ -27,22 +29,41 @@ import (
 // response before anything runs, per the HIG's rule that destructive
 // dialogs are reserved for genuinely non-undoable actions — which these are.
 //
+// The reset rows are built on the Powerwash detail page, so the dialogs are
+// parented to the Powerwash page, never the Maintenance page. A reset is a
+// deliberate Powerwash action, not a routine cleanup control. maintenance_page
+// guards reset_group and builds these rows on the recovery page; the rows are
+// gated by reset_group (disabled by shipped default), the same default
+// maintenance_cleanup_group uses.
 // Powerwash needs no privilege: both its steps (removing user Flatpaks,
-// removing Distrobox containers) run in the invoking account, the same
-// reasoning as gaming mode. Factory Reset replaces the OS image itself and
-// goes through chairlift-ublue-helper's factory-reset action.
+// removing Distrobox containers) run in the invoking account. Factory Reset
+// replaces the OS image itself and goes through chairlift-helper's
+// factory-reset action.
 
-// buildResetGroup builds the Powerwash and Factory Reset rows.
+// Button labels for the two recovery actions. Both open a confirmation
+// dialog rather than acting immediately, which is what the ellipsis says.
+const (
+	powerwashButtonLabel    = "Remove…"
+	powerwashBusyLabel      = "Removing…"
+	factoryResetButtonLabel = "Reset…"
+	factoryResetBusyLabel   = "Resetting…"
+)
+
+// buildResetGroup builds the Powerwash and Factory Reset rows. It is the
+// last group on the Maintenance page and reads as its own section: these
+// are recovery actions, not routine maintenance, and grouping them beside
+// "Free Up Space" would invite a person looking for disk space to press one
+// of them.
 func (uh *UserHome) buildResetGroup(page *adw.PreferencesPage) {
 	group := adw.NewPreferencesGroup()
-	group.SetTitle("Reset")
-	group.SetDescription("Irreversible actions — each asks for confirmation before it runs")
+	group.SetTitle("Powerwash")
+	group.SetDescription("For when something has gone wrong. These can't be undone.")
 
 	powerwashRow := adw.NewActionRow()
-	presentation := pageview.PowerwashRow("")
+	presentation := pageview.PowerwashRow()
 	powerwashRow.SetTitle(presentation.Title)
 	powerwashRow.SetSubtitle(presentation.Subtitle)
-	powerwashBtn := gtk.NewButtonWithLabel("Remove Everything")
+	powerwashBtn := gtk.NewButtonWithLabel(powerwashButtonLabel)
 	powerwashBtn.SetValign(gtk.AlignCenterValue)
 	powerwashBtn.AddCssClass("destructive-action")
 	powerwashClickedCb := func(gtk.Button) { uh.onPowerwashClicked(powerwashBtn, powerwashRow) }
@@ -50,17 +71,23 @@ func (uh *UserHome) buildResetGroup(page *adw.PreferencesPage) {
 	powerwashRow.AddSuffix(&powerwashBtn.Widget)
 	group.Add(&powerwashRow.Widget)
 
-	resetRow := adw.NewActionRow()
-	resetPresentation := pageview.FactoryResetRow()
-	resetRow.SetTitle(resetPresentation.Title)
-	resetRow.SetSubtitle(resetPresentation.Subtitle)
-	resetBtn := gtk.NewButtonWithLabel("Factory Reset")
-	resetBtn.SetValign(gtk.AlignCenterValue)
-	resetBtn.AddCssClass("destructive-action")
-	resetClickedCb := func(gtk.Button) { uh.onFactoryResetClicked(resetBtn, resetRow) }
-	resetBtn.ConnectClicked(&resetClickedCb)
-	resetRow.AddSuffix(&resetBtn.Widget)
-	group.Add(&resetRow.Widget)
+	// Factory Reset runs the helper; an image that does not provide the
+	// command gets no row rather than one that fails after authentication.
+	// Neither does a composefs host: `bootc install reset` needs OSTree
+	// storage and fails there with "OSTree storage not initialized".
+	if ublue.StatusCached().Supports(ubluehelper.CommandFactoryReset) && !bootc.ComposefsBooted() {
+		resetRow := adw.NewActionRow()
+		resetPresentation := pageview.FactoryResetRow()
+		resetRow.SetTitle(resetPresentation.Title)
+		resetRow.SetSubtitle(resetPresentation.Subtitle)
+		resetBtn := gtk.NewButtonWithLabel(factoryResetButtonLabel)
+		resetBtn.SetValign(gtk.AlignCenterValue)
+		resetBtn.AddCssClass("destructive-action")
+		resetClickedCb := func(gtk.Button) { uh.onFactoryResetClicked(resetBtn, resetRow) }
+		resetBtn.ConnectClicked(&resetClickedCb)
+		resetRow.AddSuffix(&resetBtn.Widget)
+		group.Add(&resetRow.Widget)
+	}
 
 	page.Add(group)
 	log.Printf("views: reset group built")
@@ -77,23 +104,25 @@ func (uh *UserHome) onPowerwashClicked(button *gtk.Button, row *adw.ActionRow) {
 	title, body := pageview.PowerwashConfirmation()
 	dialog := adw.NewAlertDialog(title, body)
 	dialog.AddResponse("cancel", "Cancel")
-	dialog.AddResponse("confirm", "Remove Everything")
+	dialog.AddResponse("confirm", "Remove Apps and Containers")
 	dialog.SetResponseAppearance("confirm", adw.ResponseDestructiveValue)
+	// Escape and the default both cancel: nothing happens unless asked.
+	dialog.SetDefaultResponse("cancel")
+	dialog.SetCloseResponse("cancel")
 
-	responseCb := func(_ adw.AlertDialog, response string) {
+	uh.recoveryDialogs.connect(dialog, func(response string) {
 		if response != "confirm" {
 			uh.powerwashGate.Reset()
 			return
 		}
 		uh.runPowerwash(button, row)
-	}
-	dialog.ConnectResponse(&responseCb)
-	dialog.Present(&uh.maintenancePrefsPage.Widget)
+	})
+	dialog.Present(&uh.recoveryPrefsPage.Widget)
 }
 
 func (uh *UserHome) runPowerwash(button *gtk.Button, row *adw.ActionRow) {
 	button.SetSensitive(false)
-	button.SetLabel("Removing…")
+	button.SetLabel(powerwashBusyLabel)
 
 	go func() {
 		ctx, cancel := ublue.DefaultContext()
@@ -101,8 +130,10 @@ func (uh *UserHome) runPowerwash(button *gtk.Button, row *adw.ActionRow) {
 
 		runner := powerwash.Runner{
 			FlatpakInstalled:   flatpak.IsInstalledCached,
+			FlatpaksPresent:    func(context.Context) (bool, error) { return flatpak.HasUserRefs() },
 			RemoveFlatpaks:     func(context.Context) error { return flatpak.RemoveAllUser() },
 			DistroboxInstalled: distrobox.IsInstalled,
+			DistroboxesPresent: distrobox.HasContainers,
 			RemoveDistroboxes:  distrobox.RemoveAll,
 		}
 		results := runner.Run(ctx)
@@ -112,13 +143,13 @@ func (uh *UserHome) runPowerwash(button *gtk.Button, row *adw.ActionRow) {
 			summary.Succeeded, summary.Failed, summary.Skipped)
 
 		sgtk.RunOnMainThread(func() {
-			uh.powerwashGate.Complete()
+			uh.powerwashGate.Reset()
 			button.SetSensitive(true)
-			button.SetLabel("Remove Everything")
+			button.SetLabel(powerwashButtonLabel)
 
 			decision := actionmsg.Powerwash(dryrun.Enabled(), summary.Succeeded, summary.Failed)
 			if decision.Confirm {
-				row.SetSubtitle(pageview.PowerwashRow(summary.Headline).Subtitle)
+				row.SetSubtitle(pageview.PowerwashResultSubtitle(summary.Succeeded, summary.Failed))
 			}
 			if summary.Failed > 0 {
 				uh.toastAdder.ShowErrorToast(decision.Toast)
@@ -139,23 +170,30 @@ func (uh *UserHome) onFactoryResetClicked(button *gtk.Button, row *adw.ActionRow
 	title, body := pageview.FactoryResetConfirmation()
 	dialog := adw.NewAlertDialog(title, body)
 	dialog.AddResponse("cancel", "Cancel")
-	dialog.AddResponse("confirm", "Factory Reset")
+	dialog.AddResponse("confirm", "Reset")
 	dialog.SetResponseAppearance("confirm", adw.ResponseDestructiveValue)
+	// Escape and the default both cancel: nothing happens unless asked.
+	dialog.SetDefaultResponse("cancel")
+	dialog.SetCloseResponse("cancel")
 
-	responseCb := func(_ adw.AlertDialog, response string) {
+	uh.recoveryDialogs.connect(dialog, func(response string) {
 		if response != "confirm" {
 			uh.factoryResetGate.Reset()
 			return
 		}
 		uh.runFactoryReset(button, row)
-	}
-	dialog.ConnectResponse(&responseCb)
-	dialog.Present(&uh.maintenancePrefsPage.Widget)
+	})
+	dialog.Present(&uh.recoveryPrefsPage.Widget)
 }
 
 func (uh *UserHome) runFactoryReset(button *gtk.Button, row *adw.ActionRow) {
+	if !uh.updateShell.beginMutation("Resetting to factory settings") {
+		uh.factoryResetGate.Reset()
+		uh.toastAdder.ShowToast(pageview.UpdateBusyToast)
+		return
+	}
 	button.SetSensitive(false)
-	button.SetLabel("Resetting…")
+	button.SetLabel(factoryResetBusyLabel)
 
 	go func() {
 		ctx, cancel := ublue.DefaultContext()
@@ -164,12 +202,14 @@ func (uh *UserHome) runFactoryReset(button *gtk.Button, row *adw.ActionRow) {
 		err := ublue.FactoryReset(ctx)
 
 		sgtk.RunOnMainThread(func() {
-			uh.factoryResetGate.Complete()
+			uh.updateShell.finishMutation()
+			uh.factoryResetGate.Reset()
 			button.SetSensitive(true)
-			button.SetLabel("Factory Reset")
+			button.SetLabel(factoryResetButtonLabel)
 
 			if err != nil {
-				uh.toastAdder.ShowErrorToast(fmt.Sprintf("Factory reset failed: %v", err))
+				log.Printf("views: factory reset failed: %v", err)
+				uh.toastAdder.ShowErrorToast(pkexec.UserMessage(err, "Couldn't reset this computer. Try again."))
 				return
 			}
 

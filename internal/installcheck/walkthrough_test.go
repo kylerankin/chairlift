@@ -16,6 +16,11 @@ import (
 const (
 	walkthroughDoc = "docs/walkthrough.md"
 	screenshotDir  = "docs/screenshots"
+	// setupScreenshot is the one capture that is not a navigable page: the
+	// setup assistant's welcome screen, which capture_walkthrough.sh takes
+	// first by launching with --setup. Every other screenshot is a page.
+	setupScreenshot = "0-setup.png"
+	setupTitle      = "Setup Assistant"
 )
 
 // markdownImage matches an inline image reference and captures its path.
@@ -107,13 +112,36 @@ func TestNoOrphanedScreenshots(t *testing.T) {
 			t.Errorf("%s/%s is not referenced by %s; it is a stale capture", screenshotDir, entry.Name(), walkthroughDoc)
 		}
 	}
-	if found != len(navigation.Items()) {
-		t.Errorf("%s holds %d screenshots, want one per navigable page (%d)", screenshotDir, found, len(navigation.Items()))
+	// One per navigable page, plus the setup assistant's welcome screen.
+	if want := len(navigation.Items()) + 1; found != want {
+		t.Errorf("%s holds %d screenshots, want one per navigable page plus %s (%d)", screenshotDir, found, setupScreenshot, want)
 	}
 }
 
-// The capture byproducts must never be committed: the .xwd dumps are large,
-// and the log and stub files are per-run scratch.
+// The setup assistant is the one screen a first run shows before any page,
+// so the walkthrough opens with it: the capture must exist and the document
+// must show it and name the assistant.
+func TestWalkthroughDocumentsTheSetupAssistant(t *testing.T) {
+	doc := readRepoFile(t, walkthroughDoc)
+
+	path := filepath.Join(RepoRoot(), screenshotDir, setupScreenshot)
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("the setup assistant has no screenshot at %s/%s: %v\nrun `make screenshots`", screenshotDir, setupScreenshot, err)
+	}
+	if info.Size() == 0 {
+		t.Errorf("%s/%s is empty", screenshotDir, setupScreenshot)
+	}
+	if !strings.Contains(doc, "screenshots/"+setupScreenshot) {
+		t.Errorf("%s does not reference screenshots/%s", walkthroughDoc, setupScreenshot)
+	}
+	if !strings.Contains(doc, setupTitle) {
+		t.Errorf("%s never mentions the %q", walkthroughDoc, setupTitle)
+	}
+}
+
+// The capture byproducts must never be committed: the private HOME directory,
+// the log, and the image-descriptor stub are all per-run scratch.
 func TestScreenshotDirectoryHoldsOnlyImages(t *testing.T) {
 	entries, err := os.ReadDir(filepath.Join(RepoRoot(), screenshotDir))
 	if err != nil {
@@ -146,37 +174,40 @@ func TestWalkthroughCoversEveryConfigurableGroup(t *testing.T) {
 	// genuinely not user-visible maps to an empty phrase, which documents
 	// the omission rather than hiding it.
 	documented := map[string]string{
-		// system_page
-		"system_info_group":  "Your system details",
-		"bootc_status_group": "queued for the next",
-		"health_group":       "Mission Center",
-		"channel_group":      "Release Channel",
+		// agents_page
+		"agents_group":          "Agents",
+		"troubleshooting_group": "**Troubleshooting**",
 		// updates_page
-		"update_all_group":        "Update All",
+		"automatic_updates_group": "Automatic Updates",
 		"bootc_updates_group":     "System Updates",
-		"sysupdate_updates_group": "System Updates",
 		"flatpak_updates_group":   "Flatpak",
 		"brew_updates_group":      "Homebrew",
 		"brew_trust_group":        "unofficial",
+		// Moved off the deleted System page: both replace the operating
+		// system and need a restart, so they belong with updates.
+		"channel_group":      "Release Channel",
+		"bootc_status_group": "queued for the next",
 		// applications_page
-		"applications_installed_group": "Your installed apps",
-		"flatpak_user_group":           "Flatpak",
-		"flatpak_system_group":         "Flatpak",
-		"brew_group":                   "Homebrew packages",
-		"brew_search_group":            "search across both",
-		"brew_bundles_group":           "Bundles",
+		"brew_group":         "packages Homebrew manages",
+		"brew_bundles_group": "App Collections",
 		// maintenance_page
-		"maintenance_cleanup_group":      "your distribution added",
-		"maintenance_brew_group":         "Clean up files",
-		"maintenance_flatpak_group":      "Clean up files",
-		"maintenance_optimization_group": "Clean up files",
-		"reset_group":                    "Powerwash",
+		"maintenance_cleanup_group":   "Maintenance Tasks",
+		"maintenance_freespace_group": "Free Up Space",
+		"reset_group":                 "Powerwash",
 		// features_page
-		"features_group":        "feature manager",
-		"dx_group":              "Developer Mode",
-		"gaming_group":          "Gaming Mode",
-		"ai_group":              "Local AI",
-		"troubleshooting_group": "Enhanced Troubleshooting",
+		"bluefin_cli_group":          "**Bluefin CLI**",
+		"features_group":             "feature manager",
+		"desktop_integrations_group": "Desktop Integrations",
+		"dx_group":                   "Developer tools",
+		"gaming_group":               "**Gaming**",
+		"printers_group":             "**Printers**",
+		"compass_group":              "**Compass**",
+		// livery_page
+		"account_group":           "Profile Picture",
+		"wallpapers_group":        "**Wallpapers**",
+		"livery_app_grid_group":   "**App Launcher Icon**",
+		"livery_foundation_group": "**Top Bar Icon**",
+		"livery_dock_group":       "**Files Icon**",
 		// help_page
 		"help_resources_group": "issues",
 	}

@@ -17,32 +17,105 @@
 // which helper failed. A caller that needs that attribution must carry the
 // invocation context itself rather than discriminate on the error type.
 //
-// pkexecPath is a parameter, always "pkexec" in production, so tests can
-// substitute a fake pkexec stand-in without invoking the real pkexec/polkit
-// stack or requiring root.
+// pkexecPath is a parameter so tests can substitute a fake pkexec stand-in
+// without invoking the real pkexec/polkit stack or requiring root. In
+// production every caller passes internal/pkexec.Command, which owns that
+// name for the whole application.
+//
+// # Cancellation contract
+//
+// What canceling ctx (or letting its deadline pass) does depends on how far
+// pkexec has got.
+//
+// While the PolicyKit prompt is open, pkexec still runs with the caller's
+// real uid, so the kill reaches it, the prompt goes away, nothing privileged
+// has run, and Run returns promptly with the cancelled or timed-out outcome.
+//
+// Once authentication succeeds, pkexec sets every uid to root and execs the
+// helper in its own place. An unprivileged ChairLift can no longer signal
+// it (kill fails with EPERM), nor anything it spawned, so it cannot stop the
+// work the way internal/maintenanceexec stops unprivileged scripts. Run then
+// returns only when the helper exits on its own, which the helper's own
+// timeout bounds. That wait is deliberate: every caller's action gate and
+// the update shell's admission stay held until Run returns; returning early
+// would let a second privileged action start beside a root helper that is
+// still mutating the system. Its outcome is then classified from the helper's
+// real exit status (see below), not as cancelled. Callers must therefore not
+// assume cancellation returns promptly after authentication, and copy must
+// not claim cancellation stopped a privileged action.
+//
+// WaitDelay bounds only the output pipes: once the helper has exited, a
+// descendant that inherited stdout and stderr cannot hold Run open.
+//
+// Because the wait is bounded, cmd.Run can report exec.ErrWaitDelay even
+// though the helper itself finished: a descendant that inherited stdout and
+// stderr kept the pipes open past the delay. Run classifies from the helper's
+// own exit status in that case, so a completed privileged action is reported
+// as success (with possibly truncated output) rather than as a failure the
+// user is invited to retry. For the same reason a cancel or deadline racing a
+// genuine helper failure does not mask that failure's exit code and stderr:
+// the context classification applies only when the helper was killed rather
+// than exiting on its own.
 package helperexec
 
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/projectbluefin/chairlift/internal/dryrun"
 	"github.com/projectbluefin/chairlift/internal/journal"
+	"github.com/projectbluefin/chairlift/internal/pkexec"
+	"github.com/projectbluefin/chairlift/internal/ubluehelper"
 )
+
+// WaitDelay bounds how long Run waits for the pkexec command's output pipes
+// to drain after the process is gone. pkexec hands stdout/stderr on to its
+// privileged helper, which may itself spawn descendants that inherit them; a
+// straggler could otherwise hold cmd.Run open forever waiting for EOF on a
+// pipe only a now-orphaned descendant still owns, exactly as maintenanceexec
+// guards against for configured maintenance scripts.
+//
+// Unlike maintenanceexec, Run cannot kill the whole process group: the helper
+// runs as root and an unprivileged ChairLift cannot signal it. WaitDelay
+// bounds only pipe draining after the helper exits, not the helper's runtime
+// or privileged work — see the package doc's cancellation contract.
+const WaitDelay = 5 * time.Second
+
+// waitDelay is the delay Run actually applies. It is a seam so tests can
+// shorten the pipe-holding-descendant cases instead of paying WaitDelay for
+// each; production never reassigns it.
+var waitDelay = WaitDelay
+
+// canceledMessage conservatively avoids claiming that all work stopped:
+// cancellation reaches only the direct child while it remains killable, not
+// a privileged process group. After authentication Run waits for helper exit.
+const canceledMessage = "command canceled (privileged work already started may still be running)"
 
 // Error represents a privileged helper invocation failure.
 type Error struct {
 	Message string
+	// Err is the underlying process or context error, so callers can match
+	// context.Canceled / context.DeadlineExceeded with errors.Is the same
+	// way internal/stageexec's errors allow.
+	Err error
 }
 
 func (e *Error) Error() string {
 	return e.Message
+}
+
+// Unwrap exposes the underlying process or context error.
+func (e *Error) Unwrap() error {
+	return e.Err
 }
 
 // NotFoundError is returned when pkexec or the privileged helper is absent.
@@ -73,16 +146,25 @@ func Run(ctx context.Context, pkexecPath, helperPath string, args ...string) (st
 	}
 
 	if dryrun.Enabled() {
-		args = append(args, "--dry-run")
-		wouldRun := append([]string{pkexecPath, helperPath}, args...)
+		// Journal Args must reflect the caller's actual inputs, so build the
+		// --dry-run-appended argv in a separate slice rather than mutating
+		// args (which journalArgs(args) below still reads unmodified).
+		dryRunArgs := append(append([]string{}, args...), "--dry-run")
+		wouldRun := append([]string{pkexecPath, helperPath}, dryRunArgs...)
 		journal.Record(action, journalArgs(args), wouldRun, journal.SuppressedDryRun)
-		log.Printf("[DRY-RUN] would execute: %s %s %v", pkexecPath, helperPath, args)
+		log.Printf("[DRY-RUN] would execute: %s %s %v", pkexecPath, helperPath, dryRunArgs)
 		return "", "", nil
 	}
 
 	fullArgs := append([]string{helperPath}, args...)
 	journal.Record(action, journalArgs(args), append([]string{pkexecPath}, fullArgs...), journal.SuppressedNone)
 	cmd := exec.CommandContext(ctx, pkexecPath, fullArgs...)
+	// A finite WaitDelay keeps a privileged descendant that retains the
+	// inherited output pipes from holding Run open after the helper exits.
+	// It does not shorten the wait for the helper itself: after
+	// authentication the helper runs as root and cannot be killed from here
+	// (see the cancellation contract above).
+	cmd.WaitDelay = waitDelay
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -90,18 +172,129 @@ func Run(ctx context.Context, pkexecPath, helperPath string, args ...string) (st
 
 	err := cmd.Run()
 
-	if stderr.Len() > 0 {
-		log.Printf("%s stderr: %s", path.Base(helperPath), stderr.String())
+	cleanStdout, execOut := parseAndCleanExec(stdout.String(), helperPath)
+	cleanStderr, execErr := parseAndCleanExec(stderr.String(), helperPath)
+	var executed [][]string
+	if len(execOut) > 0 {
+		executed = append(executed, execOut...)
+	}
+	if len(execErr) > 0 {
+		executed = append(executed, execErr...)
 	}
 
-	if err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
-			return "", stderr.String(), &Error{Message: "command timed out"}
+	if len(cleanStderr) > 0 {
+		log.Printf("%s stderr: %s", path.Base(helperPath), cleanStderr)
+	}
+
+	if err == nil {
+		journal.RecordOutcome(action, journal.OutcomeSucceeded, nil, executed)
+		return cleanStdout, cleanStderr, nil
+	}
+
+	// The helper's own exit status is authoritative whenever it exited on its
+	// own, whatever error cmd.Run surfaced. Two races make that distinction
+	// matter: a descendant that inherited the output pipes can keep them open
+	// past WaitDelay (cmd.Run then reports exec.ErrWaitDelay for a helper that
+	// succeeded), and a cancel or deadline can land while the helper is
+	// already finishing (cmd.Run then reports the context error). Reporting
+	// either as a failure would tell the GUI a completed privileged action
+	// failed and invite a retry of work that already happened; reporting a
+	// real non-zero exit as "canceled" would drop the exit code and stderr the
+	// caller needs.
+	if exitedOnOwn(cmd.ProcessState) {
+		if cmd.ProcessState.Success() {
+			if errors.Is(err, exec.ErrWaitDelay) {
+				// The pipes were force-closed at WaitDelay, so the captured
+				// output may be truncated mid-stream.
+				log.Printf("%s exited 0 but a descendant still held its output pipes; captured output may be truncated",
+					path.Base(helperPath))
+			}
+			journal.RecordOutcome(action, journal.OutcomeSucceeded, nil, executed)
+			return cleanStdout, cleanStderr, nil
 		}
-		return "", stderr.String(), classifyFailure(err, helperPath, stderr.String())
+		exitCode := cmd.ProcessState.ExitCode()
+		// pkexec exits 127 both for a refused authorization and for a helper
+		// it cannot execute ("Error accessing <path>"); only the former is a
+		// refusal.
+		if exitCode == pkexec.DismissedExitCode || (exitCode == 127 && !strings.Contains(cleanStderr, "Error accessing")) {
+			journal.RecordOutcome(action, journal.OutcomeRefused, &exitCode, executed)
+		} else {
+			journal.RecordOutcome(action, journal.OutcomeFailed, &exitCode, executed)
+		}
+		return "", cleanStderr, exitFailure(exitCode, cleanStderr, err)
 	}
 
-	return stdout.String(), stderr.String(), nil
+	// The helper was killed rather than exiting, so a non-nil ctx error is the
+	// reason it died and names the outcome better than "signal: killed".
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		if errors.Is(ctxErr, context.DeadlineExceeded) {
+			journal.RecordOutcome(action, journal.OutcomeTimedOut, nil, executed)
+		} else {
+			journal.RecordOutcome(action, journal.OutcomeCancelled, nil, executed)
+		}
+		return "", cleanStderr, contextError(ctxErr)
+	}
+
+	journal.RecordOutcome(action, journal.OutcomeFailed, nil, executed)
+	return "", cleanStderr, classifyFailure(err, helperPath, cleanStderr)
+}
+
+// parseAndCleanExec extracts any machine-readable command emitted by the helper
+// and strips those marker lines from the human-readable output.
+func parseAndCleanExec(output, helperPath string) (string, [][]string) {
+	if !strings.Contains(output, ": exec ") {
+		return output, nil
+	}
+	prefix := path.Base(helperPath) + ": exec "
+	var executed [][]string
+	var cleanLines []string
+	for _, line := range strings.Split(strings.TrimSuffix(output, "\n"), "\n") {
+		if strings.HasPrefix(line, prefix) || strings.HasPrefix(line, ubluehelper.HelperExecPrefix) {
+			idx := strings.Index(line, ": exec ")
+			if idx != -1 {
+				jsonPart := line[idx+len(": exec "):]
+				var cmd []string
+				if err := json.Unmarshal([]byte(jsonPart), &cmd); err == nil && len(cmd) > 0 {
+					executed = append(executed, cmd)
+				}
+			}
+			continue
+		}
+		cleanLines = append(cleanLines, line)
+	}
+	cleanOutput := strings.Join(cleanLines, "\n")
+	if len(cleanLines) > 0 && strings.HasSuffix(output, "\n") {
+		cleanOutput += "\n"
+	} else if len(cleanLines) == 0 && !strings.HasSuffix(output, "\n") {
+		cleanOutput = ""
+	}
+	return cleanOutput, executed
+}
+
+// exitFailure reports a helper that ran and exited non-zero, keeping the exit
+// code and stderr even when cmd.Run surfaced something other than an
+// *exec.ExitError (a bounded-wait or cancellation artifact racing the exit).
+func exitFailure(exitCode int, stderr string, err error) error {
+	return &Error{
+		Message: fmt.Sprintf("command failed (exit %d): %s", exitCode, stderr),
+		Err:     err,
+	}
+}
+
+// exitedOnOwn reports whether the helper process terminated with an exit
+// status of its own rather than being killed — by Run's cancellation, by a
+// deadline, or by any other signal.
+func exitedOnOwn(state *os.ProcessState) bool {
+	return state != nil && state.Exited()
+}
+
+// contextError maps a context error onto the shared taxonomy, keeping the
+// sentinel reachable through errors.Is.
+func contextError(err error) error {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return &Error{Message: "command timed out", Err: context.DeadlineExceeded}
+	}
+	return &Error{Message: canceledMessage, Err: context.Canceled}
 }
 
 // classifyFailure maps a failed invocation's error onto the shared taxonomy:
@@ -122,7 +315,8 @@ func classifyFailure(err error, helperPath, stderr string) error {
 	if errors.As(err, &exitErr) {
 		return &Error{
 			Message: fmt.Sprintf("command failed (exit %d): %s", exitErr.ExitCode(), stderr),
+			Err:     err,
 		}
 	}
-	return &Error{Message: err.Error()}
+	return &Error{Message: err.Error(), Err: err}
 }

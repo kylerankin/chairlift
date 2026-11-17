@@ -5,7 +5,7 @@
 // unit-tested on a headless host. A test binary for a package that imports
 // puregotk panics while resolving GTK/graphene shared libraries at package
 // init — before any test function runs — so logic that must be tested cannot
-// live in the view packages. See docs/agents/skills/gtk-headless-tests.md.
+// live in the view packages. See docs/skills/gtk-headless-testing/SKILL.md.
 package trustmsg
 
 import "fmt"
@@ -17,7 +17,15 @@ import "fmt"
 // where brew_trust_group is disabled or its group has not been built.
 func UpgradeMessage(pkgName string, trustGroupAvailable bool) string {
 	if trustGroupAvailable {
-		return fmt.Sprintf("%s comes from an untrusted tap — see Untrusted Homebrew Taps below", pkgName)
+		return fmt.Sprintf("%s comes from an untrusted source — see Manage Source Trust below", pkgName)
 	}
 	return fmt.Sprintf("%s comes from an untrusted tap and cannot be upgraded until the tap is trusted", pkgName)
+}
+
+// BundleMessage returns the toast text for an app collection install that
+// failed because it needs a Homebrew tap the user has not trusted. The tap
+// and the command that would trust it belong in the log, not in a toast a
+// person cannot act on from the terminal-free UI.
+func BundleMessage(bundleName string) string {
+	return fmt.Sprintf("Couldn't install %s. It needs a source this computer doesn't trust yet.", bundleName)
 }

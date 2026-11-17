@@ -5,178 +5,49 @@ import (
 	"testing"
 )
 
-// TestBundleDump covers both dry-run states for the Brewfile-dump toast text.
+// TestBundleDump covers both dry-run states for the package-list export
+// toast, and that neither names the file it writes.
 func TestBundleDump(t *testing.T) {
 	tests := []struct {
 		name         string
 		dryRun       bool
-		path         string
 		wantContains []string
 		wantExact    string
 	}{
 		{
-			name:      "live run reports the saved path",
-			dryRun:    false,
-			path:      "/home/user/Brewfile",
-			wantExact: "Brewfile saved to /home/user/Brewfile",
+			name:         "live run confirms the export in plain words",
+			dryRun:       false,
+			wantContains: []string{"home folder"},
 		},
 		{
 			name:         "dry-run previews without claiming a save happened",
 			dryRun:       true,
-			path:         "/home/user/Brewfile",
-			wantContains: []string{"[DRY-RUN]", "/home/user/Brewfile", "no changes made"},
+			wantContains: []string{"[DRY-RUN]", "no changes made"},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := BundleDump(tt.dryRun, tt.path)
+			got := BundleDump(tt.dryRun)
 
 			if tt.wantExact != "" && got != tt.wantExact {
-				t.Errorf("BundleDump(%v, %q) = %q, want %q", tt.dryRun, tt.path, got, tt.wantExact)
+				t.Errorf("BundleDump(%v) = %q, want %q", tt.dryRun, got, tt.wantExact)
 			}
 			for _, want := range tt.wantContains {
 				if !strings.Contains(got, want) {
-					t.Errorf("BundleDump(%v, %q) = %q, want it to contain %q", tt.dryRun, tt.path, got, want)
+					t.Errorf("BundleDump(%v) = %q, want it to contain %q", tt.dryRun, got, want)
+				}
+			}
+			for _, banned := range []string{"Brewfile", "/", "~"} {
+				if strings.Contains(got, banned) {
+					t.Errorf("BundleDump(%v) = %q, must not contain %q", tt.dryRun, got, banned)
 				}
 			}
 		})
 	}
 }
 
-func TestBundleInstallDecision(t *testing.T) {
-	tests := []struct {
-		name         string
-		dryRun       bool
-		wantComplete bool
-		wantExact    string
-		wantContains []string
-	}{
-		{
-			name:         "live install completes the row",
-			wantComplete: true,
-			wantExact:    "Brew bundle cli installed",
-		},
-		{
-			name:         "dry-run resets the row after a preview",
-			dryRun:       true,
-			wantComplete: false,
-			wantContains: []string{"[DRY-RUN]", "cli", "no changes made"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := BundleInstall(tt.dryRun, "cli")
-			if got.Complete != tt.wantComplete {
-				t.Errorf("BundleInstall(%v, cli).Complete = %v, want %v", tt.dryRun, got.Complete, tt.wantComplete)
-			}
-			if tt.wantExact != "" && got.Toast != tt.wantExact {
-				t.Errorf("BundleInstall(%v, cli).Toast = %q, want %q", tt.dryRun, got.Toast, tt.wantExact)
-			}
-			for _, want := range tt.wantContains {
-				if !strings.Contains(got.Toast, want) {
-					t.Errorf("BundleInstall(%v, cli).Toast = %q, want it to contain %q", tt.dryRun, got.Toast, want)
-				}
-			}
-		})
-	}
-}
-
-// TestCleanup covers both dry-run states for the Homebrew/Flatpak cleanup
-// toast text. This is the extraction of onBrewCleanupClicked's and
-// onFlatpakCleanupClicked's already-correct message selection into a tested,
-// pure function — behavior is unchanged, only now exercised headlessly.
-func TestCleanup(t *testing.T) {
-	tests := []struct {
-		name   string
-		dryRun bool
-		tool   string
-		output string
-		want   string
-	}{
-		{
-			name:   "live run reports fixed completion message",
-			dryRun: false,
-			tool:   "Homebrew",
-			output: "some brew cleanup output",
-			want:   "Homebrew cleanup completed",
-		},
-		{
-			name:   "dry-run passes through the wrapper's mock output",
-			dryRun: true,
-			tool:   "Homebrew",
-			output: "[DRY-RUN] Would execute: brew cleanup",
-			want:   "[DRY-RUN] Would execute: brew cleanup",
-		},
-		{
-			name:   "flatpak live run reports fixed completion message",
-			dryRun: false,
-			tool:   "Flatpak",
-			output: "some flatpak output",
-			want:   "Flatpak cleanup completed",
-		},
-		{
-			name:   "flatpak dry-run passes through the wrapper's mock output",
-			dryRun: true,
-			tool:   "Flatpak",
-			output: "[DRY-RUN] Would execute: flatpak uninstall --unused -y",
-			want:   "[DRY-RUN] Would execute: flatpak uninstall --unused -y",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := Cleanup(tt.dryRun, tt.tool, tt.output)
-			if got != tt.want {
-				t.Errorf("Cleanup(%v, %q, %q) = %q, want %q", tt.dryRun, tt.tool, tt.output, got, tt.want)
-			}
-		})
-	}
-}
-
-// TestPackageInstallMessage covers both dry-run states for the Homebrew
-// package-install toast text.
-func TestPackageInstallMessage(t *testing.T) {
-	tests := []struct {
-		name         string
-		dryRun       bool
-		pkgName      string
-		wantExact    string
-		wantContains []string
-	}{
-		{
-			name:      "live run reports the package as installed",
-			dryRun:    false,
-			pkgName:   "ripgrep",
-			wantExact: "ripgrep installed",
-		},
-		{
-			name:         "dry-run previews without claiming an install happened",
-			dryRun:       true,
-			pkgName:      "ripgrep",
-			wantContains: []string{"[DRY-RUN]", "ripgrep", "no changes made"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := Install(tt.dryRun, tt.pkgName)
-
-			if tt.wantExact != "" && got != tt.wantExact {
-				t.Errorf("Install(%v, %q) = %q, want %q", tt.dryRun, tt.pkgName, got, tt.wantExact)
-			}
-			for _, want := range tt.wantContains {
-				if !strings.Contains(got, want) {
-					t.Errorf("Install(%v, %q) = %q, want it to contain %q", tt.dryRun, tt.pkgName, got, want)
-				}
-			}
-		})
-	}
-}
-
-// TestUninstall covers both dry-run states for shared Homebrew/Flatpak
-// uninstall toast text.
+// TestUninstall covers both dry-run states for Homebrew uninstall toast text.
 func TestUninstall(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -212,6 +83,24 @@ func TestUninstall(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// Homebrew refuses to uninstall a package other installed packages need;
+// the toast names them instead of a bare, unactionable failure (W2-APPS-3).
+func TestUninstallFailureNamesDependents(t *testing.T) {
+	for _, tt := range []struct {
+		dependents []string
+		want       string
+	}{
+		{nil, "Couldn't uninstall node"},
+		{[]string{"yarn"}, "Couldn't uninstall node because yarn needs it"},
+		{[]string{"yarn", "pnpm"}, "Couldn't uninstall node because yarn and pnpm need it"},
+		{[]string{"glib", "pipx", "yarn"}, "Couldn't uninstall node because glib, pipx and yarn need it"},
+	} {
+		if got := UninstallFailure("node", tt.dependents); got != tt.want {
+			t.Errorf("UninstallFailure(node, %q) = %q, want %q", tt.dependents, got, tt.want)
+		}
 	}
 }
 
@@ -373,15 +262,11 @@ func TestSelfUpdate(t *testing.T) {
 	}
 }
 
-// TestBootcStage covers all four (dryRun, staged) combinations for the
-// Updates page's bootc stage-button completion toast. Under dry-run,
-// bootc.StageUpdate never re-checks or re-stages anything for real (it
-// short-circuits before pkexec), so the toast must read as an unambiguous
-// preview regardless of what a live bootc.GetStatus() re-read happens to
-// report as staged — the dryRun=true cases must NOT contain either
-// non-dry-run completion string verbatim.
-func TestBootcStage(t *testing.T) {
-	const stagedMsg = "System update staged. Restart to apply."
+// TestSystemStage covers all four (dryRun, staged) combinations for both
+// staging providers. Dry-run cannot claim that a status re-read is work done
+// by this click, while live staging retains its fixed completion messages.
+func TestSystemStage(t *testing.T) {
+	const stagedMsg = "Update downloaded. Restart to install it."
 	const upToDateMsg = "System is up to date"
 
 	tests := []struct {
@@ -419,96 +304,40 @@ func TestBootcStage(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := BootcStage(tt.dryRun, tt.staged)
+			got := SystemStage(tt.dryRun, tt.staged)
 
 			if tt.wantExact != "" && got != tt.wantExact {
-				t.Errorf("BootcStage(%v, %v) = %q, want %q", tt.dryRun, tt.staged, got, tt.wantExact)
+				t.Errorf("SystemStage(%v, %v) = %q, want %q", tt.dryRun, tt.staged, got, tt.wantExact)
 			}
 			for _, want := range tt.wantContains {
 				if !strings.Contains(got, want) {
-					t.Errorf("BootcStage(%v, %v) = %q, want it to contain %q", tt.dryRun, tt.staged, got, want)
+					t.Errorf("SystemStage(%v, %v) = %q, want it to contain %q", tt.dryRun, tt.staged, got, want)
 				}
 			}
 			if tt.dryRun {
 				if !strings.Contains(got, "Preview") && !strings.Contains(got, "[DRY-RUN]") {
-					t.Errorf("BootcStage(%v, %v) = %q, want it to contain %q or %q", tt.dryRun, tt.staged, got, "Preview", "[DRY-RUN]")
+					t.Errorf("SystemStage(%v, %v) = %q, want it to contain %q or %q", tt.dryRun, tt.staged, got, "Preview", "[DRY-RUN]")
 				}
 				if strings.Contains(got, stagedMsg) {
-					t.Errorf("BootcStage(%v, %v) = %q, must not contain the non-dry-run staged completion string %q", tt.dryRun, tt.staged, got, stagedMsg)
+					t.Errorf("SystemStage(%v, %v) = %q, must not contain the non-dry-run staged completion string %q", tt.dryRun, tt.staged, got, stagedMsg)
 				}
 				if strings.Contains(got, upToDateMsg) {
-					t.Errorf("BootcStage(%v, %v) = %q, must not contain the non-dry-run up-to-date completion string %q", tt.dryRun, tt.staged, got, upToDateMsg)
+					t.Errorf("SystemStage(%v, %v) = %q, must not contain the non-dry-run up-to-date completion string %q", tt.dryRun, tt.staged, got, upToDateMsg)
 				}
 			}
 		})
 	}
 }
 
-// TestSysupdateStage mirrors TestBootcStage: the native A/B stage toast has
-// the identical dry-run contract (a preview string that never claims a
-// completed or verified state, because staged reflects real system state, not
-// this click's work).
-func TestSysupdateStage(t *testing.T) {
-	const stagedMsg = "System update staged. Restart to apply."
-	const upToDateMsg = "System is up to date"
-
-	tests := []struct {
-		name         string
-		dryRun       bool
-		staged       bool
-		wantExact    string
-		wantContains []string
-	}{
-		{
-			name:      "live run, staged reports the fixed staged message",
-			dryRun:    false,
-			staged:    true,
-			wantExact: stagedMsg,
-		},
-		{
-			name:      "live run, not staged reports the fixed up-to-date message",
-			dryRun:    false,
-			staged:    false,
-			wantExact: upToDateMsg,
-		},
-		{
-			name:         "dry-run, staged previews without claiming completion",
-			dryRun:       true,
-			staged:       true,
-			wantContains: []string{"no changes made"},
-		},
-		{
-			name:         "dry-run, not staged previews without claiming completion",
-			dryRun:       true,
-			staged:       false,
-			wantContains: []string{"no changes made"},
-		},
+// A dry-run Update all returned the panel to "Updates available" with no
+// feedback, unlike every other dry-run action on the Updates page. Its toast
+// follows the page's preview convention and never claims an install.
+func TestUpdateAllPreviewSaysNothingWasInstalled(t *testing.T) {
+	if !strings.HasPrefix(UpdateAllPreview, "[DRY-RUN] Preview: ") || !strings.HasSuffix(UpdateAllPreview, "— no changes made") {
+		t.Fatalf("UpdateAllPreview = %q, want the [DRY-RUN] Preview: … — no changes made shape", UpdateAllPreview)
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := SysupdateStage(tt.dryRun, tt.staged)
-
-			if tt.wantExact != "" && got != tt.wantExact {
-				t.Errorf("SysupdateStage(%v, %v) = %q, want %q", tt.dryRun, tt.staged, got, tt.wantExact)
-			}
-			for _, want := range tt.wantContains {
-				if !strings.Contains(got, want) {
-					t.Errorf("SysupdateStage(%v, %v) = %q, want it to contain %q", tt.dryRun, tt.staged, got, want)
-				}
-			}
-			if tt.dryRun {
-				if !strings.Contains(got, "Preview") && !strings.Contains(got, "[DRY-RUN]") {
-					t.Errorf("SysupdateStage(%v, %v) = %q, want it to contain %q or %q", tt.dryRun, tt.staged, got, "Preview", "[DRY-RUN]")
-				}
-				if strings.Contains(got, stagedMsg) {
-					t.Errorf("SysupdateStage(%v, %v) = %q, must not contain the non-dry-run staged completion string %q", tt.dryRun, tt.staged, got, stagedMsg)
-				}
-				if strings.Contains(got, upToDateMsg) {
-					t.Errorf("SysupdateStage(%v, %v) = %q, must not contain the non-dry-run up-to-date completion string %q", tt.dryRun, tt.staged, got, upToDateMsg)
-				}
-			}
-		})
+	if !strings.Contains(UpdateAllPreview, "would be installed") {
+		t.Fatalf("UpdateAllPreview = %q, want it to say updates would be installed", UpdateAllPreview)
 	}
 }
 
@@ -532,7 +361,7 @@ func TestTapTrust(t *testing.T) {
 			dryRun:       false,
 			tapName:      "some/tap",
 			wantMutateUI: true,
-			wantToast:    "Trusted some/tap. Its packages can update again.",
+			wantToast:    "Trusted some/tap. Its software can update again.",
 		},
 		{
 			name:             "dry-run previews without mutating the UI",
@@ -563,6 +392,49 @@ func TestTapTrust(t *testing.T) {
 				if !strings.Contains(got.Toast, want) {
 					t.Errorf("TapTrust(%v, %q).Toast = %q, want it to contain %q", tt.dryRun, tt.tapName, got.Toast, want)
 				}
+			}
+		})
+	}
+}
+
+// TestPackageTrust mirrors TestTapTrust for the per-package Trust button:
+// a live run mutates the UI (the now-trusted package row is removed), a
+// dry-run preview does not, and the toast text distinguishes the two. The
+// test holds both halves (the gate and the wording) precisely so the gate
+// the Manage source trust UI depends on — that a package row cannot vanish
+// after a dry-run click — is what actionmsg_test.go asserts on.
+func TestPackageTrust(t *testing.T) {
+	tests := []struct {
+		name         string
+		dryRun       bool
+		packageName  string
+		wantMutateUI bool
+		wantToast    string
+	}{
+		{
+			name:         "live run trusts the package and mutates the UI",
+			dryRun:       false,
+			packageName:  "vendor/tap/demo",
+			wantMutateUI: true,
+			wantToast:    "Trusted vendor/tap/demo. It can update again.",
+		},
+		{
+			name:         "dry-run previews without mutating the UI",
+			dryRun:       true,
+			packageName:  "vendor/tap/demo",
+			wantMutateUI: false,
+			wantToast:    "[DRY-RUN] Preview: vendor/tap/demo would be trusted — no changes made",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := PackageTrust(tt.dryRun, tt.packageName)
+			if got.MutateUI != tt.wantMutateUI {
+				t.Errorf("PackageTrust(%v, %q).MutateUI = %v, want %v", tt.dryRun, tt.packageName, got.MutateUI, tt.wantMutateUI)
+			}
+			if got.Toast != tt.wantToast {
+				t.Errorf("PackageTrust(%v, %q).Toast = %q, want %q", tt.dryRun, tt.packageName, got.Toast, tt.wantToast)
 			}
 		})
 	}
@@ -638,20 +510,20 @@ func TestFeatureToggle(t *testing.T) {
 		wantContains []string
 	}{
 		{
-			name:        "live enable confirms the switch",
-			dryRun:      false,
-			enable:      true,
-			featName:    "docker",
-			wantConfirm: true,
-			wantToast:   "docker enabled. Update to download, reboot to apply.",
+			name:         "live enable confirms the switch",
+			dryRun:       false,
+			enable:       true,
+			featName:     "docker",
+			wantConfirm:  true,
+			wantContains: []string{"docker", "turned on", "restart"},
 		},
 		{
-			name:        "live disable confirms the switch",
-			dryRun:      false,
-			enable:      false,
-			featName:    "docker",
-			wantConfirm: true,
-			wantToast:   "docker disabled. Update to apply, reboot to complete.",
+			name:         "live disable confirms the switch",
+			dryRun:       false,
+			enable:       false,
+			featName:     "docker",
+			wantConfirm:  true,
+			wantContains: []string{"docker", "turned off", "restart"},
 		},
 		{
 			name:         "dry-run enable previews without confirming the switch",
@@ -706,9 +578,9 @@ func TestFeatureUpdate(t *testing.T) {
 		wantContains []string
 	}{
 		{
-			name:      "live run reports fixed completion message",
-			dryRun:    false,
-			wantExact: "Features updated. Changes apply after reboot.",
+			name:         "live run says a restart applies it",
+			dryRun:       false,
+			wantContains: []string{"updated", "Restart"},
 		},
 		{
 			name:         "dry-run previews without claiming completion",
@@ -733,5 +605,41 @@ func TestFeatureUpdate(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestLiveryDecisionsGateTheMirrorAndAnnounceEveryPreview covers every Livery
+// decision. Selections and rotation once had no preview toast at all, so under
+// dry-run a pick closed its chooser and a rotate switch sprang back with
+// nothing on screen saying why (ADR-0009).
+func TestLiveryDecisionsGateTheMirrorAndAnnounceEveryPreview(t *testing.T) {
+	const name = "the Files icon"
+	for _, preview := range []bool{false, true} {
+		decisions := map[string]LiveryDecision{
+			"toggle on":    LiveryToggle(preview, true, name),
+			"toggle off":   LiveryToggle(preview, false, name),
+			"selection":    LiverySelection(preview, name),
+			"rotation on":  LiveryRotation(preview, true, name),
+			"rotation off": LiveryRotation(preview, false, name),
+		}
+		for action, decision := range decisions {
+			if decision.MutateUI == preview {
+				t.Errorf("%s preview=%t: MutateUI=%t", action, preview, decision.MutateUI)
+			}
+			if !preview {
+				if decision.Toast != "" {
+					t.Errorf("%s: live run emits preview feedback %q", action, decision.Toast)
+				}
+				continue
+			}
+			if !strings.HasPrefix(decision.Toast, "[DRY-RUN] Preview: ") ||
+				!strings.HasSuffix(decision.Toast, " — no changes made") ||
+				!strings.Contains(decision.Toast, name) {
+				t.Errorf("%s: preview toast %q breaks the dry-run convention or omits the section", action, decision.Toast)
+			}
+		}
+	}
+	if on, off := LiveryRotation(true, true, name).Toast, LiveryRotation(true, false, name).Toast; on == off {
+		t.Errorf("rotation preview does not say which way it would go: %q", on)
 	}
 }

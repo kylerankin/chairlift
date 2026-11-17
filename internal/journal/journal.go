@@ -49,6 +49,23 @@ const (
 	SuppressedRefused Suppression = "refused"
 )
 
+// Outcome records the result of an executed privileged action.
+type Outcome string
+
+const (
+	// OutcomeSucceeded means the action ran and exited 0.
+	OutcomeSucceeded Outcome = "succeeded"
+	// OutcomeRefused means PolicyKit authentication was dismissed or denied
+	// (pkexec exit status 126 or 127).
+	OutcomeRefused Outcome = "refused"
+	// OutcomeFailed means the helper ran and exited with another non-zero status.
+	OutcomeFailed Outcome = "failed"
+	// OutcomeTimedOut means execution timed out before completion.
+	OutcomeTimedOut Outcome = "timed-out"
+	// OutcomeCancelled means execution was canceled by context.
+	OutcomeCancelled Outcome = "cancelled"
+)
+
 // Entry is one journalled action.
 type Entry struct {
 	// Seq is a process-wide monotonic sequence number, assigned under the
@@ -65,7 +82,16 @@ type Entry struct {
 	// assertion then checks the command ChairLift actually assembled.
 	WouldRun []string `json:"would_run,omitempty"`
 	// Suppressed records whether the action ran.
-	Suppressed Suppression `json:"suppressed"`
+	Suppressed Suppression `json:"suppressed,omitempty"`
+	// Outcome records the result of executing the privileged action.
+	Outcome Outcome `json:"outcome,omitempty"`
+	// ExitCode is the process exit code for failed or refused actions.
+	ExitCode *int `json:"exit_code,omitempty"`
+	// Executed is the concrete privileged command line(s) executed by the
+	// helper. It is self-reported through marker lines on the helper's
+	// output, which its root children inherit, so a child printing the same
+	// marker shape can add an entry: it is an audit aid, not proof.
+	Executed [][]string `json:"executed,omitempty"`
 	// Timestamp is RFC 3339 UTC, for human reading only.
 	Timestamp string `json:"ts"`
 }
@@ -116,6 +142,40 @@ func Record(action string, args map[string]string, wouldRun []string, suppressed
 		WouldRun:   wouldRun,
 		Suppressed: suppressed,
 		Timestamp:  now().Format(time.RFC3339),
+	}
+
+	line, err := json.Marshal(entry)
+	if err != nil {
+		return
+	}
+
+	file, err := os.OpenFile(sink, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return
+	}
+	defer func() { _ = file.Close() }()
+	_, _ = fmt.Fprintf(file, "%s\n", line)
+}
+
+// RecordOutcome appends an outcome entry. It never returns an error and never
+// panics: like Record, journal failures are dropped so recording never affects
+// the caller.
+func RecordOutcome(action string, outcome Outcome, exitCode *int, executed [][]string) {
+	if !Enabled() {
+		return
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	seq++
+	entry := Entry{
+		Seq:       seq,
+		Action:    action,
+		Outcome:   outcome,
+		ExitCode:  exitCode,
+		Executed:  executed,
+		Timestamp: now().Format(time.RFC3339),
 	}
 
 	line, err := json.Marshal(entry)

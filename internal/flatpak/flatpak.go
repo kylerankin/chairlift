@@ -9,16 +9,18 @@ import (
 	"io/fs"
 	"log"
 	"os/exec"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/projectbluefin/chairlift/internal/dryrun"
+	"github.com/projectbluefin/chairlift/internal/outputtail"
 )
 
 const (
-	// readTimeout bounds read-only flatpak commands (listing, info, remotes).
+	// readTimeout bounds read-only flatpak commands.
 	readTimeout = 30 * time.Second
 	// mutationTimeout bounds state-changing flatpak commands, which may
 	// download large application images and therefore need a far larger budget.
@@ -28,7 +30,22 @@ const (
 	// the stdout/stderr pipes, so a straggler could otherwise hold Wait open
 	// forever even though the command itself is gone.
 	waitDelay = 5 * time.Second
+	// commandOutputTailLimit bounds retained mutation output used only for
+	// diagnostics after a command fails. Successful mutation output is discarded.
+	commandOutputTailLimit = 64 * 1024
 )
+
+type commandOutputWriter interface {
+	Write([]byte) (int, error)
+	String() string
+}
+
+func commandOutputWriters(args []string) (commandOutputWriter, commandOutputWriter, bool) {
+	if len(args) > 0 && stateChangingCommands[args[0]] {
+		return outputtail.New(commandOutputTailLimit), outputtail.New(commandOutputTailLimit), true
+	}
+	return &bytes.Buffer{}, &bytes.Buffer{}, false
+}
 
 // Error represents a Flatpak-related error. Err, when non-nil, carries the
 // underlying cause (for example context.DeadlineExceeded or
@@ -56,15 +73,44 @@ func (e *NotFoundError) Error() string {
 	return e.Message
 }
 
-// Application represents an installed Flatpak application
+// Kind distinguishes the two shapes of installed Flatpak ref. It exists
+// because `flatpak list` reports them through mutually exclusive filters:
+// `--app` never returns a runtime, and `--runtime` never returns an
+// application. Anything shipped as a runtime extension — the MangoHud Vulkan
+// layer, for one — is therefore invisible to an inventory that only ever
+// passes `--app`.
+type Kind string
+
+const (
+	// KindApplication is an installed application (`app/…` ref).
+	KindApplication Kind = "app"
+	// KindRuntime is an installed runtime, SDK, or runtime extension
+	// (`runtime/…` ref).
+	KindRuntime Kind = "runtime"
+)
+
+// listFlag returns the `flatpak list` filter that reports this kind.
+func (k Kind) listFlag() string {
+	if k == KindRuntime {
+		return "--runtime"
+	}
+	return "--app"
+}
+
+// Application represents an installed Flatpak ref. Kind records whether that
+// ref is an application or a runtime; the field is named for the struct's
+// original application-only use, which every existing caller still has.
 type Application struct {
 	Name          string `json:"name"`
 	ApplicationID string `json:"application"`
 	Version       string `json:"version"`
-	Branch        string `json:"branch"`
-	Origin        string `json:"origin"`
-	Installation  string `json:"installation"` // "user" or "system"
-	Ref           string `json:"ref"`
+	// Branch is the installed ref's branch ("stable" for most applications,
+	// a Platform version such as "25.08" for runtime extensions). A
+	// runtime extension can be installed in several branches at once, and
+	// then only a branch-qualified ref ("ID//BRANCH") names one of them.
+	Branch       string `json:"branch"`
+	Installation string `json:"installation"` // "user" or "system"
+	Kind         Kind   `json:"kind"`         // "app" or "runtime"
 }
 
 // stateChangingCommands are commands that modify system state
@@ -86,22 +132,34 @@ func commandTimeout(args []string) time.Duration {
 
 // runFlatpakCommand executes a flatpak command and returns the output
 func runFlatpakCommand(args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout(args))
+	defer cancel()
+
+	return runFlatpakCommandCtx(ctx, args...)
+}
+
+// runFlatpakCommandCtx is the single dry-run gate for flatpak: it applies the
+// skip (before any exec.Cmd exists) and otherwise runs the command under ctx.
+// runFlatpakCommand supplies its own timeout context; context-taking exported
+// entry points such as Update supply the caller's context already narrowed to
+// the mutation budget, so cancellation propagates without a second gate that
+// could drift out of sync.
+func runFlatpakCommandCtx(ctx context.Context, args ...string) (string, error) {
 	if len(args) > 0 && stateChangingCommands[args[0]] && dryrun.Enabled() {
 		msg := fmt.Sprintf("[DRY-RUN] Would execute: flatpak %s", strings.Join(args, " "))
 		log.Println(msg)
 		return msg, nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout(args))
-	defer cancel()
-
 	return runFlatpakCommandAt(ctx, "flatpak", args...)
 }
 
-// runFlatpakCommandAt runs exe with args under ctx and returns its stdout. The
+// runFlatpakCommandAt runs exe with args under ctx. Read-only commands return
+// full stdout for parsers; state-changing commands discard successful output
+// and retain only bounded stdout/stderr tails for failure diagnostics. The
 // executable and context are parameters so tests can drive a fake script and
-// control the deadline; runFlatpakCommand is the only production caller and
-// always passes "flatpak".
+// control the deadline; the sole production caller
+// (runFlatpakCommandCtx) always passes "flatpak".
 //
 // The command runs in its own process group and cancellation signals the
 // whole group, so flatpak's helper processes (download workers, ostree pulls)
@@ -114,9 +172,9 @@ func runFlatpakCommandAt(ctx context.Context, exe string, args ...string) (strin
 	}
 	cmd.WaitDelay = waitDelay
 
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	stdout, stderr, boundedOutput := commandOutputWriters(args)
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
 
 	err := cmd.Run()
 	if err != nil {
@@ -139,9 +197,14 @@ func runFlatpakCommandAt(ctx context.Context, exe string, args ...string) (strin
 				Err:     context.Canceled,
 			}
 		}
+		stderrText := stderr.String()
+		diagnosticText := stderrText
+		if boundedOutput && diagnosticText == "" {
+			diagnosticText = stdout.String()
+		}
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
-			return "", &Error{Message: fmt.Sprintf("Flatpak command failed: %s", stderr.String()), Err: err}
+			return "", &Error{Message: fmt.Sprintf("Flatpak command failed: %s", diagnosticText), Err: err}
 		}
 		// exec.ErrNotFound covers a bare name missing from $PATH;
 		// fs.ErrNotExist covers an explicit path that does not exist.
@@ -151,6 +214,9 @@ func runFlatpakCommandAt(ctx context.Context, exe string, args ...string) (strin
 		return "", &Error{Message: err.Error(), Err: err}
 	}
 
+	if boundedOutput {
+		return "", nil
+	}
 	return stdout.String(), nil
 }
 
@@ -179,29 +245,46 @@ func IsInstalledCached() bool {
 
 // ListUserApplications returns all user-installed Flatpak applications
 func ListUserApplications() ([]Application, error) {
-	return listApplications("--user")
+	return listRefs("--user", KindApplication)
 }
 
 // ListSystemApplications returns all system-installed Flatpak applications
 func ListSystemApplications() ([]Application, error) {
-	return listApplications("--system")
+	return listRefs("--system", KindApplication)
 }
 
-// listApplications lists installed applications for a given installation type
-func listApplications(installFlag string) ([]Application, error) {
+// ListUserRuntimes returns every user-installed runtime, SDK, and runtime
+// extension. It is a separate query rather than a widened application listing
+// because `flatpak list --app` excludes them entirely.
+func ListUserRuntimes() ([]Application, error) {
+	return listRefs("--user", KindRuntime)
+}
+
+// ListSystemRuntimes returns every system-installed runtime, SDK, and runtime
+// extension.
+func ListSystemRuntimes() ([]Application, error) {
+	return listRefs("--system", KindRuntime)
+}
+
+// listRefs lists installed refs of one kind for a given installation type
+func listRefs(installFlag string, kind Kind) ([]Application, error) {
 	// Use columns format for structured output
-	output, err := runFlatpakCommand("list", installFlag, "--app", "--columns=name,application,version,branch,origin,ref")
+	output, err := runFlatpakCommand("list", installFlag, kind.listFlag(), "--columns=name,application,version,branch")
 	if err != nil {
 		return nil, err
 	}
 
-	return parseApplicationList(output, installFlag)
+	return parseRefList(output, installFlag, kind)
 }
 
-// parseApplicationList parses the tabular output from flatpak list
-func parseApplicationList(output string, installFlag string) ([]Application, error) {
+// parseRefList parses the tabular output from flatpak list. The kind is
+// stamped from the filter the listing was requested with rather than read back
+// out of the ref column, so a row that falls through to the whitespace
+// fallback below — where the ref may not have been captured at all — is still
+// classified correctly.
+func parseRefList(output string, installFlag string, kind Kind) ([]Application, error) {
 	var apps []Application
-	lines := strings.Split(strings.TrimSpace(output), "\n")
+	lines := strings.Split(output, "\n")
 
 	installation := "system"
 	if installFlag == "--user" {
@@ -209,23 +292,14 @@ func parseApplicationList(output string, installFlag string) ([]Application, err
 	}
 
 	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
+		fields, ok := splitColumns(line)
+		if !ok {
 			continue
-		}
-
-		// Split by tab (flatpak uses tabs as column separators)
-		fields := strings.Split(line, "\t")
-		if len(fields) < 6 {
-			// Try splitting by multiple spaces for systems that might use spaces
-			fields = strings.Fields(line)
-			if len(fields) < 2 {
-				continue
-			}
 		}
 
 		app := Application{
 			Installation: installation,
+			Kind:         kind,
 		}
 
 		if len(fields) >= 1 {
@@ -240,17 +314,48 @@ func parseApplicationList(output string, installFlag string) ([]Application, err
 		if len(fields) >= 4 {
 			app.Branch = strings.TrimSpace(fields[3])
 		}
-		if len(fields) >= 5 {
-			app.Origin = strings.TrimSpace(fields[4])
-		}
-		if len(fields) >= 6 {
-			app.Ref = strings.TrimSpace(fields[5])
-		}
-
 		apps = append(apps, app)
 	}
 
 	return apps, nil
+}
+
+// ListInstalledOrigins returns every installed Flatpak application id mapped
+// to the remote it was installed from.
+//
+// It is the query `brew bundle` itself uses to decide which Flatpaks a
+// Brewfile's `flatpak` entries already cover, and it is deliberately
+// narrower than the column listings above: it names no display name,
+// version or branch, because the only two things an install decision needs
+// are which applications are present and where each came from.
+func ListInstalledOrigins() (map[string]string, error) {
+	output, err := runFlatpakCommand("list", "--app", "--columns=application,origin")
+	if err != nil {
+		return nil, err
+	}
+	return parseApplicationOrigins(output), nil
+}
+
+// parseApplicationOrigins reads the application/origin pairs out of
+// `flatpak list --app --columns=application,origin` output.
+func parseApplicationOrigins(output string) map[string]string {
+	origins := make(map[string]string)
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		application, origin, found := strings.Cut(line, "\t")
+		if !found {
+			application, origin, found = strings.Cut(line, " ")
+		}
+		application = strings.TrimSpace(application)
+		if !found || application == "" {
+			continue
+		}
+		origins[application] = strings.TrimSpace(origin)
+	}
+	return origins
 }
 
 // Install installs a Flatpak application
@@ -262,6 +367,50 @@ func Install(appID string, user bool) error {
 		args = append(args, "--system")
 	}
 	args = append(args, appID)
+
+	_, err := runFlatpakCommand(args...)
+	return err
+}
+
+// InstallFromRemote installs appID from a specific remote into the user or
+// system scope: `flatpak install -y [--user|--system] <remote> <appID>`. The
+// remote is the origin flatpak pulls from (typically "flathub"); pass "" for
+// the default remote. Like Install it enforces dryrun and runs through the
+// shared runner, so it inherits the process-group and timeout handling.
+func InstallFromRemote(appID, remote string, user bool) error {
+	args := []string{"install", "-y"}
+	if user {
+		args = append(args, "--user")
+	} else {
+		args = append(args, "--system")
+	}
+	if remote != "" {
+		args = append(args, remote)
+	}
+	args = append(args, appID)
+
+	_, err := runFlatpakCommand(args...)
+	return err
+}
+
+// InstallMany installs several applications in one Flatpak transaction:
+// `flatpak install -y --system flathub <id>…`. One transaction keeps a
+// partially selected collection's Flatpak install to a single command.
+//
+// The scope is always the system installation and the remote is always
+// Flathub, for the reason the privilege boundary records: Bluefin's policy
+// is system-wide Flatpaks, and its images configure Flathub only as a
+// system remote, where a `--user` install cannot resolve a ref.
+//
+// An empty list is a no-op: flatpak refuses an install with no ref, so the
+// caller must never reach it.
+func InstallMany(appIDs []string) error {
+	if len(appIDs) == 0 {
+		return nil
+	}
+
+	args := []string{"install", "-y", "--system", "flathub"}
+	args = append(args, appIDs...)
 
 	_, err := runFlatpakCommand(args...)
 	return err
@@ -281,8 +430,55 @@ func Uninstall(appID string, user bool) error {
 	return err
 }
 
-// Update updates a Flatpak application or all applications
-func Update(appID string, user bool) error {
+// AppRuntime returns the runtime ref ("ID/ARCH/BRANCH") the installed
+// application appID runs on. `flatpak info` without a scope flag searches
+// every installation, so a copy in either scope answers.
+func AppRuntime(appID string) (string, error) {
+	output, err := runFlatpakCommand("info", "--show-runtime", appID)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(output), nil
+}
+
+// RemoteAppRuntime returns the runtime ref ("ID/ARCH/BRANCH") the application
+// appID published on remote runs on, read from that remote as configured in
+// the user or system installation. It is the answer AppRuntime would give
+// once appID is installed from there.
+func RemoteAppRuntime(remote, appID string, user bool) (string, error) {
+	args := []string{"remote-info"}
+	if user {
+		args = append(args, "--user")
+	} else {
+		args = append(args, "--system")
+	}
+	args = append(args, "--app", "--show-runtime", remote, appID)
+
+	output, err := runFlatpakCommand(args...)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(output), nil
+}
+
+// RefBranch returns the branch of a full ref: "ID/ARCH/BRANCH", as
+// `--show-runtime` prints it, or "KIND/ID/ARCH/BRANCH".
+func RefBranch(ref string) (string, error) {
+	parts := strings.Split(strings.TrimSpace(ref), "/")
+	if (len(parts) != 3 && len(parts) != 4) || slices.Contains(parts, "") {
+		return "", fmt.Errorf("unrecognized Flatpak ref %q", ref)
+	}
+	return parts[len(parts)-1], nil
+}
+
+// Update updates a Flatpak application, or all applications when appID is
+// empty. It runs under ctx so a caller that started the command as one phase
+// of a larger run — Update All, for example — can cancel the whole run and
+// have this command stop with it, instead of the command ignoring the parent
+// deadline and running to its own 30-minute budget. The mutation budget is
+// still applied on top, so a lone caller stays bounded by whichever deadline
+// is nearer.
+func Update(ctx context.Context, appID string, user bool) error {
 	args := []string{"update", "-y"}
 	if user {
 		args = append(args, "--user")
@@ -293,47 +489,217 @@ func Update(appID string, user bool) error {
 		args = append(args, appID)
 	}
 
-	_, err := runFlatpakCommand(args...)
+	// context.WithTimeout takes whichever deadline is nearer: the run's own
+	// deadline (if any) or the mutation budget. A parent that is already
+	// cancelled makes the command fail immediately rather than start a fresh
+	// 30-minute run.
+	runCtx, cancel := context.WithTimeout(ctx, mutationTimeout)
+	defer cancel()
+
+	_, err := runFlatpakCommandCtx(runCtx, args...)
 	return err
 }
 
-// UpdateInfo represents an available Flatpak update
+// UpdateInfo represents an available Flatpak update.
 type UpdateInfo struct {
 	Name          string `json:"name"`
 	ApplicationID string `json:"application"`
 	NewVersion    string `json:"new_version"`
-	Branch        string `json:"branch"`
-	Origin        string `json:"origin"`
 	Installation  string `json:"installation"` // "user" or "system"
 }
 
-// updateListArgs builds the flatpak argument list used to query available
-// updates. "--app" restricts the query to applications so runtimes never
-// appear as updates.
-func updateListArgs(user bool) []string {
-	args := []string{"remote-ls", "--updates", "--app", "--columns=name,application,version,branch,origin"}
+// installationFlag returns the scope flag every per-installation query passes.
+func installationFlag(user bool) string {
 	if user {
-		args = append(args, "--user")
-	} else {
-		args = append(args, "--system")
+		return "--user"
 	}
-	return args
+	return "--system"
 }
 
-// ListUpdates returns available updates for Flatpak applications
-func ListUpdates(user bool) ([]UpdateInfo, error) {
-	output, err := runFlatpakCommand(updateListArgs(user)...)
+// updateRemoteListArgs lists the scope's remotes with their options. flatpak
+// already omits disabled remotes unless --show-disabled is given; the options
+// column lets parseUpdateRemotes check that rather than depend on it.
+func updateRemoteListArgs(user bool) []string {
+	return []string{"remotes", installationFlag(user), "--columns=name,options"}
+}
+
+// parseUpdateRemotes returns the remotes an update query covers, in listed
+// order: every remote except a disabled one, which is exactly the set
+// flatpak's own remote-less `remote-ls` visits.
+func parseUpdateRemotes(output string) []string {
+	var remotes []string
+	for _, line := range strings.Split(output, "\n") {
+		name, options, _ := strings.Cut(strings.TrimSpace(line), "\t")
+		name = strings.TrimSpace(name)
+		if name == "" || slices.Contains(strings.Split(options, ","), "disabled") {
+			continue
+		}
+		remotes = append(remotes, name)
+	}
+	return remotes
+}
+
+// EnabledRemotes returns the enabled remotes configured in one installation,
+// in listed order. It is read-only.
+func EnabledRemotes(user bool) ([]string, error) {
+	output, err := runFlatpakCommand(updateRemoteListArgs(user)...)
+	if err != nil {
+		return nil, err
+	}
+	return parseUpdateRemotes(output), nil
+}
+
+// originListArgs lists the origin remote of every installed application in
+// the scope. "--app" matches the update query's own filter: runtimes never
+// appear in the update inventory, so a remote that serves only runtimes —
+// the usual leftover when an application is uninstalled without
+// `--unused` — cannot hide an update the inventory would list.
+func originListArgs(user bool) []string {
+	return []string{"list", installationFlag(user), "--app", "--columns=origin"}
+}
+
+// parseOrigins returns the set of remotes named in `flatpak list
+// --columns=origin` output.
+func parseOrigins(output string) map[string]bool {
+	origins := make(map[string]bool)
+	for _, line := range strings.Split(output, "\n") {
+		if origin := strings.TrimSpace(line); origin != "" {
+			origins[origin] = true
+		}
+	}
+	return origins
+}
+
+// updateListArgs builds the flatpak argument list used to query one remote's
+// available updates. "--app" restricts the query to applications so runtimes
+// never appear as updates.
+func updateListArgs(user bool, remote string) []string {
+	return []string{"remote-ls", "--updates", "--app", "--columns=name,application,version", installationFlag(user), remote}
+}
+
+// RemoteError reports a remote whose update query failed while installed
+// applications in its installation still come from it, so updates for those
+// applications are unknown.
+type RemoteError struct {
+	Remote       string
+	Installation string // "user" or "system"
+	Err          error
+}
+
+func (e *RemoteError) Error() string {
+	return fmt.Sprintf("Flatpak remote %q in the %s installation could not be checked: %v", e.Remote, e.Installation, e.Err)
+}
+
+// Unwrap exposes the failed query's cause to errors.Is/errors.As.
+func (e *RemoteError) Unwrap() error {
+	return e.Err
+}
+
+// readCtx runs a read-only flatpak query under ctx, bounded by the read
+// timeout.
+func readCtx(ctx context.Context, args ...string) (string, error) {
+	runCtx, cancel := context.WithTimeout(ctx, readTimeout)
+	defer cancel()
+	return runFlatpakCommandCtx(runCtx, args...)
+}
+
+// ListUpdates returns available updates for Flatpak applications in one
+// installation. It queries each enabled remote separately, because a single
+// remote-less `remote-ls --updates` fails outright when any one remote is
+// unreachable — a leftover remote from an uninstalled application then hid
+// every other remote's updates (issue #471). A remote whose query fails is
+// ignored, with a log line, when no installed application in the
+// installation comes from it; otherwise it is reported as a *RemoteError.
+// When the returned error is non-nil the slice still holds the updates the
+// healthy remotes reported, for callers that can use a partial inventory.
+//
+// The caller's ctx governs every query so a cancellation on the mutation or
+// reconciliation path aborts the network call instead of leaving an orphaned
+// flatpak download running; the read timeout still bounds each healthy call.
+func ListUpdates(ctx context.Context, user bool) ([]UpdateInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	remotesOutput, err := readCtx(ctx, updateRemoteListArgs(user)...)
 	if err != nil {
 		return nil, err
 	}
 
-	return parseUpdateList(output, user)
+	installation := "system"
+	if user {
+		installation = "user"
+	}
+	var updates []UpdateInfo
+	var failed []*RemoteError
+	for _, remote := range parseUpdateRemotes(remotesOutput) {
+		output, err := readCtx(ctx, updateListArgs(user, remote)...)
+		if err != nil {
+			// A cancelled run and a missing binary are not one remote's
+			// failure; only the remote's own error may be judged below.
+			var notFound *NotFoundError
+			if ctx.Err() != nil || errors.As(err, &notFound) {
+				return nil, err
+			}
+			failed = append(failed, &RemoteError{Remote: remote, Installation: installation, Err: err})
+			continue
+		}
+		remoteUpdates, _ := parseUpdateList(output, user)
+		updates = append(updates, remoteUpdates...)
+	}
+	if len(failed) == 0 {
+		return updates, nil
+	}
+
+	originsOutput, err := readCtx(ctx, originListArgs(user)...)
+	if err != nil {
+		// Without the origins no failed remote can be shown unused.
+		errs := []error{err}
+		for _, remoteErr := range failed {
+			errs = append(errs, remoteErr)
+		}
+		return updates, errors.Join(errs...)
+	}
+	origins := parseOrigins(originsOutput)
+	var errs []error
+	for _, remoteErr := range failed {
+		if !origins[remoteErr.Remote] {
+			log.Printf("flatpak: ignoring %s remote %q, which no installed application uses: %v", installation, remoteErr.Remote, remoteErr.Err)
+			continue
+		}
+		errs = append(errs, remoteErr)
+	}
+	return updates, errors.Join(errs...)
+}
+
+// splitColumns splits one row of flatpak's --columns output. Flatpak
+// separates columns with tabs and leaves an empty column empty, so a row with
+// a tab is split on tabs only and never trimmed first: trimming would drop an
+// empty trailing column (an application that publishes no version) or an
+// empty leading one, and a multi-word display name such as "GNU Image
+// Manipulation Program" must stay one field. Only a row with no tab at all
+// falls back to whitespace splitting. Rows with fewer than two columns are
+// rejected.
+func splitColumns(line string) ([]string, bool) {
+	line = strings.TrimRight(line, "\r")
+	if strings.TrimSpace(line) == "" {
+		return nil, false
+	}
+	var fields []string
+	if strings.Contains(line, "\t") {
+		fields = strings.Split(line, "\t")
+	} else {
+		fields = strings.Fields(line)
+	}
+	if len(fields) < 2 {
+		return nil, false
+	}
+	return fields, true
 }
 
 // parseUpdateList parses the tabular output from the flatpak update query
 func parseUpdateList(output string, user bool) ([]UpdateInfo, error) {
 	var updates []UpdateInfo
-	lines := strings.Split(strings.TrimSpace(output), "\n")
+	lines := strings.Split(output, "\n")
 
 	installation := "system"
 	if user {
@@ -341,19 +707,9 @@ func parseUpdateList(output string, user bool) ([]UpdateInfo, error) {
 	}
 
 	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
+		fields, ok := splitColumns(line)
+		if !ok {
 			continue
-		}
-
-		// Split by tab (flatpak uses tabs as column separators)
-		fields := strings.Split(line, "\t")
-		if len(fields) < 5 {
-			// Try splitting by multiple spaces for systems that might use spaces
-			fields = strings.Fields(line)
-			if len(fields) < 2 {
-				continue
-			}
 		}
 
 		update := UpdateInfo{
@@ -369,12 +725,6 @@ func parseUpdateList(output string, user bool) ([]UpdateInfo, error) {
 		if len(fields) >= 3 {
 			update.NewVersion = strings.TrimSpace(fields[2])
 		}
-		if len(fields) >= 4 {
-			update.Branch = strings.TrimSpace(fields[3])
-		}
-		if len(fields) >= 5 {
-			update.Origin = strings.TrimSpace(fields[4])
-		}
 
 		updates = append(updates, update)
 	}
@@ -382,98 +732,31 @@ func parseUpdateList(output string, user bool) ([]UpdateInfo, error) {
 	return updates, nil
 }
 
-// GetRemotes returns the list of configured remotes
-func GetRemotes(user bool) ([]string, error) {
-	args := []string{"remotes", "--columns=name"}
-	if user {
-		args = append(args, "--user")
-	} else {
-		args = append(args, "--system")
-	}
-
-	output, err := runFlatpakCommand(args...)
-	if err != nil {
-		return nil, err
-	}
-
-	var remotes []string
-	lines := strings.Split(strings.TrimSpace(output), "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line != "" {
-			remotes = append(remotes, line)
-		}
-	}
-
-	return remotes, nil
-}
-
-// ApplicationInfo represents detailed info about a Flatpak application
-type ApplicationInfo struct {
-	Application
-	Description string            `json:"description"`
-	Runtime     string            `json:"runtime"`
-	Permissions map[string]string `json:"permissions"`
-}
-
-// Info gets detailed information about a Flatpak application
-func Info(appID string, user bool) (*ApplicationInfo, error) {
-	args := []string{"info", "--show-metadata"}
-	if user {
-		args = append(args, "--user")
-	} else {
-		args = append(args, "--system")
-	}
-	args = append(args, appID)
-
-	output, err := runFlatpakCommand(args...)
-	if err != nil {
-		return nil, err
-	}
-
-	// Parse the metadata output
-	info := &ApplicationInfo{
-		Application: Application{
-			ApplicationID: appID,
-			Installation:  "system",
-		},
-		Permissions: make(map[string]string),
-	}
-
-	if user {
-		info.Installation = "user"
-	}
-
-	// Parse key=value pairs from the output
-	lines := strings.Split(output, "\n")
-	for _, line := range lines {
-		if strings.Contains(line, "=") {
-			parts := strings.SplitN(line, "=", 2)
-			if len(parts) == 2 {
-				key := strings.TrimSpace(parts[0])
-				value := strings.TrimSpace(parts[1])
-				switch key {
-				case "name":
-					info.Name = value
-				case "version":
-					info.Version = value
-				case "branch":
-					info.Branch = value
-				case "origin":
-					info.Origin = value
-				case "runtime":
-					info.Runtime = value
-				}
-			}
-		}
-	}
-
-	return info, nil
-}
-
-// UninstallUnused removes unused Flatpak runtimes and extensions
+// UninstallUnused removes unused Flatpak runtimes and extensions in both the
+// user and system installation scopes. Flatpak defaults to the system
+// installation when no scope flag is given, so running without a scope would
+// leave unused user runtimes behind while reporting success. Each scope is run
+// independently; output is combined and an error from either scope is reported
+// (via errors.Join) rather than masking the other scope's result.
 func UninstallUnused() (string, error) {
-	return runFlatpakCommand("uninstall", "--unused", "-y")
+	var (
+		out  bytes.Buffer
+		errs []error
+	)
+	for _, flag := range []string{"--user", "--system"} {
+		scopeOut, scopeErr := runFlatpakCommand("uninstall", "--unused", "-y", flag)
+		if scopeOut != "" {
+			if out.Len() > 0 {
+				out.WriteByte('\n')
+			}
+			out.WriteString(scopeOut)
+		}
+		if scopeErr != nil {
+			errs = append(errs, fmt.Errorf("%s scope: %w", flag, scopeErr))
+		}
+	}
+
+	return out.String(), errors.Join(errs...)
 }
 
 // RemoveAllUser uninstalls every user-scope Flatpak application. It is
@@ -482,4 +765,23 @@ func UninstallUnused() (string, error) {
 func RemoveAllUser() error {
 	_, err := runFlatpakCommand("uninstall", "--user", "--all", "-y")
 	return err
+}
+
+// HasUserRefs reports whether the user installation holds any application or
+// runtime — exactly what RemoveAllUser would uninstall. It is read-only.
+// Powerwash consults it first because `flatpak uninstall --user --all -y`
+// exits 0 with nothing to remove, which on its own reads as a removal.
+func HasUserRefs() (bool, error) {
+	apps, err := ListUserApplications()
+	if err != nil {
+		return false, err
+	}
+	if len(apps) > 0 {
+		return true, nil
+	}
+	runtimes, err := ListUserRuntimes()
+	if err != nil {
+		return false, err
+	}
+	return len(runtimes) > 0, nil
 }

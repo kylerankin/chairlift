@@ -1,11 +1,29 @@
 package config
 
 import (
-	"os"
-	"path/filepath"
-	"strings"
 	"testing"
 )
+
+func TestWallpapersGroupRespectsConfiguration(t *testing.T) {
+	for _, enabled := range []bool{true, false} {
+		value := "false"
+		if enabled {
+			value = "true"
+		}
+		t.Run(value, func(t *testing.T) {
+			cfg, err := loadFromPath(writeConfigFile(t, "livery_page:\n  wallpapers_group:\n    enabled: "+value+"\n"))
+			if err != nil {
+				t.Fatalf("loadFromPath: %v", err)
+			}
+			if got := cfg.IsGroupEnabled("livery_page", "wallpapers_group"); got != enabled {
+				t.Fatalf("wallpapers_group enabled = %t, want %t", got, enabled)
+			}
+			if !cfg.IsGroupEnabled("livery_page", "account_group") {
+				t.Fatal("wallpaper configuration disabled Profile Picture")
+			}
+		})
+	}
+}
 
 func TestBrewBundleGroupConfigControlsRuntimeWiring(t *testing.T) {
 	if !defaultConfig().IsGroupEnabled("applications_page", "brew_bundles_group") {
@@ -21,26 +39,4 @@ func TestBrewBundleGroupConfigControlsRuntimeWiring(t *testing.T) {
 		t.Fatal("explicitly disabled brew_bundles_group remains enabled")
 	}
 
-	sourcePath := filepath.Join(repoRoot(), "internal", "views", "applications_page.go")
-	source, err := os.ReadFile(sourcePath)
-	if err != nil {
-		t.Fatalf("read %s: %v", sourcePath, err)
-	}
-	text := string(source)
-	for _, required := range []string{
-		`if uh.config.IsGroupEnabled("applications_page", "brew_bundles_group") {`,
-		`uh.config.GetGroupConfig("applications_page", "brew_bundles_group")`,
-		`groupCfg.BundlesPaths`,
-		`go uh.loadBrewBundles(bundlePaths)`,
-		`homebrew.AvailableBundles(paths)`,
-		`bundleview.Present(len(bundles), warning, homebrewAvailable)`,
-		`pageview.BrewBundle(bundle.Name, bundle.Description, bundle.Path)`,
-		`if !gate.TryStart()`,
-		`homebrew.BundleInstall(bundle.Path)`,
-		`actionmsg.BundleInstall(dryrun.Enabled(), bundle.Name)`,
-	} {
-		if !strings.Contains(text, required) {
-			t.Errorf("Applications-page bundle wiring does not contain %q", required)
-		}
-	}
 }

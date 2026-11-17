@@ -4,14 +4,20 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/projectbluefin/chairlift/internal/bootc"
 	"github.com/projectbluefin/chairlift/internal/dryrun"
 	"github.com/projectbluefin/chairlift/internal/imageinfo"
 	"github.com/projectbluefin/chairlift/internal/journal"
+	"github.com/projectbluefin/chairlift/internal/pkexec"
 	"github.com/projectbluefin/chairlift/internal/ubluehelper"
 )
 
@@ -19,7 +25,7 @@ import (
 // returns the argv ChairLift assembled for the pkexec boundary.
 //
 // Dry-run is the right seam for the exported mutation functions: unlike
-// runHelper they bind pkexecCommand ("pkexec") themselves, so there is no
+// runHelper they bind pkexec.Command themselves, so there is no
 // path parameter to point at a stand-in. Under dry-run nothing is spawned at
 // all, yet the journal still records the exact argv a live run would have
 // executed — which is the contract these functions own. Every one of them is
@@ -69,14 +75,26 @@ func TestExportedActionsSendTheirOwnCommandWord(t *testing.T) {
 		},
 		{
 			name:     "SetDeveloperMode enabled",
-			call:     func(ctx context.Context) error { return SetDeveloperMode(ctx, true) },
+			call:     func(ctx context.Context) error { _, err := SetDeveloperMode(ctx, true); return err },
 			wantArgs: []string{ubluehelper.CommandDXEnable},
 		},
 		{
 			name:     "SetDeveloperMode disabled",
-			call:     func(ctx context.Context) error { return SetDeveloperMode(ctx, false) },
+			call:     func(ctx context.Context) error { _, err := SetDeveloperMode(ctx, false); return err },
 			wantArgs: []string{ubluehelper.CommandDXDisable},
 		},
+		{name: "EnableKVMAccess", call: EnableKVMAccess, wantArgs: []string{ubluehelper.CommandKVMEnable}},
+		{
+			name:     "SetDocker enabled",
+			call:     func(ctx context.Context) error { return SetDocker(ctx, true) },
+			wantArgs: []string{ubluehelper.CommandDockerEnable},
+		},
+		{
+			name:     "SetDocker disabled",
+			call:     func(ctx context.Context) error { return SetDocker(ctx, false) },
+			wantArgs: []string{ubluehelper.CommandDockerDisable},
+		},
+		{name: "UpdateDocker", call: UpdateDocker, wantArgs: []string{ubluehelper.CommandDockerUpdate}},
 		{
 			name:     "Restart",
 			call:     Restart,
@@ -123,7 +141,7 @@ func TestExportedActionsSendTheirOwnCommandWord(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			entry := journalledArgv(t, test.call)
 
-			want := append([]string{pkexecCommand, HelperPath}, test.wantArgs...)
+			want := append([]string{pkexec.Command, HelperPath}, test.wantArgs...)
 			want = append(want, "--dry-run")
 			if !reflect.DeepEqual(entry.WouldRun, want) {
 				t.Fatalf("assembled argv = %v, want %v", entry.WouldRun, want)
@@ -135,7 +153,7 @@ func TestExportedActionsSendTheirOwnCommandWord(t *testing.T) {
 				t.Errorf("suppressed = %q, want %q", entry.Suppressed, journal.SuppressedDryRun)
 			}
 			for _, arg := range test.wantArgs {
-				if filepath.IsAbs(arg) {
+				if strings.Contains(arg, "/") {
 					t.Errorf("argument %q crosses the pkexec boundary as a path; the helper must derive paths itself", arg)
 				}
 			}
@@ -160,9 +178,16 @@ func TestEmittedCommandsAreAllHelperSupported(t *testing.T) {
 		ubluehelper.CommandRestart,
 		ubluehelper.CommandRollback,
 		ubluehelper.CommandFactoryReset,
+		ubluehelper.CommandPin,
+		ubluehelper.CommandUnpin,
 		ubluehelper.CommandAutoEnable,
 		ubluehelper.CommandAutoDisable,
 		ubluehelper.CommandDriverSwitch,
+		ubluehelper.CommandGamingSwitch,
+		ubluehelper.CommandKVMEnable,
+		ubluehelper.CommandDockerEnable,
+		ubluehelper.CommandDockerDisable,
+		ubluehelper.CommandDockerUpdate,
 	}
 	for _, command := range emitted {
 		if !supported[command] {
@@ -221,14 +246,62 @@ func TestDefaultContextCarriesTheDefaultDeadline(t *testing.T) {
 	if !ok {
 		t.Fatal("DefaultContext returned a context with no deadline")
 	}
+	limit := ubluehelper.DefaultTimeout + AuthenticationAllowance
 	remaining := time.Until(deadline)
-	if remaining <= 0 || remaining > DefaultTimeout {
-		t.Errorf("DefaultContext deadline in %v, want (0, %v]", remaining, DefaultTimeout)
+	if remaining <= ubluehelper.DefaultTimeout || remaining > limit {
+		t.Errorf("DefaultContext deadline in %v, want (%v, %v]", remaining, ubluehelper.DefaultTimeout, limit)
 	}
 
 	cancel()
 	if !errors.Is(ctx.Err(), context.Canceled) {
 		t.Errorf("after cancel, ctx.Err() = %v, want context.Canceled", ctx.Err())
+	}
+}
+
+// A channel switch, driver switch, pin, or unpin pulls a full image, the same
+// transfer OS staging does, so the helper gives it at least the staging
+// budget; at ten minutes a slow link had `bootc switch` killed mid-pull. The
+// GUI's context must outlast the helper's, because its clock also covers the
+// PolicyKit prompt and the helper should report its own outcome.
+func TestSwitchTimeoutsCoverAFullImagePull(t *testing.T) {
+	ctx, cancel := ImageSwitchContext()
+	defer cancel()
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		t.Fatal("ImageSwitchContext returned a context with no deadline")
+	}
+	gui := time.Until(deadline)
+
+	// docker-enable and docker-update download the daemon's bottles, which a
+	// slow link cannot finish in the default budget either.
+	long := []string{
+		ubluehelper.CommandChannelSwitch,
+		ubluehelper.CommandDriverSwitch,
+		ubluehelper.CommandGamingSwitch,
+		ubluehelper.CommandPin,
+		ubluehelper.CommandUnpin,
+		ubluehelper.CommandDockerEnable,
+		ubluehelper.CommandDockerUpdate,
+	}
+	for _, command := range long {
+		helper := ubluehelper.Timeout(command)
+		if helper < bootc.DefaultTimeout {
+			t.Errorf("ubluehelper.Timeout(%q) = %v, want at least bootc.DefaultTimeout %v", command, helper, bootc.DefaultTimeout)
+		}
+		if gui <= helper {
+			t.Errorf("ImageSwitchContext deadline in %v does not outlast the helper's %v for %q", gui, helper, command)
+		}
+	}
+
+	// Every other command keeps the default budget, which DefaultContext
+	// outlasts (TestDefaultContextCarriesTheDefaultDeadline).
+	for _, command := range ubluehelper.SupportedCommands() {
+		if slices.Contains(long, command) {
+			continue
+		}
+		if got := ubluehelper.Timeout(command); got != ubluehelper.DefaultTimeout {
+			t.Errorf("ubluehelper.Timeout(%q) = %v, want %v", command, got, ubluehelper.DefaultTimeout)
+		}
 	}
 }
 
@@ -258,7 +331,7 @@ func TestSetDescriptorOverrideRedirectsDetectOnly(t *testing.T) {
 	}
 
 	// The override is read-only: the privileged surface is untouched by it.
-	if HelperPath != "/usr/bin/chairlift-ublue-helper" {
+	if HelperPath != "/usr/bin/chairlift-helper" {
 		t.Errorf("HelperPath = %q; the descriptor override must never influence the privileged path", HelperPath)
 	}
 }
@@ -316,5 +389,79 @@ func TestStatusCachedDetectsOnceAndRepeats(t *testing.T) {
 	}
 	if calls > 1 {
 		t.Errorf("StatusCached ran detection %d times, want at most 1", calls)
+	}
+}
+
+// dockerMutations are every Docker action ChairLift sends across pkexec,
+// with the one command word each must emit.
+func dockerMutations() []struct {
+	command string
+	call    func(context.Context) error
+} {
+	return []struct {
+		command string
+		call    func(context.Context) error
+	}{
+		{ubluehelper.CommandDockerEnable, func(ctx context.Context) error { return SetDocker(ctx, true) }},
+		{ubluehelper.CommandDockerDisable, func(ctx context.Context) error { return SetDocker(ctx, false) }},
+		{ubluehelper.CommandDockerUpdate, UpdateDocker},
+	}
+}
+
+func TestDockerMutationsUseFixedHelperAndPreserveAuthenticationFailures(t *testing.T) {
+	for _, mutation := range dockerMutations() {
+		for _, code := range []int{0, 1, 126, 127} {
+			t.Run(mutation.command+"/"+strconv.Itoa(code), func(t *testing.T) {
+				path := withJournalSink(t)
+				fake := writeCustomFakePkexec(t, "#!/bin/sh\necho 'helper diagnostic' >&2\nexit "+strconv.Itoa(code)+"\n")
+				previous := pkexecCommand
+				pkexecCommand = fake
+				t.Cleanup(func() { pkexecCommand = previous })
+				err := mutation.call(context.Background())
+				if (err == nil) != (code == 0) {
+					t.Fatalf("helper exit %d returned %v", code, err)
+				}
+				if code != 0 {
+					var exit *exec.ExitError
+					if !errors.As(err, &exit) || exit.ExitCode() != code || !strings.Contains(err.Error(), "helper diagnostic") {
+						t.Fatalf("lost original helper error: %v", err)
+					}
+					if pkexec.IsAuthDismissed(err) != (code == 126) {
+						t.Fatalf("authentication failure misclassified: %v", err)
+					}
+				}
+				command := mutation.command
+				entries := readJournal(t, path)
+				want := []string{fake, "/usr/bin/chairlift-helper", command}
+				if len(entries) != 2 || !reflect.DeepEqual(entries[0].WouldRun, want) || entries[0].Action != command || entries[1].Action != command {
+					t.Fatalf("Docker helper escaped fixed boundary/journal: %+v", entries)
+				}
+				outcome := journal.OutcomeSucceeded
+				if code == 126 || code == 127 {
+					outcome = journal.OutcomeRefused
+				} else if code != 0 {
+					outcome = journal.OutcomeFailed
+				}
+				if entries[1].Outcome != outcome {
+					t.Fatalf("journal outcome = %+v, want %s", entries[1], outcome)
+				}
+			})
+		}
+	}
+}
+
+func TestDockerMutationsPreserveCancellation(t *testing.T) {
+	for _, mutation := range dockerMutations() {
+		withJournalSink(t)
+		fake := writeCustomFakePkexec(t, "#!/bin/sh\nexit 0\n")
+		previous := pkexecCommand
+		pkexecCommand = fake
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		err := mutation.call(ctx)
+		pkexecCommand = previous
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("%s lost cancellation: %v", mutation.command, err)
+		}
 	}
 }

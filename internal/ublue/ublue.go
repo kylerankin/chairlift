@@ -24,13 +24,14 @@ import (
 	"github.com/projectbluefin/chairlift/internal/gpu"
 	"github.com/projectbluefin/chairlift/internal/helperexec"
 	"github.com/projectbluefin/chairlift/internal/imageinfo"
+	"github.com/projectbluefin/chairlift/internal/pkexec"
 	"github.com/projectbluefin/chairlift/internal/ubluehelper"
 )
 
 const (
 	// HelperPath is the fixed, absolute installed path of the privileged
 	// ublue helper binary. It must match the
-	// org.freedesktop.policykit.exec.path annotation on all three actions in
+	// org.freedesktop.policykit.exec.path annotation on all helper actions in
 	// data/io.projectbluefin.chairlift.ublue.policy exactly, and each action
 	// additionally selects one supported helper command through the
 	// exec.argv1 annotation. A path mismatch (for example a bare,
@@ -38,19 +39,28 @@ const (
 	// restrictive org.freedesktop.policykit.pkexec.run-program action
 	// instead. The Makefile installs the binary here whenever PREFIX is /usr
 	// (the default).
-	HelperPath = "/usr/bin/chairlift-ublue-helper"
+	HelperPath = "/usr/bin/chairlift-helper"
 
-	pkexecCommand = "pkexec"
-
-	// DefaultTimeout bounds a helper invocation. Channel switching only
-	// stages a bootc transaction, but that transaction contacts a registry,
-	// so it gets the same generous ceiling the updex helper uses.
-	DefaultTimeout = 10 * time.Minute
+	// AuthenticationAllowance is how much longer the GUI waits than the
+	// helper's own budget (ubluehelper.Timeout). The GUI's clock also runs
+	// while the PolicyKit prompt is open, and the helper's starts only after
+	// authentication, so without the margin a slow password entry made the
+	// GUI give up and report a timeout while the helper was still working.
+	AuthenticationAllowance = 5 * time.Minute
 )
 
-// DefaultContext returns a context with the default timeout.
+// DefaultContext returns a context for a helper command that does not pull
+// an image.
 func DefaultContext() (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.Background(), DefaultTimeout)
+	return context.WithTimeout(context.Background(), ubluehelper.DefaultTimeout+AuthenticationAllowance)
+}
+
+// ImageSwitchContext returns a context for a channel, driver, or gaming-mode
+// switch, pin, or unpin: each runs bootc switch, which pulls a full image.
+// Installing or updating the Homebrew Docker runtime shares the same budget
+// (ubluehelper.Timeout).
+func ImageSwitchContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), ubluehelper.ImageSwitchTimeout+AuthenticationAllowance)
 }
 
 // Error represents a ublue helper error. It aliases
@@ -81,6 +91,22 @@ type Status struct {
 	RecommendedDriver imageinfo.Driver
 	// GPU describes the detected graphics hardware.
 	GPU string
+	// ChannelTableError is non-empty when the authoritative channel table
+	// (channels.yml) exists but could not be applied. The views must fail
+	// closed and disable the rebase controls when it is set; see
+	// imageinfo.SystemTableError.
+	ChannelTableError string
+	// Gaming reports whether the booted image includes the gaming stack.
+	// A staged mode switch does not change it until the machine restarts.
+	Gaming bool
+	// CanSwitchGaming reports whether the booted image and stream have a
+	// published counterpart for the opposite mode. Callers must also check
+	// Supports(CommandGamingSwitch) for the installed helper's capability.
+	CanSwitchGaming bool
+	// Commands is the set of helper commands this host can run: the helper
+	// is installed and an installed PolicyKit action authorizes each one.
+	// See Supports.
+	Commands map[string]bool
 }
 
 // Detect returns the current Bluefin-family status. A host with no image
@@ -132,7 +158,9 @@ func Detect() (Status, error) {
 	info, err := detect()
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return Status{}, nil
+			// Factory Reset and Roll Back do not depend on the image
+			// descriptor, so their availability is still reported.
+			return Status{Commands: detectCommands()}, nil
 		}
 		return Status{}, &Error{Message: fmt.Sprintf("reading image descriptor: %v", err)}
 	}
@@ -143,6 +171,8 @@ func Detect() (Status, error) {
 		Channel:   info.Channel(),
 		Tag:       info.EffectiveTag(),
 		Ref:       info.CleanRef(),
+		Gaming:    info.IsGaming(),
+		Commands:  detectCommands(),
 	}
 
 	groups, err := currentUserGroups()
@@ -154,6 +184,7 @@ func Detect() (Status, error) {
 	status.Driver = info.Driver()
 	hardware := detectGPU()
 	status.GPU = hardware.Describe()
+
 	if recommended, offer := info.RecommendedDriver(hardware.NVIDIA); offer {
 		status.RecommendedDriver = recommended
 	}
@@ -166,6 +197,17 @@ func Detect() (Status, error) {
 		status.CanSwitchTo = imageinfo.ChannelStable
 	} else {
 		status.CanSwitchTo = imageinfo.ChannelUnknown
+	}
+	_, status.CanSwitchGaming = imageinfo.GamingTarget(status.Ref, status.Tag, !status.Gaming)
+
+	// Fail closed on a broken authoritative channel table: mark it for the
+	// views and never offer a switch from a table the system could not
+	// apply, because the privileged helper re-reads channels.yml and
+	// refuses after authentication.
+	status.ChannelTableError = imageinfo.SystemTableError()
+	if status.ChannelTableError != "" {
+		status.CanSwitchTo = imageinfo.ChannelUnknown
+		status.CanSwitchGaming = false
 	}
 
 	return status, nil
@@ -231,6 +273,8 @@ func osUserGroups() ([]string, error) {
 	return names, nil
 }
 
+var pkexecCommand = pkexec.Command
+
 // SwitchChannel stages a switch of this host to the requested release
 // channel. Only the channel word crosses the pkexec boundary; the helper
 // resolves the image reference itself.
@@ -242,15 +286,67 @@ func SwitchChannel(ctx context.Context, channel imageinfo.Channel) error {
 	return err
 }
 
+// SetGamingMode stages the matching gaming or non-gaming OS image for the
+// next boot without restarting. Only the mode word crosses the privilege
+// boundary; the helper derives the target from its own system descriptor.
+func SetGamingMode(ctx context.Context, enabled bool) error {
+	mode := "disable"
+	if enabled {
+		mode = "enable"
+	}
+	ctx, cancel := context.WithTimeout(ctx, ubluehelper.Timeout(ubluehelper.CommandGamingSwitch)+AuthenticationAllowance)
+	defer cancel()
+	_, _, err := runHelper(ctx, pkexecCommand, ubluehelper.CommandGamingSwitch, mode)
+	return err
+}
+
 // SetDeveloperMode adds or removes the invoking user's developer-group
 // membership. No username crosses the pkexec boundary; the helper resolves
-// it from PKEXEC_UID.
-func SetDeveloperMode(ctx context.Context, enabled bool) error {
+// it from PKEXEC_UID. A successful run still reports, in skipped, every
+// developer group the helper could not change — typically one this image
+// does not define — so a partial grant is not presented as complete.
+func SetDeveloperMode(ctx context.Context, enabled bool) (skipped []string, err error) {
 	command := ubluehelper.CommandDXDisable
 	if enabled {
 		command = ubluehelper.CommandDXEnable
 	}
+	_, stderr, err := runHelper(ctx, pkexecCommand, command)
+	if err != nil {
+		return nil, err
+	}
+	return ubluehelper.SkippedGroups(stderr), nil
+}
+
+// EnableKVMAccess grants this account access to hardware virtualization.
+func EnableKVMAccess(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, ubluehelper.DefaultTimeout+AuthenticationAllowance)
+	defer cancel()
+	_, _, err := runHelper(ctx, pkexecCommand, ubluehelper.CommandKVMEnable)
+	return err
+}
+
+// SetDocker enables or disables rootful system Docker. Enabling installs the
+// daemon runtime from verified Homebrew bottles when the image does not ship
+// Docker, so it gets the download budget; the helper grants the invoking
+// account access. Disabling retains that access, the runtime, and data.
+func SetDocker(ctx context.Context, enabled bool) error {
+	command := ubluehelper.CommandDockerDisable
+	if enabled {
+		command = ubluehelper.CommandDockerEnable
+	}
+	ctx, cancel := context.WithTimeout(ctx, ubluehelper.Timeout(command)+AuthenticationAllowance)
+	defer cancel()
 	_, _, err := runHelper(ctx, pkexecCommand, command)
+	return err
+}
+
+// UpdateDocker replaces the Homebrew Docker runtime with the latest verified
+// bottles and restarts a running daemon when it changed. A host whose image
+// ships Docker, or that never installed the runtime, succeeds unchanged.
+func UpdateDocker(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, ubluehelper.Timeout(ubluehelper.CommandDockerUpdate)+AuthenticationAllowance)
+	defer cancel()
+	_, _, err := runHelper(ctx, pkexecCommand, ubluehelper.CommandDockerUpdate)
 	return err
 }
 

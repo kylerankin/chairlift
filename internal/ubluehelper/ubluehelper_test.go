@@ -2,6 +2,7 @@ package ubluehelper
 
 import (
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -110,6 +111,16 @@ func TestParseInvocationAcceptsSupportedShapes(t *testing.T) {
 			args: []string{"driver-switch", "standard", "--dry-run"},
 			want: Invocation{Command: CommandDriverSwitch, Driver: imageinfo.DriverStandard, DryRun: true},
 		},
+		{
+			name: "docker update",
+			args: []string{"docker-update"},
+			want: Invocation{Command: CommandDockerUpdate},
+		},
+		{
+			name: "docker update dry run",
+			args: []string{"docker-update", "--dry-run"},
+			want: Invocation{Command: CommandDockerUpdate, DryRun: true},
+		},
 	}
 
 	for _, test := range tests {
@@ -122,6 +133,30 @@ func TestParseInvocationAcceptsSupportedShapes(t *testing.T) {
 				t.Errorf("ParseInvocation(%v) = %+v, want %+v", test.args, got, test.want)
 			}
 		})
+	}
+}
+
+func TestValidatedCommandsNeedChannelTableOnlyForSwitches(t *testing.T) {
+	for _, command := range SupportedCommands() {
+		invocation, err := ParseInvocation([]string{command})
+		switch command {
+		case CommandPin:
+			invocation, err = ParseInvocation([]string{command, "20240229"})
+		case CommandChannelSwitch:
+			invocation, err = ParseInvocation([]string{command, ChannelTesting})
+		case CommandDriverSwitch:
+			invocation, err = ParseInvocation([]string{command, string(imageinfo.DriverNVIDIA)})
+		case CommandGamingSwitch:
+			invocation, err = ParseInvocation([]string{command, "enable"})
+		}
+		if err != nil {
+			t.Fatalf("ParseInvocation(%q) error = %v, want nil", command, err)
+		}
+
+		want := command == CommandChannelSwitch || command == CommandDriverSwitch || command == CommandGamingSwitch || command == CommandPin || command == CommandUnpin
+		if got := invocation.UsesChannelTable(); got != want {
+			t.Errorf("%s UsesChannelTable() = %t, want %t", command, got, want)
+		}
 	}
 }
 
@@ -171,6 +206,12 @@ func TestParseInvocationRejectsEveryUnsupportedShape(t *testing.T) {
 		{name: "driver switch with an image ref", args: []string{"driver-switch", "ghcr.io/evil/image:latest"}},
 		{name: "driver switch with a suffix", args: []string{"driver-switch", "asus"}},
 		{name: "driver switch with extra argument", args: []string{"driver-switch", "nvidia", "--dry-run", "now"}},
+		// The formula set, versions, and install root are fixed in the
+		// helper; none may arrive from the caller.
+		{name: "docker update with a formula", args: []string{"docker-update", "docker-engine"}},
+		{name: "docker update with a version", args: []string{"docker-update", "29.9.2", "--dry-run"}},
+		{name: "docker update with misplaced flag", args: []string{"docker-update", "--dry-run", "--force"}},
+		{name: "docker enable with an install root", args: []string{"docker-enable", "/home/linuxbrew/.linuxbrew"}},
 		{name: "updex command is not accepted here", args: []string{"enable-feature", "demo"}},
 	}
 
@@ -198,7 +239,14 @@ func TestSupportedCommandsMatchesParser(t *testing.T) {
 		CommandAutoEnable,
 		CommandAutoDisable,
 		CommandDriverSwitch,
+		CommandGamingSwitch,
 		CommandFactoryReset,
+		CommandPin,
+		CommandUnpin,
+		CommandKVMEnable,
+		CommandDockerEnable,
+		CommandDockerDisable,
+		CommandDockerUpdate,
 	}
 	if !reflect.DeepEqual(commands, want) {
 		t.Fatalf("SupportedCommands() = %v, want %v", commands, want)
@@ -209,10 +257,14 @@ func TestSupportedCommandsMatchesParser(t *testing.T) {
 	for _, command := range commands {
 		args := []string{command}
 		switch command {
+		case CommandPin:
+			args = append(args, "20240229")
 		case CommandChannelSwitch:
 			args = append(args, ChannelTesting)
 		case CommandDriverSwitch:
 			args = append(args, string(imageinfo.DriverNVIDIA))
+		case CommandGamingSwitch:
+			args = append(args, "enable")
 		}
 		if _, err := ParseInvocation(args); err != nil {
 			t.Errorf("ParseInvocation(%v) error = %v, want nil for advertised command", args, err)
@@ -236,9 +288,9 @@ func TestDriverSwitchArgsBuildPublishedReferencesOnly(t *testing.T) {
 	}{
 		{
 			name:   "dakota to nvidia",
-			info:   imageinfo.Info{Name: "dakota", Tag: "latest", Ref: "docker://ghcr.io/projectbluefin/dakota"},
+			info:   imageinfo.Info{Name: "dakota", Tag: "stable", Ref: "docker://ghcr.io/projectbluefin/dakota"},
 			driver: imageinfo.DriverNVIDIA,
-			want:   []string{"switch", "--enforce-container-sigpolicy", "ghcr.io/projectbluefin/dakota-nvidia:latest"},
+			want:   []string{"switch", "--enforce-container-sigpolicy", "ghcr.io/projectbluefin/dakota-nvidia:stable"},
 			wantOK: true,
 		},
 		{
@@ -311,14 +363,14 @@ func TestRestartArgsTakeNoCallerControlledValues(t *testing.T) {
 	}
 }
 
-// FactoryResetArgs is the one helper argv that legitimately carries flags —
-// --experimental and --apply are fixed, not caller-supplied, so they are not
-// the caller-controlled-value risk the other Args functions guard against.
+// FactoryResetArgs is the one helper argv that legitimately carries a flag —
+// --experimental is fixed, not caller-supplied, so it is not the
+// caller-controlled-value risk the other Args functions guard against.
 // What must still never appear is a registry reference or an image path,
 // since a factory reset takes exactly one target: the image already booted.
 func TestFactoryResetArgsAreFixedAndCarryNoTarget(t *testing.T) {
 	args := FactoryResetArgs()
-	want := []string{"install", "reset", "--experimental", "--apply"}
+	want := []string{"install", "reset", "--experimental"}
 	if !reflect.DeepEqual(args, want) {
 		t.Fatalf("FactoryResetArgs() = %v, want %v", args, want)
 	}
@@ -340,6 +392,18 @@ func TestFactoryResetArgsAreFixedAndCarryNoTarget(t *testing.T) {
 	}
 }
 
+// bootc's `install reset --apply` "always reboots" (bootc install reset
+// --help). Every Factory Reset string promises the reset applies at the next
+// restart, so the argv must never reboot the machine the moment the user
+// authenticates.
+func TestFactoryResetArgsNeverRebootImmediately(t *testing.T) {
+	for _, arg := range FactoryResetArgs() {
+		if arg == "--apply" || strings.HasPrefix(arg, "--apply=") {
+			t.Fatalf("FactoryResetArgs() carries %q, which reboots immediately", arg)
+		}
+	}
+}
+
 func TestRollbackArgsTakeNoCallerControlledValues(t *testing.T) {
 	args := RollbackArgs()
 	if !reflect.DeepEqual(args, []string{"rollback"}) {
@@ -349,6 +413,47 @@ func TestRollbackArgsTakeNoCallerControlledValues(t *testing.T) {
 		if strings.HasPrefix(arg, "-") || strings.Contains(arg, "/") || strings.Contains(arg, ":") {
 			t.Errorf("RollbackArgs() carries %q; the rollback argv must be fixed", arg)
 		}
+	}
+}
+
+func TestSameRollbackRefusal(t *testing.T) {
+	cases := []struct {
+		name   string
+		output string
+		want   bool
+	}{
+		{
+			name:   "exact composefs refusal message",
+			output: "error: Target image has the same fs-verity digest as the existing Some(Rollback) deployment",
+			want:   true,
+		},
+		{
+			name:   "generic fs-verity and rollback refusal",
+			output: "error: same fs-verity digest for Rollback",
+			want:   true,
+		},
+		{
+			name:   "network error",
+			output: "error: failed to fetch image: connection refused",
+			want:   false,
+		},
+		{
+			name:   "unrelated fs-verity error without rollback",
+			output: "error: Target image has the same fs-verity digest as the existing Booted deployment",
+			want:   false,
+		},
+		{
+			name:   "empty output",
+			output: "",
+			want:   false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsSameRollbackRefusal(tc.output); got != tc.want {
+				t.Errorf("IsSameRollbackRefusal(%q) = %v, want %v", tc.output, got, tc.want)
+			}
+		})
 	}
 }
 
@@ -363,6 +468,7 @@ func TestAutoUpdateArgsHandleBothRepresentationsOfOff(t *testing.T) {
 	want := [][]string{
 		{"unmask", autoupdate.TimerUnit},
 		{"enable", "--now", autoupdate.TimerUnit},
+		{"unmask", autoupdate.ResumeTimerUnit},
 	}
 	if !reflect.DeepEqual(enable, want) {
 		t.Errorf("AutoUpdateArgs(enable) = %v, want %v", enable, want)
@@ -377,6 +483,7 @@ func TestAutoUpdateArgsHandleBothRepresentationsOfOff(t *testing.T) {
 	wantDisable := [][]string{
 		{"disable", "--now", autoupdate.TimerUnit},
 		{"mask", autoupdate.TimerUnit},
+		{"mask", "--now", autoupdate.ResumeTimerUnit},
 	}
 	if !reflect.DeepEqual(disable, wantDisable) {
 		t.Errorf("AutoUpdateArgs(disable) = %v, want %v", disable, wantDisable)
@@ -389,29 +496,62 @@ func TestAutoUpdateArgsHandleBothRepresentationsOfOff(t *testing.T) {
 	}
 }
 
-// Every step must name only the unattended-update timer.
-func TestAutoUpdateArgsTouchOnlyTheUpdateTimer(t *testing.T) {
+// Every step must name exactly one of the fixed unattended-update triggers,
+// and nothing else.
+func TestAutoUpdateArgsTouchOnlyTheUpdateTimers(t *testing.T) {
+	fixed := map[string]bool{autoupdate.TimerUnit: true, autoupdate.ResumeTimerUnit: true}
 	for _, command := range []string{CommandAutoEnable, CommandAutoDisable} {
 		steps, ok := AutoUpdateArgs(command)
 		if !ok {
 			t.Fatalf("AutoUpdateArgs(%q) ok = false", command)
 		}
 		for _, args := range steps {
-			named := false
+			named := 0
 			for _, arg := range args {
-				if arg == autoupdate.TimerUnit {
-					named = true
+				if fixed[arg] {
+					named++
 					continue
 				}
 				if strings.Contains(arg, ".service") || strings.Contains(arg, ".timer") {
 					t.Errorf("AutoUpdateArgs(%q) touches unit %q", command, arg)
 				}
 			}
-			if !named {
-				t.Errorf("AutoUpdateArgs(%q) step %v does not name %s", command, args, autoupdate.TimerUnit)
+			if named != 1 {
+				t.Errorf("AutoUpdateArgs(%q) step %v names %d fixed timers, want 1", command, args, named)
 			}
 		}
 	}
+}
+
+// uupd-resume.timer runs uupd.service 20 minutes after every resume. Turning
+// automatic updates off must mask (and stop) it, and turning them back on
+// must unmask it, or "off" still updates after each suspend.
+func TestAutoUpdateArgsCoverTheResumeTrigger(t *testing.T) {
+	disable, _ := AutoUpdateArgs(CommandAutoDisable)
+	if !containsStep(disable, []string{"mask", "--now", autoupdate.ResumeTimerUnit}) {
+		t.Errorf("AutoUpdateArgs(disable) = %v, does not mask --now %s", disable, autoupdate.ResumeTimerUnit)
+	}
+	enable, _ := AutoUpdateArgs(CommandAutoEnable)
+	if !containsStep(enable, []string{"unmask", autoupdate.ResumeTimerUnit}) {
+		t.Errorf("AutoUpdateArgs(enable) = %v, does not unmask %s", enable, autoupdate.ResumeTimerUnit)
+	}
+	// Enabling must not `enable` the resume timer: an image may not ship it,
+	// and `systemctl enable` of an absent unit fails after the main timer is
+	// already on.
+	for _, step := range enable {
+		if step[0] == "enable" && slices.Contains(step, autoupdate.ResumeTimerUnit) {
+			t.Errorf("AutoUpdateArgs(enable) enables %s: %v", autoupdate.ResumeTimerUnit, step)
+		}
+	}
+}
+
+func containsStep(steps [][]string, want []string) bool {
+	for _, step := range steps {
+		if reflect.DeepEqual(step, want) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestDevGroupsMatchBluefinctl(t *testing.T) {

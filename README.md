@@ -1,15 +1,20 @@
 <div align="center">
-    <img src="data/icons/hicolor/scalable/apps/io.projectbluefin.chairlift.svg">
-    <h1>ChairLift</h1>
-    <p>A modern system management tool for <a href="https://github.com/frostyard/snosi">Snow Linux</a></p>
-    <p>Manage your Homebrew packages, monitor system health, and maintain your system with ease.</p>
+    <img src="data/icons/hicolor/scalable/apps/io.projectbluefin.chairlift.svg" width="128">
+    <h1>Control Center</h1>
+    <p>The system management tool for <a href="https://github.com/projectbluefin/bluefin">Bluefin</a></p>
+    <p>Bring cloud native development to your desktop. Manage your Homebrew packages, keep the whole system up to date, and maintain your computer with ease.</p>
+    <p><sub>Control Center is the product name. The project, its binaries, and its packages are named <b>ChairLift</b>.</p>
 </div>
 
 ---
 
+## `brew install projectbluefin/tap/chairlift`
+
+This should work on any Linux that has homebrew and podman installed. Bring the Bluefin Developer Experience (and dinosaurs!) to your system today! 
+
 ## Screenshots
 
-![ChairLift Applications page](docs/screenshots/1-applications.png)
+![Control Center Updates page](docs/screenshots/1-updates.png)
 
 **[See every screen in the walkthrough →](docs/walkthrough.md)** — each feature
 shown in the real application, captured by `make screenshots`.
@@ -25,23 +30,27 @@ shown in the real application, captured by `make screenshots`.
 - **Search & Install**: Search formulae and casks, confirm the selected package
   type, and install with loading, error, refresh, and dry-run states
 - **Update & Upgrade**: Keep Homebrew up-to-date and upgrade outdated packages individually
-- **Curated Bundles**: Install pre-configured package bundles for common use cases
-- **Tap Trust Management**: Homebrew 6's per-tap trust model hides packages installed from untrusted taps; ChairLift detects them and lets you trust a tap (and resume its updates) with one click, without requiring root
+- **App Collections**: Install a curated set of apps and tools in one step
+- **Tap Trust Management**: Homebrew 6's per-tap trust model hides packages installed from untrusted taps; Control Center detects them and lets you trust a tap (and resume its updates) with one click, without requiring root
 
-### 🏥 System Health Monitoring
+### 🤖 Agents
 
-- **System Performance**: Quick access to Mission Center for detailed system monitoring
-- **Health Overview**: Check system diagnostics and health status
+- **Agent Mode**: one switch installs [llmman](https://github.com/llmmanorg/llmman)
+  from Homebrew and runs it as a systemd
+  user service on `127.0.0.1:17434`, with its web shell and prompt history
+  off. llmman picks the engine for your hardware; apps opened afterwards find
+  it through `OLLAMA_HOST`. Turning it off keeps the software and models.
+  Nothing needs administrator authentication
 
 ### 🖥️ Bluefin, Bluefin LTS & Dakota
 
-On [Bluefin](https://projectbluefin.io), Bluefin LTS, and Dakota, ChairLift adds
+On [Bluefin](https://projectbluefin.io), Bluefin LTS, and Dakota, Control Center adds
 three switches ported from [bluefinctl](https://github.com/projectbluefin/bluefinctl).
 Each hides itself on a system without `/usr/share/ublue-os/image-info.json`,
-so they cost nothing on Snow Linux or any other host.
+so they cost nothing on any other host.
 
 - **Testing Channel**: Stage a `bootc switch` between the stable and testing
-  release streams, then restart to apply. ChairLift resolves the target
+  release streams, then restart to apply. Control Center resolves the target
   reference from a per-image table rather than a tag suffix, so it never
   targets a tag the image does not publish — which also means the switch is
   correctly unavailable on Bluefin Stable's `latest`/`stable`/`gts`/`beta`
@@ -49,18 +58,36 @@ so they cost nothing on Snow Linux or any other host.
   through `channels.yml`; see [`channels.example.yml`](channels.example.yml)
 - **Developer Mode**: Join the container, VM, and serial-device groups
   (`docker`, `incus-admin`, `libvirt`, `dialout`), effective at next login.
-  This is group membership, not a rebase to a `-dx` image
-- **Gaming Mode**: Install Steam, ProtonUp-Qt, Protontricks, MangoHud,
-  GOverlay, and Flatseal as user Flatpaks — nothing is layered onto the system
-  image, so a system update never has to reconcile it
+  This is group membership, not a rebase to a `-dx` image. A distribution may
+  also configure it to install the Pulp feed reader and stage a curated list
+  of developer feeds in your home folder once you switch it on — both are off
+  by default, and turning Developer Mode back off never removes the reader, the
+  staged file, or anything you imported from it.
+- **Gaming Mode**: One switch installs ProtonPlus, Protontricks, GOverlay,
+  and MangoHud as system-wide Flatpaks from Flathub — nothing is layered onto
+  the system image, so a system update never has to reconcile it. Switching
+  it off removes them again, leaving any copy the image ships in place.
+  MangoHud is a Vulkan layer extending the freedesktop runtime rather than an
+  application, and is inventoried as such, so it is installed once and
+  removed again with the rest of the stack
 
-### 🔄 Update All
+### 🔄 Unified Updates
 
-One action brings the whole system up to date — the OS image, Flatpak
-applications, and Homebrew packages — with per-phase status and a single
-restart prompt. The prompt appears only when an OS image was actually staged,
-so a system that was already current never asks for a reboot. A phase that
-fails does not stop the others.
+The Updates page leads with the system's status — "Up to date · checked at …", or
+how many updates are waiting — above an **Update Sources** list naming the five
+kinds of thing it can update: Applications, Developer Tools, Printer Drivers,
+System Components, and Operating System. Only the sources this computer can
+actually manage are listed, so one it cannot use — a backing tool that is not
+here, or a source switched off for the whole machine by the image or by an
+administrator — is absent rather than explained at length; **Preferences**
+still lists every source, with its switch off and the reason. One primary
+action covers all of them: **Check Again**
+when nothing is pending, **Update All** when something is, and **Retry Failed**
+when a source did not finish. Once an OS image is staged, the **Operating
+System** row carries its own **Restart Now** suffix instead.
+A source that fails does not stop the others, and the restart prompt appears
+only when an image was actually staged, so a system that was already current
+never asks for a reboot.
 
 ### 🔁 Automatic Updates & Rollback
 
@@ -68,15 +95,38 @@ fails does not stop the others.
   the background. Hidden on systems without the unattended-update timer
 - **Roll Back**: return to the previous system image at the next restart,
   shown only when a previous image exists
+- **Published versions**: under Recovery, list the versions of your release
+  stream the image registry still offers from the last 90 days (read-only)
+
+### 🎨 Livery
+
+- **App Launcher Icon**: your own mark on GNOME's Show Applications button or
+  the configured KDE Plasma Kickoff applet — searchable across all
+  3,461 brands [Simple Icons](https://simpleicons.org/) publishes, fetched on
+  demand
+- **Top Bar Icon**: a mark in the top bar — CNCF, Linux Foundation,
+  GNOME, freedesktop.org, Apache, Rust, Universal Blue, Bazzite, Aurora, or
+  the Open Gaming Collective, which is the default on a gaming image
+- **Files Icon**: your CNCF project's own color icon on the Files icon —
+  search all 214 projects that publish artwork, from Kubernetes to bootc
+- **Rotate at Login**: the two foundation sections can advance one step each
+  time you sign in. Any section also accepts an SVG of your own
 
 ### 🔧 Updates & Maintenance
 
-- **System Updates**: On bootc-based systems, download and stage the next OS image update (applied on restart) and view booted/staged/rollback deployment status; on native A/B (systemd-sysupdate) installs, stage the next image the same way and see the previous version available for boot-menu rollback
+- **System Updates**: On bootc-based systems, download and stage the next OS image update (applied on restart) and view booted/staged/rollback deployment status
+- **Update Now**: on hosts carrying the integrated updater, one row runs a
+  full system update immediately instead of waiting for the background timer
 - **Homebrew Updates**: Check for and install package updates; actions show
   progress, reject repeated clicks, and refresh the outdated rows and sidebar
   badge after successful live operations
 - **Outdated Packages**: View and upgrade packages that have newer versions available
-- **System Maintenance**: Keep your system running smoothly
+- **Free Up Space**: one button removes cached downloads and supporting
+  software nothing uses any more, leaving your apps, files, and containers
+  alone. It reports what each step actually did, and shows a reclaimed figure
+  only when the measurement is trustworthy
+- **Recovery**: Powerwash and Factory Reset, both irreversible, both
+  confirmed, and both disabled until an administrator opts in
 
 ---
 
@@ -84,33 +134,29 @@ fails does not stop the others.
 
 ### Installing a Release
 
-Each [ChairLift release](https://github.com/projectbluefin/chairlift/releases)
-provides ready-to-install packages for 64-bit Intel/AMD and Arm systems.
-Choose the package format for your distribution:
-
-| Distribution family | Full-package filename | Install command |
-|---|---|---|
-| Debian/Ubuntu | `projectbluefin-chairlift_<version>_<arch>.deb` (`amd64` or `arm64`) | `sudo apt install ./<downloaded-filename>` |
-| Fedora/RHEL | `projectbluefin-chairlift-<version>-1.<arch>.rpm` (`x86_64` or `aarch64`) | `sudo dnf install ./<downloaded-filename>` |
-| Alpine | `projectbluefin-chairlift_<version>_<arch>.apk` (`x86_64` or `aarch64`) | `sudo apk add --allow-untrusted ./<downloaded-filename>` |
-
-For a normal system installation, download the full `projectbluefin-chairlift`
-package. It includes the GUI, privileged helper, desktop assets, PolicyKit
-policies, and package-maintainer configuration.
-
-Use the similarly named `projectbluefin-chairlift-system-integration` package
-**only** when the ChairLift GUI is already delivered through a user-scoped
-mechanism such as the Homebrew cask. That package supplies only the root-owned
-helper, policies, and configuration needed by such an installation; it does
-not include the GUI. Never install both packages: they intentionally conflict
-because they own the same system-integration files.
-
-Download `checksums.txt` from the same release and verify the selected package
-before installing it:
+Control Center is distributed through Homebrew:
 
 ```bash
-package='<downloaded-package-filename>'
-grep -F "  $package" checksums.txt | sha256sum --check -
+brew install --cask projectbluefin/tap/chairlift
+```
+
+The cask installs the GUI, its desktop entry and icons, and compiles the
+GSettings schemas into `~/.local/share/glib-2.0/schemas`, all in user scope.
+A cask cannot install root-owned files, so the privileged pieces come from the
+operating system image: the helper at `/usr/bin/chairlift-helper` and its
+PolicyKit policy (`io.projectbluefin.chairlift.ublue.policy`). Bluefin-family
+images will get both from `projectbluefin/common` once
+[common#1279](https://github.com/projectbluefin/common/pull/1279) lands.
+Control Center offers a privileged action only when the image provides it.
+
+Each [release](https://github.com/projectbluefin/chairlift/releases) publishes
+`chairlift_<version>_linux_<arch>.tar.gz` (`amd64` or `arm64`), which the cask
+and OS images install from, plus a signed `checksums.txt`. Verify an archive
+before using it directly:
+
+```bash
+archive='<downloaded-archive-filename>'
+grep -F "  $archive" checksums.txt | sha256sum --check -
 ```
 
 ### Building from Source
@@ -128,6 +174,7 @@ make build
 # Binaries are written to build/:
 #   build/chairlift                 the main application
 #   build/chairlift-updex-helper    privileged helper for updex feature writes
+#   build/chairlift-helper          privileged helper for Bluefin-family system writes
 
 # Install (binaries, polkit policies, icons, desktop file)
 sudo make install
@@ -137,55 +184,50 @@ sudo make install
 participates in PolicyKit authentication (`sudo make install` uses it by
 default — no need to pass `PREFIX` explicitly). PolicyKit's `polkitd` reads
 `.policy` files from the fixed system directory
-`/usr/share/polkit-1/actions`, and `pkexec` matches the updex helper it's
-asked to run against the absolute path
-`/usr/bin/chairlift-updex-helper` recorded in
-`data/io.projectbluefin.chairlift.updex.policy`'s
-`org.freedesktop.policykit.exec.path` annotation and its first argument
-against an `org.freedesktop.policykit.exec.argv1` annotation. Installing under
-any other prefix places those files where polkit never looks, so the privileged
-updex, bootc-staging, and sysupdate-staging features silently stop working (or fall back to a
-more restrictive, always-reprompting authentication rule). This also matches
-the layout used by ChairLift's full `projectbluefin-chairlift` nFPM package, so a
-source install and a full packaged install end up identical.
+`/usr/share/polkit-1/actions`, and `pkexec` matches each privileged executable
+against the absolute path recorded in that action's
+`org.freedesktop.policykit.exec.path` annotation: `/usr/bin/chairlift-updex-helper`,
+`/usr/bin/chairlift-helper`, or `/usr/libexec/bootc-update-stage`. The
+helper policies also select the authorized subcommand through
+`org.freedesktop.policykit.exec.argv1`.
+Installing under any other prefix places those files where polkit never looks
+or where the helper paths no longer match, so the privileged updex,
+Bluefin-family, and bootc-staging features silently stop
+working (or fall back to a more restrictive, always-reprompting authentication
+rule). OS images install the helper and policies from the release archive at
+these same paths, so a source install and an image end up identical.
 
-ChairLift does not install passwordless PolicyKit rules. Bootc staging,
-sysupdate staging, and updex writes use the policies' normal
-administrator-authentication defaults;
-an active session may retain a successful authorization briefly. The updex
-helper accepts only `enable-feature <name> [--dry-run]`, `disable-feature
-<name> [--dry-run]`, and `update [--dry-run]`, rejecting every other argument
-shape inside the privileged process.
+Control Center does not install passwordless PolicyKit rules. Bootc staging,
+updex writes, and Bluefin-family system operations use the
+policies' normal administrator-authentication defaults; an active session may
+retain a successful authorization briefly. The updex helper accepts only
+`enable-feature <name> [--dry-run]`, `disable-feature <name> [--dry-run]`, and
+`update [--dry-run]`. The ublue helper accepts only `channel-switch
+<stable|testing> [--dry-run]`, `dx-enable [--dry-run]`, `dx-disable
+[--dry-run]`, `restart [--dry-run]`, `rollback [--dry-run]`,
+`auto-updates-enable [--dry-run]`, `auto-updates-disable [--dry-run]`,
+`driver-switch <standard|nvidia|nvidia-open> [--dry-run]`, and `factory-reset
+[--dry-run]`. Both helpers reject every other
+argument shape inside the privileged process.
 
 Both paths install package-maintainer configuration defaults at
 `/usr/share/chairlift/config.yml`. They never create or overwrite the
 administrator-owned `/etc/chairlift/config.yml` override.
 
-Releases also publish a small
-`projectbluefin-chairlift-system-integration` deb/rpm/apk for distributions that
-deliver the GUI through a user-scoped mechanism such as the Homebrew cask. It
-installs only the fixed `/usr/bin/chairlift-updex-helper`, all three PolicyKit
-policies, and `/usr/share/chairlift/config.yml`; it does not install the GUI.
-The integration and full packages conflict intentionally because they own the
-same privileged files.
-
 The bootc policy deliberately retains the fixed
 `/usr/libexec/bootc-update-stage` path. A distribution must provide a trusted
 stage helper at exactly that path before enabling `bootc_updates_group`; the
-integration package does not provide a distro-specific staging implementation.
-ChairLift hides the group when the helper is absent. The sysupdate policy
-likewise retains the fixed `/usr/libexec/snosi-sysupdate-stage` path used by
-`sysupdate_updates_group` on native A/B installs; that helper (and the
-`/usr/lib/snosi/native-ab` marker gating the group) ship with the OS image.
+release archive does not provide a distro-specific staging implementation.
+Control Center hides the group when the helper is absent.
 
 `PREFIX` can still be overridden (e.g. `make install PREFIX=$HOME/.local`)
-for a non-privileged, non-PolicyKit-integrated install — but the updex helper,
-bootc staging, and sysupdate staging will not resolve to their fixed exec-path annotations
-in that case.
+for a non-privileged, non-PolicyKit-integrated install — but the helper
+binaries and bootc staging will not resolve to their fixed exec-path
+annotations in that case.
 
 `DESTDIR` layers underneath `PREFIX` as usual, unchanged by any of the
 above, for staged/packaged installs (`make install DESTDIR=/path/to/stage
-PREFIX=/usr`) — this is what `.goreleaser.yaml`'s nFPM packaging uses.
+PREFIX=/usr`) — this is how an image stages the files it installs.
 
 **Migrating from a prior `/usr/local` source install:** `PREFIX` used to
 default to `/usr/local`. Before reinstalling at the new `/usr` default,
@@ -196,34 +238,65 @@ Other useful targets: `make dev` (CGO-enabled build with `-race` for development
 ### Dependencies
 
 - Go (see `go.mod` for the toolchain version)
-- GTK 4 and libadwaita 1 (shared libraries, loaded at runtime by puregotk — no GTK dev headers or CGO needed to build)
+- GTK 4 and libadwaita 1 (shared libraries, loaded at runtime by puregotk — no GTK dev headers or CGO needed to build; required at runtime)
+- Bash (required by the `chairlift-wrapper` launcher script the packaged desktop entry invokes)
 - Homebrew (optional, for package management features and tap trust)
 - Flatpak (optional)
 - `bootc` and the snow `/usr/libexec/bootc-update-stage` script (optional; enables staged system updates on bootc installs)
-- The snow `/usr/libexec/snosi-sysupdate-stage` script and `/usr/lib/snosi/native-ab` marker (optional; enables staged system updates on native A/B installs)
 - `updex` features configured on the system (optional; toggled via the Features page)
-- Mission Center (optional, for system performance monitoring)
+- Homebrew with the `llmmanorg/tap` tap reachable (optional; Agent Mode installs `llmmanorg/tap/llmman`)
+- The `uupd.timer` systemd unit (optional; backs the automatic-updates switch, whose state `internal/autoupdate` reads and whose enable/mask the ublue helper performs — ChairLift never executes the `uupd` binary itself)
 
 ---
 
 ## Usage
 
-Launch ChairLift from your application menu or run:
+Launch Control Center from your application menu or run:
 
 ```bash
 chairlift
 ```
 
+### Command Line Options
+
+- `--setup`, `-s`: open the first-run onboarding assistant. The assistant
+  normally appears only once, the first time Control Center runs; this flag
+  re-runs it at any time, as does **Setup Assistant…** in the application
+  menu. Control Center is a single-instance application, so running it with
+  this flag while a window is already open re-opens the assistant on that
+  window rather than starting a second copy — and if the assistant is
+  already open, it is brought forward on the step you were on. Choosing
+  *Get Moving* on the welcome screen closes it and records that setup was
+  settled, so it does not reappear on its own.
+  The setup model limits optional tasks to Appearance, Apps, and Update
+  Preferences, omitting choices excluded by configuration or host capability.
+  Dedicated setup controls and dismissal handling are tracked in
+  [#225](https://github.com/projectbluefin/chairlift/issues/225); the current
+  dialog still presents task descriptions.
+- `--dry-run`, `-d`: preview actions without changing the system. Automatic
+  presentation of the onboarding assistant is suppressed in this mode;
+  `--setup` still opens it explicitly.
+
 ### Main Sections
 
-1. **Applications**: Manage installed Homebrew packages, search for formulae
-   and casks, install curated bundles, and launch the configured external
-   Flatpak manager
-2. **Maintenance**: System cleanup and maintenance tools (Homebrew, Flatpak, custom scripts)
-3. **Updates**: Stage bootc or native A/B system updates, manage Homebrew updates and outdated packages, apply Flatpak updates, and trust Homebrew taps
-4. **System**: Monitor deployment, health, and performance information
-5. **Features**: Enable, disable, and update configured system features
-6. **Help**: Documentation and support resources
+1. **Updates**: Update everything in one action or per provider — stage bootc
+   system updates, apply Flatpak updates, manage Homebrew
+   updates and outdated packages, trust Homebrew taps, read the system
+   version, and switch release channel or graphics-driver variant
+2. **Apps**: Manage installed Homebrew packages, search for formulae and
+   casks, install app collections, and launch the configured external Flatpak
+   manager
+3. **Agents**: Run a language model on this computer, plus Troubleshooting
+   with Goose
+4. **Features**: Enable, disable, and update configured system features, plus
+   Developer Mode and Gaming Mode
+5. **Livery**: Choose the icons shown on the app-grid button, the top-bar menu,
+   and Files — a personal brand from Simple Icons, a foundation mark, or a CNCF
+   project's artwork, optionally advancing at each login
+6. **Maintenance**: Free Up Space, run administrator-configured maintenance
+   scripts, and — where an administrator has opted in — Powerwash or Factory
+   Reset
+7. **Help**: Documentation and support resources
 
 ### Keyboard Shortcuts
 
@@ -240,42 +313,53 @@ sidebar row and page title.
 
 ### Managing Packages
 
-- **Browse Installed**: Navigate to Applications → Brew Packages to see all installed formulae and casks
+- **Browse Installed**: Navigate to Apps → Brew Packages to see all installed formulae and casks
 - **Search**: Use the search box to find packages by name or keyword
-- **Install**: Click the install button next to search results or bundle items
+- **Install**: Check the app collections you want and click the collection group's Install button
 - **Pin/Unpin**: Use the formula row's Pin or Unpin action and confirm the change
 - **Remove**: Use an installed formula or cask row's Uninstall action and
   confirm the removal
 - **Upgrade**: Click upgrade button next to outdated packages
 
-ChairLift lists and uninstalls installed user and system Flatpak applications,
+Control Center lists and uninstalls installed user and system Flatpak applications,
 but delegates discovery and installation of new Flatpaks to the external
 manager configured by
 `applications_page.applications_installed_group.app_id` (Bazaar by default).
 
-### Bundle Installation
+### App Collections
 
-The Applications page discovers curated `*.Brewfile` bundles from every
-directory configured in `applications_page.brew_bundles_group.bundles_paths`
-(`/usr/share/snow/bundles` by default). Each bundle row shows its source path
-and an Install action; a leading comment in the Brewfile becomes its
-description. Missing directories are harmless, while unreadable configured
-paths are reported without hiding bundles found elsewhere. Repeated clicks
-cannot start overlapping installs, and `--dry-run` shows a preview without
-leaving the row marked as installed.
+The Apps page discovers curated `*.Brewfile` collections from every directory
+configured in `applications_page.brew_bundles_group.bundles_paths`
+(`/usr/share/ublue-os/homebrew` by default). Each collection is a checkbox
+row, and one Install action installs every checked collection that is not
+already installed. Curated collections start checked except Full Desktop
+Suite; a collection already on the system reads Installed and its checkbox
+is locked. Each row is named and described from a curated table rather than
+from the file, because the shipped collections are identified on disk by
+tooling names such as `cli` and `fonts-dev`; some rows also cover a sibling
+Brewfile (Fonts includes `dakota-fonts`) and count its items too; a sibling
+shipped without its parent keeps a row of its own, and `wallpaper-slideshow`
+keeps its own row here. Retired Bluefin collections are not
+offered. A collection that table does not know gets a readable form of its
+identifier, and its leading `#` comment only when that comment reads as a
+human sentence. Every row states how many apps and tools it installs.
+Missing directories are harmless, while unreadable configured paths are
+logged without hiding collections found elsewhere. Repeated clicks cannot
+start overlapping installs, and `--dry-run` shows a preview without marking
+any collection installed.
 
 ---
 
 ## Configuration
 
-ChairLift is highly configurable and can be adapted for different Linux distributions. The application uses a YAML configuration file to control which features are displayed and which applications are launched for various system management tasks.
+Control Center is highly configurable and can be adapted for different Linux distributions. The application uses a YAML configuration file to control which features are displayed and which applications are launched for various system management tasks.
 
-### Making ChairLift Portable
+### Making Control Center Portable
 
-While ChairLift was designed for Snow Linux, it can be easily customized for other distributions by:
+While Control Center was designed for Bluefin, it can be easily customized for other distributions by:
 
-- **Disabling Snow-specific features**: Hide Homebrew package management if your distribution doesn't use it
-- **Customizing system tools**: Configure which applications to launch for system monitoring, Flatpak management, etc.
+- **Disabling Bluefin-specific features**: Hide Homebrew package management if your distribution doesn't use it
+- **Customizing system tools**: Configure which application to launch for Flatpak discovery and installation
 - **Setting help resources**: Point users to your distribution's documentation, issue tracker, and community chat
 
 ### Configuration File
@@ -292,15 +376,28 @@ Configuration files are searched in the following locations (in order):
 
 1. `/etc/chairlift/config.yml` (system-wide - highest priority)
 2. `/usr/share/chairlift/config.yml` (package maintainer defaults)
-3. `config.yml` beside the ChairLift executable, or in the current working
-   directory when no executable-relative file exists (development fallback)
+3. `config.dev.yml` beside the ChairLift executable, or in the current working
+   directory when no executable-relative file exists (source-checkout fallback)
+4. `config.yml` beside the ChairLift executable, or in the current working
+   directory when no executable-relative file exists (legacy development fallback)
+
+Only the first two locations are trusted: `sudo: true` actions are accepted
+only from them, and an untrusted file may not enable a group whose effective
+actions include a privileged one, even when it inherits that action from the
+built-in defaults. See [CONFIG.md](CONFIG.md) for the full rule.
 
 The first file that exists is authoritative. If it is unreadable, malformed,
-or contains unknown pages, groups, fields, or invalid field types, ChairLift
+or contains unknown pages, groups, fields, or invalid field types, Control Center
 does not use a lower-priority file: it hides every configurable feature group,
 logs a `CONFIGURATION ERROR`, and shows a persistent error toast with the path
-and cause. Fix the file and restart ChairLift. If every candidate is absent,
-the built-in defaults apply.
+and cause. Fix the file and restart Control Center. If every candidate is absent,
+the built-in defaults apply. Legacy `system_page` settings are validated and
+migrated in memory to Updates where applicable; see
+[legacy configuration compatibility](CONFIG.md#legacy-system-page-compatibility).
+Retired v0.12.x `maintenance_page`, `updates_page`, and `features_page` groups
+are also validated, then ignored (`features_page.troubleshooting_group` is
+migrated to Agents); see
+[legacy group compatibility](CONFIG.md#legacy-maintenance-updates-features-and-apps-group-compatibility).
 
 ---
 
@@ -312,7 +409,8 @@ the built-in defaults apply.
 chairlift/
 ├── cmd/
 │   ├── chairlift/               # Main application entry point
-│   └── chairlift-updex-helper/  # Privileged helper for updex writes (invoked via pkexec)
+│   ├── chairlift-updex-helper/  # Privileged helper for updex writes (invoked via pkexec)
+│   └── chairlift-helper/        # Privileged helper for Bluefin-family system writes
 ├── internal/
 │   ├── app/       # GObject-registered Application (adw.Application subtype)
 │   ├── window/    # Main window: NavigationSplitView, sidebar, content stack
@@ -322,9 +420,8 @@ chairlift/
 │   ├── homebrew/  # Homebrew CLI wrapper (incl. tap trust)
 │   ├── flatpak/   # Flatpak CLI wrapper
 │   ├── bootc/     # bootc wrapper (status reads, pkexec stage script)
-│   ├── sysupdate/ # Native A/B wrapper (state-file reads, pkexec stage script)
 │   ├── updex/     # Updex feature manager
-│   └── version/   # Build metadata (ldflags injection)
+│   └── version/   # Displayed application version
 ├── data/          # Desktop file, icons, and PolicyKit policies
 └── Makefile       # Build configuration
 ```
@@ -335,14 +432,13 @@ See [docs/design/overview.md](docs/design/overview.md) and [docs/design/package-
 
 - **`internal/homebrew`**: Homebrew CLI wrapper — package listing/searching, install/uninstall, pin/unpin, bundles, updates, and Homebrew 6 tap-trust detection/management
 - **`internal/bootc`**: bootc status reads and pkexec-driven update staging via the snow `bootc-update-stage` script
-- **`internal/sysupdate`**: native A/B (systemd-sysupdate) status reads from the `/run/snosi` state files, rollback-candidate discovery from partition labels, and pkexec-driven update staging via the snow `snosi-sysupdate-stage` script
 - **`internal/views`**: GTK4/Adwaita UI — async operations dispatched via `sgtk.RunOnMainThread`, toast notifications for user feedback
-- **`internal/views/pageview`**: pure-Go row text, page status, os-release parsing, help-link ordering, and maintenance-command selection shared by all six page builders
+- **`internal/views/pageview`**: pure-Go row text, page status, os-release parsing, help-link ordering, and maintenance-command selection shared by all seven page builders
 
 ### Development Environment
 
 - **Build**: `make build` (see [Building from Source](#building-from-source) above)
-- **Containerized dev environment**: `distrobox.ini` describes a Debian Trixie container with the runtime and build dependencies; use `distrobox assemble create --file distrobox.ini` (or your preferred distrobox workflow) to create it, then `distrobox enter chairlift` and run `make build`/`make dev` inside. It mounts `/home/linuxbrew` (for Homebrew integration testing) and `/usr/share/snow/bundles` (for bundle management testing) from the host.
+- **Containerized dev environment**: `distrobox.ini` describes a Debian Trixie container with the runtime and build dependencies; use `distrobox assemble create --file distrobox.ini` (or your preferred distrobox workflow) to create it, then `distrobox enter chairlift` and run `make build`/`make dev` inside. It mounts `/home/linuxbrew` (for Homebrew integration testing) and `/usr/share/ublue-os/homebrew` (for app-collection testing) from the host.
 
 ### Testing
 
@@ -356,8 +452,7 @@ runtime dependencies and runs the same target. The unit gate also scans every
 workflow and rejects external GitHub Actions references that are not pinned to
 full commit SHAs.
 
-Codecov rejects project coverage regressions greater than one percentage point.
-Coverage expectations otherwise remain risk-based, not a repository-wide
+Coverage expectations remain risk-based, not a repository-wide
 percentage target: command wrappers must cover argument construction, dry-run,
 parsing, and failure propagation; configuration and privileged paths must keep
 exhaustive consistency tests; and GTK-independent view state belongs in
@@ -382,12 +477,12 @@ ChairLift is adapted from [Vanilla OS First Setup](https://github.com/Vanilla-OS
 
 ### License
 
-This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version — SPDX identifier `GPL-3.0-or-later`. This matches the in-app About dialog's license selection and the license declared in packaged (deb/rpm/apk) metadata.
+This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version — SPDX identifier `GPL-3.0-or-later`. This matches the in-app About dialog's license selection.
 
 See [LICENSE](LICENSE) for details.
 
 ---
 
 <div align="center">
-    <p>Made with ❤️ for Snow Linux</p>
+    <p>Made with ❤️ for Bluefin</p>
 </div>

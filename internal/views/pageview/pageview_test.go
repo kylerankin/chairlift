@@ -1,11 +1,12 @@
 package pageview
 
 import (
-	"bufio"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/projectbluefin/chairlift/internal/homebrew"
 )
 
 func TestApplicationRowsCoverEveryPresentation(t *testing.T) {
@@ -15,16 +16,6 @@ func TestApplicationRowsCoverEveryPresentation(t *testing.T) {
 		want Row
 	}{
 		{
-			name: "Flatpak without version",
-			got:  FlatpakApplication("Firefox", "org.mozilla.firefox", ""),
-			want: Row{Title: "Firefox", Subtitle: "org.mozilla.firefox"},
-		},
-		{
-			name: "Flatpak with version",
-			got:  FlatpakApplication("Firefox", "org.mozilla.firefox", "128.0"),
-			want: Row{Title: "Firefox", Subtitle: "org.mozilla.firefox (128.0)"},
-		},
-		{
 			name: "unpinned Homebrew package",
 			got:  HomebrewPackage("ripgrep", "14.1.1", false),
 			want: Row{Title: "ripgrep", Subtitle: "14.1.1"},
@@ -33,21 +24,6 @@ func TestApplicationRowsCoverEveryPresentation(t *testing.T) {
 			name: "pinned Homebrew package",
 			got:  HomebrewPackage("ripgrep", "14.1.1", true),
 			want: Row{Title: "ripgrep", Subtitle: "14.1.1 • Pinned"},
-		},
-		{
-			name: "bundle without description",
-			got:  BrewBundle("Workstation", "", "/bundles/Workstation.Brewfile"),
-			want: Row{Title: "Workstation", Subtitle: "/bundles/Workstation.Brewfile"},
-		},
-		{
-			name: "bundle with description",
-			got:  BrewBundle("Workstation", "Developer tools", "/bundles/Workstation.Brewfile"),
-			want: Row{Title: "Workstation", Subtitle: "Developer tools — /bundles/Workstation.Brewfile"},
-		},
-		{
-			name: "typed search result",
-			got:  SearchResult("firefox", "Cask"),
-			want: Row{Title: "firefox", Subtitle: "Cask"},
 		},
 	}
 
@@ -68,17 +44,25 @@ func TestUpdateRowsCoverEveryPresentation(t *testing.T) {
 		want     Row
 	}{
 		{
-			name:     "qualified and unqualified packages",
+			name:     "several programs",
 			formulae: []string{"vendor/tools/demo", "plain"},
 			casks:    []string{"vendor/apps/gui"},
 			want: Row{
 				Title:    "vendor/tap",
-				Subtitle: "3 installed: demo, plain, gui",
+				Subtitle: "Updates are paused for 3 programs from this source.",
 			},
 		},
 		{
-			name: "no packages",
-			want: Row{Title: "vendor/tap", Subtitle: "0 installed: "},
+			name:     "one program",
+			formulae: []string{"plain"},
+			want: Row{
+				Title:    "vendor/tap",
+				Subtitle: "Updates are paused for 1 program from this source.",
+			},
+		},
+		{
+			name: "no programs",
+			want: Row{Title: "vendor/tap", Subtitle: "Updates are paused for software from this source."},
 		},
 	}
 	for _, tt := range tapTests {
@@ -90,38 +74,83 @@ func TestUpdateRowsCoverEveryPresentation(t *testing.T) {
 		})
 	}
 
-	updateTests := []struct {
-		name         string
-		version      string
-		installation string
-		want         Row
+	packageTests := []struct {
+		name          string
+		qualifiedName string
+		kind          homebrew.PackageKind
+		want          Row
 	}{
 		{
-			name: "system update without version",
-			want: Row{Title: "Firefox", Subtitle: "org.mozilla.firefox"},
+			name:          "formula",
+			qualifiedName: "vendor/tap/demo",
+			kind:          homebrew.Formula,
+			want: Row{
+				Title:    "demo",
+				Subtitle: "Updates are paused for this program — Trust to update",
+			},
 		},
 		{
-			name:    "system update with version",
-			version: "129.0",
-			want:    Row{Title: "Firefox", Subtitle: "org.mozilla.firefox → 129.0"},
+			name:          "cask",
+			qualifiedName: "vendor/tap/demo",
+			kind:          homebrew.Cask,
+			want: Row{
+				Title:    "demo",
+				Subtitle: "Updates are paused for this app — Trust to update",
+			},
 		},
 		{
-			name:         "user update without version",
-			installation: "user",
-			want:         Row{Title: "Firefox", Subtitle: "org.mozilla.firefox (user)"},
-		},
-		{
-			name:         "user update with version",
-			version:      "129.0",
-			installation: "user",
-			want:         Row{Title: "Firefox", Subtitle: "org.mozilla.firefox → 129.0 (user)"},
+			name:          "unqualified name passes through",
+			qualifiedName: "plain",
+			kind:          homebrew.Formula,
+			want: Row{
+				Title:    "plain",
+				Subtitle: "Updates are paused for this program — Trust to update",
+			},
 		},
 	}
-	for _, tt := range updateTests {
-		t.Run("Flatpak/"+tt.name, func(t *testing.T) {
-			got := FlatpakUpdate("Firefox", "org.mozilla.firefox", tt.version, tt.installation)
+	for _, tt := range packageTests {
+		t.Run("untrusted tap package/"+tt.name, func(t *testing.T) {
+			got := UntrustedTapPackage(tt.qualifiedName, tt.kind)
 			if got != tt.want {
-				t.Fatalf("FlatpakUpdate() = %#v, want %#v", got, tt.want)
+				t.Fatalf("UntrustedTapPackage(%q, %v) = %#v, want %#v", tt.qualifiedName, tt.kind, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestTapTrustConfirmationMatchesTheRemainingCount(t *testing.T) {
+	tests := []struct {
+		name  string
+		count int
+		body  string
+	}{
+		{
+			name:  "one program",
+			count: 1,
+			body:  "This will trust the 1 installed program from vendor/tap, so it can install and update. Only trust sources you recognize.",
+		},
+		{
+			name:  "several programs",
+			count: 3,
+			body:  "This will trust all 3 installed programs from vendor/tap at once, so they can install and update. Only trust sources you recognize.",
+		},
+		{
+			name:  "no count",
+			count: 0,
+			body:  "This will trust software from vendor/tap, so it can install and update. Only trust sources you recognize.",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			title, body := TapTrustConfirmation("vendor/tap", tt.count)
+			if title != "Trust Software from vendor/tap?" {
+				t.Errorf("title = %q", title)
+			}
+			if body != tt.body {
+				t.Errorf("body = %q, want %q", body, tt.body)
+			}
+			if strings.Contains(body, "all 1 ") || strings.Contains(body, "1 installed programs") {
+				t.Errorf("body %q pluralizes a single program", body)
 			}
 		})
 	}
@@ -136,18 +165,18 @@ func TestBootcUpdateSubtitlesCoverEveryState(t *testing.T) {
 	}{
 		{
 			name: "not staged",
-			want: "Check for and download the latest system image",
+			want: "Downloads the newest version of the operating system. Asks for an administrator password; the new version installs when you restart",
 		},
 		{
 			name:   "staged without version",
 			staged: true,
-			want:   "Update staged — restart to apply",
+			want:   "A new version installs when you restart.",
 		},
 		{
 			name:    "staged with version",
 			staged:  true,
 			version: "42.1",
-			want:    "Update 42.1 staged — restart to apply",
+			want:    "Version 42.1 installs when you restart.",
 		},
 	}
 	for _, tt := range tests {
@@ -159,158 +188,68 @@ func TestBootcUpdateSubtitlesCoverEveryState(t *testing.T) {
 	}
 
 	resultTests := []struct {
-		name        string
-		staged      bool
-		version     string
-		lastMessage string
-		want        string
+		name    string
+		staged  bool
+		version string
+		want    string
 	}{
 		{
 			name:   "staged with version",
-			staged: true, version: "42.1", lastMessage: "ignored",
-			want: "Update 42.1 staged — restart to apply",
+			staged: true, version: "42.1",
+			want: "Version 42.1 installs when you restart.",
 		},
 		{
 			name:   "staged without version",
-			staged: true, lastMessage: "ignored",
-			want: "Update staged — restart to apply",
+			staged: true,
+			want:   "A new version installs when you restart.",
 		},
 		{
-			name:        "current with script message",
-			lastMessage: "No update available",
-			want:        "No update available",
-		},
-		{
-			name: "current without script message",
-			want: "System is up to date",
+			name: "nothing staged",
+			want: "Everything is up to date.",
 		},
 	}
 	for _, tt := range resultTests {
 		t.Run("stage result/"+tt.name, func(t *testing.T) {
-			got := BootcStageResultSubtitle(tt.staged, tt.version, tt.lastMessage)
+			got := BootcStageResultSubtitle(tt.staged, tt.version)
 			if got != tt.want {
 				t.Fatalf(
-					"BootcStageResultSubtitle(%v, %q, %q) = %q, want %q",
+					"BootcStageResultSubtitle(%v, %q) = %q, want %q",
 					tt.staged,
 					tt.version,
-					tt.lastMessage,
 					got,
 					tt.want,
 				)
 			}
 		})
 	}
+
+	// The Details row is hidden while it holds no line, so a failure with
+	// no output must not send anyone to it.
+	if got := BootcStageFailureSubtitle(true); got != "The update couldn't be downloaded. Open Details to see what happened." {
+		t.Fatalf("BootcStageFailureSubtitle(true) = %q", got)
+	}
+	if got := BootcStageFailureSubtitle(false); strings.Contains(got, "Details") {
+		t.Fatalf("BootcStageFailureSubtitle(false) = %q, must not point at a hidden Details row", got)
+	}
 }
 
-func TestSysupdateSubtitlesCoverEveryOutcome(t *testing.T) {
-	// The expected checked-time rendering is derived through the same
-	// time.Parse/Local path the formatter uses, so the assertion is
-	// timezone-independent without weakening to a substring match.
-	checkedAt := "2026-08-10T20:08:01-06:00"
-	parsed, err := time.Parse(time.RFC3339, checkedAt)
-	if err != nil {
-		t.Fatal(err)
+// TestBootcStageCopyDescribesTheDownload holds the shakedown's W3-01: the
+// action stages an update behind an administrator prompt, so neither its
+// label nor its idle description may present it as a mere check.
+func TestBootcStageCopyDescribesTheDownload(t *testing.T) {
+	if BootcStageButtonLabel != "Download" {
+		t.Fatalf("BootcStageButtonLabel = %q, want %q", BootcStageButtonLabel, "Download")
 	}
-	checkedClock := parsed.Local().Format("15:04")
-
-	tests := []struct {
-		name                        string
-		outcome, version, checkedAt string
-		want                        string
-	}{
-		{
-			name:    "staged with version",
-			outcome: "staged", version: "20260810200801",
-			want: "Update 20260810200801 staged — restart to apply",
-		},
-		{
-			name:    "staged without version",
-			outcome: "staged",
-			want:    "Update staged — restart to apply",
-		},
-		{
-			name:    "current with check time",
-			outcome: "current", checkedAt: checkedAt,
-			want: "System is up to date (checked " + checkedClock + ")",
-		},
-		{
-			name:    "current with unparseable check time",
-			outcome: "current", checkedAt: "not-a-time",
-			want: "System is up to date",
-		},
-		{
-			name:    "failed",
-			outcome: "failed", checkedAt: checkedAt,
-			want: "Last update check failed — use Check for Updates to retry",
-		},
-		{
-			name: "idle fresh boot",
-			want: "Check for and download the latest system image",
-		},
+	idle := BootcUpdateSubtitle(false, "")
+	for _, consequence := range []string{"Downloads", "administrator password", "when you restart"} {
+		if !strings.Contains(idle, consequence) {
+			t.Errorf("BootcUpdateSubtitle(false) = %q, want it to name %q", idle, consequence)
+		}
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := SysupdateUpdateSubtitle(tt.outcome, tt.version, tt.checkedAt)
-			if got != tt.want {
-				t.Fatalf("SysupdateUpdateSubtitle(%q, %q, %q) = %q, want %q",
-					tt.outcome, tt.version, tt.checkedAt, got, tt.want)
-			}
-		})
-	}
-
-	resultTests := []struct {
-		name        string
-		staged      bool
-		version     string
-		lastMessage string
-		want        string
-	}{
-		{
-			name:   "staged with version",
-			staged: true, version: "20260810200801", lastMessage: "ignored",
-			want: "Update 20260810200801 staged — restart to apply",
-		},
-		{
-			name:        "current with script message",
-			lastMessage: "No newer version available.",
-			want:        "No newer version available.",
-		},
-		{
-			name: "current without script message",
-			want: "System is up to date",
-		},
-	}
-	for _, tt := range resultTests {
-		t.Run("stage result/"+tt.name, func(t *testing.T) {
-			got := SysupdateStageResultSubtitle(tt.staged, tt.version, tt.lastMessage)
-			if got != tt.want {
-				t.Fatalf("SysupdateStageResultSubtitle(%v, %q, %q) = %q, want %q",
-					tt.staged, tt.version, tt.lastMessage, got, tt.want)
-			}
-		})
-	}
-
-	rollbackTests := []struct {
-		name    string
-		version string
-		want    string
-	}{
-		{
-			name:    "older slot version available",
-			version: "20260801000000",
-			want:    "Version 20260801000000 is on the inactive slot — choose it in the boot menu at restart to roll back",
-		},
-		{
-			name: "no rollback candidate",
-			want: "No previous version on disk",
-		},
-	}
-	for _, tt := range rollbackTests {
-		t.Run("rollback/"+tt.name, func(t *testing.T) {
-			if got := SysupdateRollbackSubtitle(tt.version); got != tt.want {
-				t.Fatalf("SysupdateRollbackSubtitle(%q) = %q, want %q", tt.version, got, tt.want)
-			}
-		})
+	for _, text := range []string{BootcStageButtonLabel, idle, BootcStageRunningSubtitle} {
+		if strings.Contains(strings.ToLower(text), "check for") || strings.Contains(strings.ToLower(text), "check whether") {
+			t.Errorf("stage copy %q presents the download as a check", text)
+		}
 	}
 }
 
@@ -335,15 +274,15 @@ func TestFeatureRowsAndDescriptions(t *testing.T) {
 func TestHelpResourcesPreserveConfiguredOrder(t *testing.T) {
 	got := HelpResources("https://example.test", "", "https://chat.example.test")
 	want := []HelpResource{
-		{Title: "Website", URL: "https://example.test"},
-		{Title: "Community Discussions", URL: "https://chat.example.test"},
+		{Title: "Browse Documentation", URL: "https://example.test"},
+		{Title: "Ask for Help", URL: "https://chat.example.test"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("HelpResources() = %#v, want %#v", got, want)
 	}
 
 	all := HelpResources("website", "issues", "chat")
-	if len(all) != 3 || all[1] != (HelpResource{Title: "Report Issues", URL: "issues"}) {
+	if len(all) != 3 || all[1] != (HelpResource{Title: "Report a Problem", URL: "issues"}) {
 		t.Fatalf("HelpResources(all configured) = %#v, want all three resources in display order", all)
 	}
 	if none := HelpResources("", "", ""); len(none) != 0 {
@@ -377,49 +316,249 @@ func TestMaintenanceCommandsPreservePrivilegeBoundary(t *testing.T) {
 	}
 }
 
-func TestSystemOSReleaseParsing(t *testing.T) {
-	input := strings.NewReader(`
-# comment
-NAME="Snow Linux"
-VERSION_ID='42'
-HOME_URL=https://snow.example.test
-BROKEN
-
-`)
-	got, err := ParseOSRelease(input)
+// The primary row is the one a person reads at a glance, so it carries a
+// version and a date and nothing else — never the digest or the registry
+// path, which live behind Details.
+func TestSystemVersionRowStaysReadable(t *testing.T) {
+	const released = "2026-08-10T20:08:01-06:00"
+	parsed, err := time.Parse(time.RFC3339, released)
 	if err != nil {
-		t.Fatalf("ParseOSRelease() error = %v", err)
+		t.Fatal(err)
 	}
-	want := []OSReleaseEntry{
-		{Title: "Name", Value: "Snow Linux"},
-		{Title: "Version Id", Value: "42"},
-		{Title: "Home Url", Value: "https://snow.example.test", IsURL: true},
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("ParseOSRelease() = %#v, want %#v", got, want)
-	}
+	date := parsed.Local().Format("2 January 2006")
 
-	tooLong := strings.NewReader(strings.Repeat("x", bufio.MaxScanTokenSize+1))
-	if _, err := ParseOSRelease(tooLong); err == nil {
-		t.Fatal("ParseOSRelease() error = nil for an overlong input line")
-	}
-}
-
-func TestSystemDigestShortening(t *testing.T) {
 	tests := []struct {
-		name   string
-		digest string
-		want   string
+		name                             string
+		version, released, stagedVersion string
+		staged                           bool
+		want                             string
 	}{
-		{name: "empty"},
-		{name: "short", digest: "sha256:1234", want: "sha256:1234"},
-		{name: "exact boundary", digest: "1234567890123456789", want: "1234567890123456789"},
-		{name: "truncated", digest: "12345678901234567890", want: "1234567890123456789..."},
+		{
+			name:    "version and date",
+			version: "42.20260810", released: released,
+			want: "Version 42.20260810, released " + date + ".",
+		},
+		{
+			name:    "version only",
+			version: "42.20260810",
+			want:    "Version 42.20260810.",
+		},
+		{
+			name:     "unparseable date is dropped",
+			version:  "42.20260810",
+			released: "not-a-time",
+			want:     "Version 42.20260810.",
+		},
+		{
+			name:     "date only",
+			released: released,
+			want:     "Released " + date + ".",
+		},
+		{
+			name: "nothing readable",
+			want: "Couldn't read this computer's version.",
+		},
+		{
+			name:    "an update is waiting",
+			version: "42.20260810", staged: true, stagedVersion: "42.20260901",
+			want: "Version 42.20260810. Version 42.20260901 installs when you restart.",
+		},
+		// A composefs host can say an update is staged without being able
+		// to read its version unprivileged; the row must still say so.
+		{
+			name:    "an update of unknown version is waiting",
+			version: "20260921", staged: true,
+			want: "Version 20260921. A new version installs when you restart.",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := ShortDigest(tt.digest); got != tt.want {
-				t.Fatalf("ShortDigest(%q) = %q, want %q", tt.digest, got, tt.want)
+			row := SystemVersionRow(tt.version, tt.released, tt.staged, tt.stagedVersion)
+			if row.Title != "System Version" {
+				t.Fatalf("SystemVersionRow().Title = %q, want %q", row.Title, "System Version")
+			}
+			if row.Subtitle != tt.want {
+				t.Fatalf("SystemVersionRow(%q, %q, %v, %q).Subtitle = %q, want %q",
+					tt.version, tt.released, tt.staged, tt.stagedVersion, row.Subtitle, tt.want)
+			}
+		})
+	}
+}
+
+// Details is where the identifiers live, and an unknown value must produce
+// no row at all rather than a labelled blank.
+func TestSystemVersionDetailsOmitUnknownFields(t *testing.T) {
+	const digest = "sha256:110fdf396bd1c0ffee0123456789abcdef0123456789abcdef0123456789ab"
+	full := SystemVersionDetails(
+		"42.20260810",
+		"2026-08-10T20:08:01-06:00",
+		"ghcr.io/ublue-os/bluefin:latest",
+		digest,
+	)
+	titles := make([]string, 0, len(full))
+	for _, row := range full {
+		if row.Subtitle == "" {
+			t.Fatalf("SystemVersionDetails() produced an empty %q row", row.Title)
+		}
+		titles = append(titles, row.Title)
+	}
+	want := []string{"Version", "Released", "Source", "Build ID"}
+	if !reflect.DeepEqual(titles, want) {
+		t.Fatalf("SystemVersionDetails() titles = %#v, want %#v", titles, want)
+	}
+	// These rows exist to be quoted; a shortened digest identifies nothing.
+	if got := full[3].Subtitle; got != digest {
+		t.Fatalf("Build ID = %q, want the whole digest %q", got, digest)
+	}
+
+	if rows := SystemVersionDetails("", "not-a-time", "", ""); len(rows) != 0 {
+		t.Fatalf("SystemVersionDetails() with nothing known = %#v, want no rows", rows)
+	}
+}
+
+func TestStagingLogSubtitleNamesTheCapWhenOneApplied(t *testing.T) {
+	tests := []struct {
+		name  string
+		shown int
+		total int
+		want  string
+	}{
+		{
+			name: "before any output",
+			want: "No output",
+		},
+		{
+			name:  "single line",
+			shown: 1, total: 1,
+			want: "1 line.",
+		},
+		{
+			name:  "every line retained",
+			shown: 37, total: 37,
+			want: "37 lines.",
+		},
+		{
+			name:  "window over a verbose run",
+			shown: 200, total: 4321,
+			want: "Showing the last 200 of 4321 lines.",
+		},
+		{
+			name:  "first dropped line",
+			shown: 200, total: 201,
+			want: "Showing the last 200 of 201 lines.",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := StagingLogSubtitle(tt.shown, tt.total); got != tt.want {
+				t.Fatalf("StagingLogSubtitle(%d, %d) = %q, want %q", tt.shown, tt.total, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestFeaturesEmptyStateOnlyWhenNothingIsOffered holds issue #352: a host
+// with no Developer, Gaming, or Printers group and no optional features must
+// explain the empty page, and any one offering — including a features group
+// still checking, or a Printers group — must suppress the explanation.
+func TestFeaturesEmptyStateOnlyWhenNothingIsOffered(t *testing.T) {
+	for _, tc := range []struct {
+		bluefin, printers, optional, want bool
+	}{
+		{want: true},
+		{bluefin: true},
+		{printers: true},
+		{optional: true},
+		{bluefin: true, printers: true, optional: true},
+	} {
+		row, empty := FeaturesEmptyState(tc.bluefin, tc.printers, tc.optional)
+		if empty != tc.want {
+			t.Errorf("FeaturesEmptyState(%v, %v, %v) empty = %v, want %v", tc.bluefin, tc.printers, tc.optional, empty, tc.want)
+		}
+		if empty && (row.Title == "" || row.Subtitle == "") {
+			t.Errorf("FeaturesEmptyState(%v, %v, %v) shows an empty state without saying why: %+v", tc.bluefin, tc.printers, tc.optional, row)
+		}
+	}
+}
+
+// The export replaces any Brewfile in the home folder, a hand-written one as
+// much as an earlier export, so the row names the file and says so rather
+// than claiming only a previous export is replaced (W2-APPS-4).
+func TestPackageListExportSubtitleNamesWhatItReplaces(t *testing.T) {
+	for _, want := range []string{"Brewfile in your home folder", "Replaces any Brewfile already there."} {
+		if !strings.Contains(PackageListExportSubtitle, want) {
+			t.Errorf("PackageListExportSubtitle = %q, want it to contain %q", PackageListExportSubtitle, want)
+		}
+	}
+	if strings.Contains(PackageListExportSubtitle, "exported last time") {
+		t.Errorf("PackageListExportSubtitle = %q still claims only an earlier export is replaced", PackageListExportSubtitle)
+	}
+}
+
+// Every installed-package row shows the same Pin, Unpin, and Uninstall
+// labels, so the accessible name carries the package in each phase
+// (W2-APPS-5).
+func TestHomebrewPackageButtonNameCarriesThePackage(t *testing.T) {
+	for label, want := range map[string]string{
+		"Uninstall…":    "Uninstall jq",
+		"Uninstalling…": "Uninstalling jq",
+		"Uninstalled":   "Uninstalled jq",
+		"Pin…":          "Pin jq",
+		"Pinning…":      "Pinning jq",
+		"Unpin…":        "Unpin jq",
+	} {
+		if got := HomebrewPackageButtonName(label, "jq"); got != want {
+			t.Errorf("HomebrewPackageButtonName(%q, jq) = %q, want %q", label, got, want)
+		}
+	}
+}
+func TestCompassSubtitleReflectsState(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		installed bool
+		supported bool
+		remote    bool
+		want      string
+	}{
+		{
+			name:      "installed",
+			installed: true,
+			supported: true,
+			remote:    true,
+			want:      "Installed for everyone on this computer. Open Compass from the app grid.",
+		},
+		{
+			name:      "installed without remote",
+			installed: true,
+			supported: false,
+			remote:    false,
+			want:      "Installed for everyone on this computer. Open Compass from the app grid.",
+		},
+		{
+			name:      "unsupported architecture",
+			installed: false,
+			supported: false,
+			remote:    true,
+			want:      "Compass is only available for x86_64 computers.",
+		},
+		{
+			name:      "missing remote",
+			installed: false,
+			supported: true,
+			remote:    false,
+			want:      "Compass installs from FlatPark, which isn't set up on this computer.",
+		},
+		{
+			name:      "available",
+			installed: false,
+			supported: true,
+			remote:    true,
+			want:      "A fast, keyboard-first launcher for apps, files, and commands. Installs from FlatPark.",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := CompassSubtitle(tc.installed, tc.supported, tc.remote); got != tc.want {
+				t.Errorf("CompassSubtitle(%v, %v, %v) = %q, want %q", tc.installed, tc.supported, tc.remote, got, tc.want)
 			}
 		})
 	}

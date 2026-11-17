@@ -1,0 +1,127 @@
+# Printer Applications
+
+[`internal/printerapp`](../../internal/printerapp/) owns rootless Podman
+quadlets and their `systemctl --user` lifecycle. The Features page exposes the
+families defined in [`printerapp.go`](../../internal/printerapp/printerapp.go);
+that table owns images, ports and names. Configuration may hide Printers; its
+host capability floor requires Podman. Observing a row does not install or start
+anything.
+
+## Network boundary
+
+PAPPL's web administration is unauthenticated. Units publish only
+`127.0.0.1:<port>:<port>`, never host networking or a LAN address. IPP and web
+administration are available only on this computer; DNS-SD inside the container
+does not advertise a usable LAN printer. There is no pkexec route, privileged
+container or image layering.
+
+Physical printing is not established by service readiness. HPLIP plugin
+consent remains an interactive image-side web flow, not a headless ChairLift
+action. The network trade-off is recorded in
+[ADR-0020](../adr/0020-printer-apps-loopback-only-on-moving-stable-tag.md).
+
+## USB printer passthrough
+
+Each family row has a **USB Printer** picker: "No USB printer" or one of the
+connected printers, named by the maker and model it reports. The choice is saved
+as the printer's stable identity — USB vendor ID, product ID and serial number —
+in the `usb-printers` key of the `io.projectbluefin.chairlift.printers`
+GSettings schema, keyed by family. A device path such as
+`/dev/bus/usb/001/008` changes on every replug or reboot, so it is never saved.
+
+Every route that writes a unit — turning a family on, choosing a printer, and a
+Printer Drivers update — resolves the saved identity against
+`/sys/bus/usb/devices` and adds `AddDevice=-/dev/bus/usb/<bus>/<device>` for the
+one printer that matches. A replug or reboot gives the printer new bus and
+device numbers, so while any family is on, a user oneshot unit,
+`chairlift-printers-usb.service` (`chairlift --resolve-printer-usb`, ordered
+`Before=` every family's service), resolves each saved identity again at login.
+It rewrites only the `AddDevice=` line of a default app whose line no longer
+matches — a new path, or no line when the printer is not connected or no
+longer chosen, so a different device holding the old numbers is never passed
+through — then reloads the user manager and restarts the changed units with
+`--no-block`. The verified image digest and the rest of the unit are left as
+they are, an unchanged unit is not touched, and unreadable choices leave every
+unit alone. The pass runs as the user; nothing is privileged. Turning a family
+on (or a Printer Drivers refresh) installs the unit, and turning the last
+family off removes it. The `-` prefix (`podman-systemd.unit(5)`: add the
+device only if it exists) still keeps a printer unplugged since login from
+stopping the family. A replug during a session is not followed: the family
+keeps the old path until the next login, a re-pick or a Printer Drivers
+refresh. A udev rule giving each printer a stable device link
+belongs in the OS image, not here.
+Choosing a printer while the
+family is on restarts it through the verified refresh path; "No USB printer"
+removes the `AddDevice=` line. If the saved printer is not connected, or two
+identical printers without serial numbers cannot be told apart, the unit carries
+no device, the family still starts, and its row says the USB printer is not
+connected.
+
+One printer has one owner: a printer chosen for one family is refused for
+another, by identity, so it stays taken while unplugged. The choice applies to
+the family's default application only. The picker re-reads the connected
+printers when the pointer or keyboard focus reaches it; there is no timer or
+hotplug watch. Saving honours dry-run, and no privileged route is involved:
+the choice is a user setting and the unit stays rootless.
+
+The family runs with `UserNS=keep-id`, so inside the container the application
+has the signed-in account's own permissions on the printer's device node, and
+needs to read and write it. On a default Fedora install a USB printer's node is
+`root:lp` mode `0664` with nobody in `lp`, so the account can only read it.
+ChairLift adds no group, udev rule or privileged route for this: the OS grants
+access, through a `uaccess` rule for USB printers
+([projectbluefin/common#1681](https://github.com/projectbluefin/common/issues/1681)).
+When the saved printer is connected but the account cannot open its node for
+reading and writing, the row says the account can't use the USB printer yet.
+The unit still passes the device through, so the printer works once the OS
+grants access, with no change in ChairLift.
+
+## Family inventory and images
+
+Enable and refresh verify the family's configured image with cosign against its
+publishing workflow identity before writing a unit. The unit runs the verified
+digest, not a tag resolved again after verification. Missing cosign or rejected
+verification fails closed. Identity and verification details live in
+[`internal/printerapp`](../../internal/printerapp/); the decision is
+[ADR-0023](../adr/0023-verify-printer-images-before-installing.md).
+
+Pins advance through the Updates page's Printer Drivers source. It checks
+enabled families, preserves other families' results when one cannot be checked,
+and retries failed refreshes without replaying successful ones. There is no
+background schedule or `AutoUpdate=registry` on new units. For an older unit
+still carrying that setting, turn the family off and on to install a verified
+pin, or apply its offered update. ChairLift does not disable a shared Podman
+timer used by unrelated containers.
+
+## Lifecycle and failure semantics
+
+Quadlets live in the account's configuration directory under
+`containers/systemd`; persistent printer data lives under
+`$XDG_DATA_HOME/chairlift/printers/<family>/<name>`, defaulting to
+`~/.local/share/chairlift/printers/<family>/<name>`. Relative `XDG_DATA_HOME`
+values are ignored, as required by the
+[XDG Base Directory Specification](https://specifications.freedesktop.org/basedir/latest/).
+Existing `~/printer-workspaces` data is not moved or deleted. Existing quadlets
+keep their paths until enable or refresh rewrites them; users must move any
+printer data they want to retain before switching an existing printer to the
+new location.
+
+Enable, refresh and disable serialize per application. Verification failure
+leaves the existing unit and service untouched. A later service failure removes
+a newly created unit, but does not restore the old contents of an existing unit.
+Disable removes the quadlet only after the service is known stopped; unreadable
+or active state preserves it. Disabling retains images and printer state.
+Dry-run logs intended mutations without verification, writes or service commands.
+
+## Observed readiness and GTK wiring
+
+A unit's presence means configured, not ready. The row separately observes
+systemd and classifies failures using service properties, journal output and the
+installed image. A failed configured service stays switchable off. Systemd
+active is not proof of working hardware, IPP health or successful printing.
+
+[`printers_page.go`](../../internal/views/printers_page.go) owns GTK wiring;
+[`pageview/printers.go`](../../internal/views/pageview/printers.go) owns row copy.
+Runtime queries run off-thread; failures and previews retain known state rather
+than inventing a successful enable or disable. Inspect the generated user
+service's journal when the row reports a service failure.

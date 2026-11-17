@@ -1,32 +1,36 @@
 package e2e
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"image"
 	"image/png"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/projectbluefin/chairlift/internal/navigation"
+	"github.com/projectbluefin/chairlift/internal/printerapp"
 )
 
 const walkthroughTimeout = 3 * time.Minute
 
-// walkthroughScreen is the Xvfb screen geometry capture_walkthrough.sh uses.
-// The captured PNG must match it exactly; a mismatch means the capture came
-// from somewhere other than the walkthrough's own display.
+// The headless monitor capture_walkthrough.sh runs under is exactly the
+// main window's default size (internal/window: SetDefaultSize(900, 700)), so
+// Mutter fits the window to it and every frame is the window, uncropped. A
+// frame of any other size came from somewhere other than this session.
 const (
-	walkthroughWidth  = 1400
-	walkthroughHeight = 900
+	walkthroughWidth  = 900
+	walkthroughHeight = 700
 )
 
 // TestWalkthroughScreenshots drives the real application through every
-// navigation page under Xvfb and asserts each page rendered.
+// navigation page on a headless native Wayland session and asserts each page
+// rendered.
 //
 // What this verifies, precisely: the application launched, the window
 // appeared, every advertised Alt+<number> accelerator navigated somewhere,
@@ -38,46 +42,6 @@ const (
 //
 // The whole run is in --dry-run, so none of the three Bluefin-family
 // toggles can execute a real mutation while the screenshots are taken.
-// windowGeometry is the captured window's position and size on the Xvfb
-// root, as recorded by capture_walkthrough.sh.
-type windowGeometry struct {
-	X, Y, Width, Height int
-}
-
-// readWindowGeometry parses the `xdotool getwindowgeometry --shell` output
-// the script wrote. A missing or unparseable file yields ok=false, and the
-// caller writes the uncropped frame rather than failing: the crop is a
-// presentation nicety for the docs, not an assertion.
-func readWindowGeometry(t *testing.T, outDir string) (windowGeometry, bool) {
-	t.Helper()
-
-	data, err := os.ReadFile(filepath.Join(outDir, "window-geometry.env"))
-	if err != nil {
-		t.Logf("no window geometry recorded, writing uncropped frames: %v", err)
-		return windowGeometry{}, false
-	}
-
-	fields := map[string]int{}
-	for _, line := range strings.Split(string(data), "\n") {
-		key, value, found := strings.Cut(strings.TrimSpace(line), "=")
-		if !found {
-			continue
-		}
-		number, err := strconv.Atoi(value)
-		if err != nil {
-			continue
-		}
-		fields[key] = number
-	}
-
-	geometry := windowGeometry{X: fields["X"], Y: fields["Y"], Width: fields["WIDTH"], Height: fields["HEIGHT"]}
-	if geometry.Width <= 0 || geometry.Height <= 0 {
-		t.Logf("window geometry %+v is unusable, writing uncropped frames", geometry)
-		return windowGeometry{}, false
-	}
-	return geometry, true
-}
-
 func TestWalkthroughScreenshots(t *testing.T) {
 	// The walkthrough drives the chairlift_e2e-tagged GUI, which `make e2e`
 	// builds into a subdirectory of its own. The other E2E tests use the
@@ -89,7 +53,10 @@ func TestWalkthroughScreenshots(t *testing.T) {
 	script := filepath.Join(repoRoot(t), "test", "e2e", "capture_walkthrough.sh")
 	requireExecutable(t, script)
 
-	for _, command := range []string{"Xvfb", "xdotool", "xdpyinfo", "xwd", "dbus-run-session"} {
+	session := filepath.Join(repoRoot(t), "test", "e2e", "wayland_session.sh")
+	requireExecutable(t, session)
+
+	for _, command := range []string{"dbus-run-session", "mutter", "pipewire", "wireplumber", "gst-launch-1.0"} {
 		requireCommand(t, command)
 	}
 
@@ -107,13 +74,21 @@ func TestWalkthroughScreenshots(t *testing.T) {
 
 	outDir := walkthroughOutputDir(t)
 
-	args := append([]string{app, outDir}, names...)
-	cmd := exec.Command(script, args...)
+	runtimeDir := filepath.Join(outDir, "runtime")
+	if err := os.MkdirAll(runtimeDir, 0o700); err != nil {
+		t.Fatalf("create isolated XDG_RUNTIME_DIR: %v", err)
+	}
+
+	args := append([]string{"--", session, script, app, outDir}, names...)
+	cmd := exec.Command("dbus-run-session", args...)
 	cmd.Dir = repoRoot(t)
 	cmd.Env = append(os.Environ(),
-		fmt.Sprintf("CHAIRLIFT_WALKTHROUGH_WIDTH=%d", walkthroughWidth),
-		fmt.Sprintf("CHAIRLIFT_WALKTHROUGH_HEIGHT=%d", walkthroughHeight),
+		fmt.Sprintf("CHAIRLIFT_WAYLAND_SIZE=%dx%d", walkthroughWidth, walkthroughHeight),
+		"XDG_RUNTIME_DIR="+runtimeDir,
 	)
+	// A private session, so a timeout can stop the compositor, PipeWire and
+	// the application along with the script.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 
 	output := &lockedBuffer{}
 	cmd.Stdout = output
@@ -131,9 +106,9 @@ func TestWalkthroughScreenshots(t *testing.T) {
 			t.Fatalf("walkthrough failed: %v\noutput:\n%s", err, output.String())
 		}
 	case <-time.After(walkthroughTimeout):
-		_ = cmd.Process.Kill()
-		<-done
-		t.Fatalf("walkthrough did not finish within %s\noutput:\n%s", walkthroughTimeout, output.String())
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		waitErr := <-done
+		t.Fatalf("walkthrough did not finish within %s (after termination: %v)\noutput:\n%s", walkthroughTimeout, waitErr, output.String())
 	}
 
 	if !strings.Contains(output.String(), "walkthrough complete") {
@@ -141,23 +116,21 @@ func TestWalkthroughScreenshots(t *testing.T) {
 	}
 
 	assertBluefinGroupsRendered(t, outDir)
-	assertUpdateAllRendered(t, outDir)
+	assertAutomaticUpdatesRendered(t, outDir)
+	// The reset group is opt-in and the capture enables it explicitly; a
+	// higher-priority checkout config must not silently hide both rows.
+	findLogLine(t, outDir, "views: reset group built")
 
-	geometry, cropped := readWindowGeometry(t, outDir)
-
-	frames := make(map[string]string, len(names))
-	for index, name := range names {
-		path := filepath.Join(outDir, fmt.Sprintf("%d-%s.xwd", index+1, name))
+	// The setup assistant is captured first, before any page: the script
+	// launches with --setup, so the frame shows the welcome screen over the
+	// Updates page. It is checked like a page and must differ from every
+	// page frame, which proves the dialog was actually on screen.
+	captures := append([]string{"setup"}, names...)
+	frames := make(map[string]string, len(captures))
+	for index, name := range captures {
+		path := filepath.Join(outDir, fmt.Sprintf("%d-%s.png", index, name))
 		t.Run(name, func(t *testing.T) {
-			// The assertions below run against the full root frame, so the
-			// fixed-size and variance checks stay meaningful; only the PNG
-			// written for human review is cropped to the window.
 			frame := decodeFrame(t, path)
-			png := frame
-			if cropped {
-				png = cropFrame(frame, geometry)
-			}
-			writePNG(t, png, strings.TrimSuffix(path, ".xwd")+".png")
 
 			bounds := frame.Bounds()
 			if bounds.Dx() != walkthroughWidth || bounds.Dy() != walkthroughHeight {
@@ -184,15 +157,17 @@ func TestWalkthroughScreenshots(t *testing.T) {
 					filepath.Base(path), modalShare*100)
 			}
 		})
-		frames[name] = frameDigest(t, path)
+		frames[name] = frameDigest(decodeFrame(t, path))
 	}
 
 	// If accelerator delivery silently failed, every capture would be the
-	// same page. Distinct frames are what proves navigation actually moved.
+	// same page. Distinct frames are what proves navigation actually moved;
+	// the setup frame differing from the Updates frame proves the assistant
+	// was on screen and Escape dismissed it.
 	seen := make(map[string]string, len(frames))
 	for name, digest := range frames {
 		if previous, duplicate := seen[digest]; duplicate {
-			t.Errorf("pages %q and %q captured identical frames; the Alt+<number> accelerator did not navigate", previous, name)
+			t.Errorf("captures %q and %q are identical frames; the Alt+<number> accelerator did not navigate, or the setup assistant never presented", previous, name)
 			continue
 		}
 		seen[digest] = name
@@ -225,54 +200,16 @@ func walkthroughOutputDir(t *testing.T) string {
 func decodeFrame(t *testing.T, path string) image.Image {
 	t.Helper()
 
-	frame, err := decodeXWDFile(path)
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("walkthrough capture %s: %v", filepath.Base(path), err)
+	}
+	defer func() { _ = file.Close() }()
+	frame, err := png.Decode(file)
 	if err != nil {
 		t.Fatalf("walkthrough capture %s: %v", filepath.Base(path), err)
 	}
 	return frame
-}
-
-// cropFrame returns the sub-image covering just the application window.
-// A geometry that does not fit inside the frame yields the frame unchanged,
-// since a wrong crop is worse than no crop.
-func cropFrame(frame image.Image, geometry windowGeometry) image.Image {
-	bounds := frame.Bounds()
-	window := image.Rect(
-		bounds.Min.X+geometry.X,
-		bounds.Min.Y+geometry.Y,
-		bounds.Min.X+geometry.X+geometry.Width,
-		bounds.Min.Y+geometry.Y+geometry.Height,
-	)
-	if !window.In(bounds) || window.Empty() {
-		return frame
-	}
-
-	type subImager interface {
-		SubImage(r image.Rectangle) image.Image
-	}
-	if sub, ok := frame.(subImager); ok {
-		return sub.SubImage(window)
-	}
-	return frame
-}
-
-// writePNG re-encodes a capture as a PNG beside it, so the artifacts a human
-// reviews are in a format any viewer opens. A failure here is reported but
-// not fatal: the assertions above already ran against the decoded frame, and
-// losing the convenience copy is not a reason to fail the walkthrough.
-func writePNG(t *testing.T, frame image.Image, path string) {
-	t.Helper()
-
-	file, err := os.Create(path)
-	if err != nil {
-		t.Logf("could not write %s: %v", filepath.Base(path), err)
-		return
-	}
-	defer func() { _ = file.Close() }()
-
-	if err := png.Encode(file, frame); err != nil {
-		t.Logf("could not encode %s: %v", filepath.Base(path), err)
-	}
 }
 
 // frameVariance returns the number of distinct colors in a frame and the
@@ -282,8 +219,8 @@ func frameVariance(frame image.Image) (int, float64) {
 	bounds := frame.Bounds()
 	total := 0
 
-	// Every fourth pixel in each direction: enough to characterize a
-	// 1400x900 frame without decoding cost dominating the test.
+	// Every fourth pixel in each direction: enough to characterize a frame
+	// without decoding cost dominating the test.
 	for y := bounds.Min.Y; y < bounds.Max.Y; y += 4 {
 		for x := bounds.Min.X; x < bounds.Max.X; x += 4 {
 			r, g, b, a := frame.At(x, y).RGBA()
@@ -305,39 +242,47 @@ func frameVariance(frame image.Image) (int, float64) {
 	return len(counts), float64(modal) / float64(total)
 }
 
-// frameDigest returns the raw capture bytes as a comparison key. Two xwd
-// dumps of an unchanged screen are byte-identical, so exact equality is the
-// right test for "navigation never moved".
-func frameDigest(t *testing.T, path string) string {
-	t.Helper()
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("reading %s: %v", path, err)
+// frameDigest hashes a frame's decoded pixels. Two captures of an unchanged
+// screen hold identical pixels, so exact equality is the right test for
+// "navigation never moved", independent of how the encoder compressed them.
+func frameDigest(frame image.Image) string {
+	hash := sha256.New()
+	bounds := frame.Bounds()
+	pixel := make([]byte, 8)
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			r, g, b, a := frame.At(x, y).RGBA()
+			pixel[0], pixel[1] = byte(r>>8), byte(r)
+			pixel[2], pixel[3] = byte(g>>8), byte(g)
+			pixel[4], pixel[5] = byte(b>>8), byte(b)
+			pixel[6], pixel[7] = byte(a>>8), byte(a)
+			hash.Write(pixel)
+		}
 	}
-	return string(data)
+	return string(hash.Sum(nil))
 }
 
-// assertUpdateAllRendered confirms the captured session built the Update All
-// group, and that its plan covers every provider available on the runner.
+// assertAutomaticUpdatesRendered confirms the captured session built the
+// automatic-background-updates switch in its on state.
 //
-// Like the Bluefin groups, a hidden Update All group and a rendered one both
-// produce a plausible Updates page, so the pixel checks cannot tell them
-// apart. The group hides itself when no provider is available, which is a
-// legitimate state — so this asserts the marker exists and names a non-zero
-// plan, rather than asserting a fixed phase count the runner may not have.
-func assertUpdateAllRendered(t *testing.T, outDir string) {
+// Like the Bluefin groups, a hidden switch and a rendered one both produce a
+// plausible Updates page, so the pixel checks cannot tell them apart. The
+// group hides itself on a host with no unattended-update timer, which is a
+// legitimate state and what an unstubbed runner produces —
+// capture_walkthrough.sh supplies a stubbed systemd answer so the shown
+// state is the one captured, and internal/autoupdate's classification table
+// covers the hidden one.
+//
+// There is deliberately no assertion here about the page's update action.
+// It used to check a "views: update all group built" marker emitted by the
+// legacy Update All group; that group is gone, and the status-first shell
+// that replaced it renders from an immutable updateflow.Snapshot whose
+// every phase and action is already covered by internal/updateflow and
+// internal/views/updatepresent table tests. Re-deriving that here would pin
+// a log line rather than a behaviour.
+func assertAutomaticUpdatesRendered(t *testing.T, outDir string) {
 	t.Helper()
 
-	line := findLogLine(t, outDir, "views: update all group built")
-	if strings.Contains(line, "phases=0") {
-		t.Errorf("Update All rendered with an empty plan; the group should have been omitted entirely\n  %s", line)
-	}
-
-	// The automatic-updates switch shares the group. capture_walkthrough.sh
-	// supplies a stubbed systemd answer so the shown state is captured; the
-	// hidden state is what an unstubbed runner produces and is covered by
-	// internal/autoupdate's classification table.
 	autoLine := findLogLine(t, outDir, "views: automatic updates row built")
 	if !strings.Contains(autoLine, "state=on") {
 		t.Errorf("automatic updates row did not render in the on state\n  %s", autoLine)
@@ -396,8 +341,10 @@ func assertBluefinGroupsRendered(t *testing.T, outDir string) {
 		}
 	}
 
-	// The release channel and graphics driver moved to the System page, so
-	// their own marker is what proves they rendered.
+	// The release channel and graphics driver live on the Updates page,
+	// beside the thing that changes them, so their own marker is what
+	// proves they rendered. (They were on the System page until it was
+	// deleted — "about this computer" is GNOME Settings' job.)
 	identity := findLogLine(t, outDir, "views: image identity group built")
 	for _, want := range []string{"variant=dakota", "switchable=true", "driver=standard"} {
 		if !strings.Contains(identity, want) {
@@ -405,13 +352,28 @@ func assertBluefinGroupsRendered(t *testing.T, outDir string) {
 		}
 	}
 
-	// The local-AI row selects its image from the stubbed GPU. The script
-	// stubs an Intel + NVIDIA hybrid, so the captured frame must show the
-	// CUDA stack — the case a vendor-directory catalog gets wrong.
-	ai := findLogLine(t, outDir, "views: ai stack group built")
-	for _, want := range []string{"vendor=nvidia", "accelerator=CUDA", "image=quay.io/ramalama/cuda:latest"} {
+	// Agent Mode is llmman on loopback. The marker is the Agents page's own,
+	// and it names the fixed address so a bind drifting off loopback fails
+	// here as well as in internal/aistack's unit test.
+	ai := findLogLine(t, outDir, "views: agents page built")
+	for _, want := range []string{"runtime=llmman", "address=127.0.0.1:17434", "state="} {
 		if !strings.Contains(ai, want) {
-			t.Errorf("ai stack marker missing %q\n  %s", want, ai)
+			t.Errorf("agents page marker missing %q\n  %s", want, ai)
 		}
 	}
+
+	// The Printers group is floored on Podman, which capture_walkthrough.sh
+	// supplies through CHAIRLIFT_CAPABILITIES. The marker says every family
+	// rendered a row: a screenshot of the Features page must not show a
+	// page where the group silently hid itself. The count comes from the
+	// families table so adding a family does not touch this gate.
+	printers := findLogLine(t, outDir, "views: printers group built")
+	families := len(printerapp.Families())
+	if want := fmt.Sprintf("families=%d", families); !strings.Contains(printers, want) {
+		t.Errorf("printers group marker missing %q\n  %s", want, printers)
+	}
+
+	// Compass is floored on Flatpak, which the capture also supplies, and
+	// renders below the Features screenshot's viewport.
+	findLogLine(t, outDir, "views: compass group built")
 }

@@ -37,7 +37,7 @@ vendor/
 .DS_Store
 Thumbs.db
 /chairlift-updex-helper
-/chairlift-ublue-helper
+/chairlift-helper
 
 # mill worktrees
 .worktrees/
@@ -50,3 +50,6 @@ Thumbs.db
 
 # Screenshot walkthrough output (CHAIRLIFT_WALKTHROUGH_DIR)
 .walkthrough/
+
+# Python bytecode from running the behave suite in test/e2e/features
+__pycache__/

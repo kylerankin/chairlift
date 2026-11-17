@@ -79,6 +79,63 @@ func awaitErr(t *testing.T, done <-chan error) error {
 	}
 }
 
+// TestRunBrewCommandAtKeepsTapInfoOffTheGitHubAPI pins the workaround for
+// Homebrew's intermittent "Error: Broken pipe" from tap-info on Linux: only
+// tap-info runs with HOMEBREW_NO_GITHUB_API, so its "trusted" read is local,
+// and no other command loses GitHub access.
+func TestRunBrewCommandAtKeepsTapInfoOffTheGitHubAPI(t *testing.T) {
+	t.Setenv("HOMEBREW_NO_GITHUB_API", "")
+	script := fakeBrew(t, `printf '%s' "$HOMEBREW_NO_GITHUB_API"`)
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"tap-info", "--installed", "--json"}, "1"},
+		{[]string{"tap-info", "--json", "vendor/tap"}, "1"},
+		{[]string{"info", "--installed", "--json=v2"}, ""},
+		{[]string{"outdated", "--json=v2"}, ""},
+	} {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		out, err := runBrewCommandAt(ctx, script, tc.args...)
+		cancel()
+		if err != nil {
+			t.Fatalf("runBrewCommandAt(%v): %v", tc.args, err)
+		}
+		if out != tc.want {
+			t.Errorf("runBrewCommandAt(%v) saw HOMEBREW_NO_GITHUB_API=%q, want %q", tc.args, out, tc.want)
+		}
+	}
+}
+
+// TestRunBrewCommandAtKeepsBundleReadsFromAutoUpdating pins that the Apps
+// page's per-collection `brew bundle check` never triggers brew's
+// auto-update (which brew runs before every `bundle` subcommand), while
+// install and every other command keep brew's own behaviour.
+func TestRunBrewCommandAtKeepsBundleReadsFromAutoUpdating(t *testing.T) {
+	t.Setenv("HOMEBREW_NO_AUTO_UPDATE", "")
+	script := fakeBrew(t, `printf '%s' "$HOMEBREW_NO_AUTO_UPDATE"`)
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"bundle", "check", "--file=/x.Brewfile"}, "1"},
+		{[]string{"bundle", "check", "--no-upgrade", "--file=/x.Brewfile"}, "1"},
+		{[]string{"bundle", "list"}, "1"},
+		{[]string{"bundle", "install", "--file=/x.Brewfile"}, ""},
+		{[]string{"info", "--installed", "--json=v2"}, ""},
+	} {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		out, err := runBrewCommandAt(ctx, script, tc.args...)
+		cancel()
+		if err != nil {
+			t.Fatalf("runBrewCommandAt(%v): %v", tc.args, err)
+		}
+		if out != tc.want {
+			t.Errorf("runBrewCommandAt(%v) saw HOMEBREW_NO_AUTO_UPDATE=%q, want %q", tc.args, out, tc.want)
+		}
+	}
+}
+
 func TestRunBrewCommandAt(t *testing.T) {
 	t.Run("success captures stdout", func(t *testing.T) {
 		script := fakeBrew(t, `echo "hello from brew"`)
@@ -135,6 +192,118 @@ exit 1`)
 		var trustErr *UntrustedTapError
 		if !errors.As(err, &trustErr) {
 			t.Fatalf("err = %T (%v), want *UntrustedTapError", err, err)
+		}
+	})
+
+	t.Run("bundle install untrusted tap in stdout yields UntrustedTapError", func(t *testing.T) {
+		script := fakeBrew(t, `echo "Error: Refusing to load formula x from untrusted tap foo/bar."
+echo "Error: Homebrew Bundle failed! 1 Brewfile dependency failed to install." >&2
+exit 1`)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		_, err := runBrewCommandAt(ctx, script, "bundle", "install", "--file=/x.Brewfile")
+		if err == nil {
+			t.Fatal("runBrewCommandAt = nil error, want failure")
+		}
+		var trustErr *UntrustedTapError
+		if !errors.As(err, &trustErr) {
+			t.Fatalf("err = %T (%v), want *UntrustedTapError", err, err)
+		}
+		if trustErr.Tap != "foo/bar" {
+			t.Fatalf("trustErr.Tap = %q, want \"foo/bar\"", trustErr.Tap)
+		}
+	})
+
+	// `brew bundle install` prints its untrusted-tap summary on stderr while
+	// the only parseable "from untrusted tap <user>/<tap>" line is replayed on
+	// stdout, so the stderr-matched branch must still recover the tap name
+	// from the combined diagnostic or the toast loses its `brew trust`
+	// guidance.
+	t.Run("untrusted tap summary on stderr still extracts tap from stdout", func(t *testing.T) {
+		script := fakeBrew(t, `echo "Error: Refusing to load formula x from untrusted tap foo/bar.baz."
+echo "Error: the following taps are not trusted" >&2
+exit 1`)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		_, err := runBrewCommandAt(ctx, script, "bundle", "install", "--file=/x.Brewfile")
+		if err == nil {
+			t.Fatal("runBrewCommandAt = nil error, want failure")
+		}
+		var trustErr *UntrustedTapError
+		if !errors.As(err, &trustErr) {
+			t.Fatalf("err = %T (%v), want *UntrustedTapError", err, err)
+		}
+		if trustErr.Tap != "foo/bar.baz" {
+			t.Fatalf("trustErr.Tap = %q, want \"foo/bar.baz\"", trustErr.Tap)
+		}
+	})
+
+	t.Run("warning on untrusted taps on stdout with No such formula yields Error not UntrustedTapError", func(t *testing.T) {
+		script := fakeBrew(t, `echo "Warning: The following taps are not trusted:
+  some/untrusted-tap"
+echo "Error: No such formula" >&2
+exit 1`)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		_, err := runBrewCommandAt(ctx, script, "bundle", "install", "--file=/x.Brewfile")
+		if err == nil {
+			t.Fatal("runBrewCommandAt = nil error, want failure")
+		}
+		var trustErr *UntrustedTapError
+		if errors.As(err, &trustErr) {
+			t.Fatalf("err = %T (%v), want regular *Error instead of *UntrustedTapError", err, err)
+		}
+	})
+
+	// A third-party installer's stdout is replayed into the diagnostic, so a
+	// forged "from untrusted tap" line there must not reclassify an unrelated
+	// failure of a non-bundle command: the toast would otherwise tell the user
+	// to run `brew trust` on a tap the attacker picked.
+	t.Run("forged untrusted tap line on stdout of a non-bundle command yields Error", func(t *testing.T) {
+		script := fakeBrew(t, `echo "Error: Refusing to load formula x from untrusted tap attacker/evil."
+echo "Error: Failure while executing; git exited with 1." >&2
+exit 1`)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		_, err := runBrewCommandAt(ctx, script, "install", "somepkg")
+		if err == nil {
+			t.Fatal("runBrewCommandAt = nil error, want failure")
+		}
+		var trustErr *UntrustedTapError
+		if errors.As(err, &trustErr) {
+			t.Fatalf("err = %T (%v), want regular *Error instead of *UntrustedTapError", err, err)
+		}
+	})
+
+	// When stderr does corroborate the trust failure, a non-bundle command is
+	// still classified as an untrusted-tap error, but the tap name may only
+	// come from stderr — never from the replayed stdout an installer controls.
+	t.Run("untrusted tap on stderr of a non-bundle command ignores a stdout tap name", func(t *testing.T) {
+		script := fakeBrew(t, `echo "Error: Refusing to load formula x from untrusted tap attacker/evil."
+echo "Error: the following taps are not trusted" >&2
+exit 1`)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		_, err := runBrewCommandAt(ctx, script, "upgrade", "somepkg")
+		if err == nil {
+			t.Fatal("runBrewCommandAt = nil error, want failure")
+		}
+		var trustErr *UntrustedTapError
+		if !errors.As(err, &trustErr) {
+			t.Fatalf("err = %T (%v), want *UntrustedTapError", err, err)
+		}
+		if trustErr.Tap != "" {
+			t.Fatalf("trustErr.Tap = %q, want \"\" (stdout must not name the tap)", trustErr.Tap)
 		}
 	})
 
@@ -281,6 +450,67 @@ sleep 300`)
 	}
 }
 
+func TestRunBrewCommandAtBoundsMutationOutput(t *testing.T) {
+	t.Run("successful mutation discards stdout", func(t *testing.T) {
+		script := fakeBrew(t, "printf '%s' '"+strings.Repeat("x", commandOutputTailLimit+1)+"'")
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		out, err := runBrewCommandAt(ctx, script, "update")
+		if err != nil {
+			t.Fatalf("runBrewCommandAt: %v", err)
+		}
+		if out != "" {
+			t.Fatalf("stdout = %q, want discarded mutation output", out)
+		}
+	})
+
+	// Issue #140: `brew bundle install` replays a failing entry's own
+	// installer output on stdout and prints its summary on stderr. Keeping
+	// stderr alone — the old behaviour whenever stderr was non-empty — threw
+	// away the only line that said why the entry failed.
+	t.Run("failed mutation reports the cause from either stream", func(t *testing.T) {
+		script := fakeBrew(t, `echo "Installing io.podman_desktop.PodmanDesktop"
+echo 'error: Remote "flathub" not found'
+echo "Error: Homebrew Bundle failed! 1 Brewfile dependency failed to install." >&2
+exit 1`)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		_, err := runBrewCommandAt(ctx, script, "bundle", "install", "--file=/usr/share/ublue-os/homebrew/system-dx-flatpaks.Brewfile")
+		if err == nil {
+			t.Fatal("runBrewCommandAt = nil error, want failure")
+		}
+		if !strings.Contains(err.Error(), `Remote "flathub" not found`) {
+			t.Errorf("error = %q, want the installer's own cause from stdout", err.Error())
+		}
+		if strings.Contains(err.Error(), "Installing io.podman_desktop") {
+			t.Errorf("error = %q, want the progress line left out of the summary", err.Error())
+		}
+	})
+
+	t.Run("failed mutation reports stderr tail", func(t *testing.T) {
+		stderr := "prefix-marker" + strings.Repeat("x", commandOutputTailLimit) + "tail-marker"
+		script := fakeBrew(t, "printf '%s' '"+stderr+"' >&2\nexit 3")
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		_, err := runBrewCommandAt(ctx, script, "update")
+		if err == nil {
+			t.Fatal("runBrewCommandAt = nil error, want failure")
+		}
+		if strings.Contains(err.Error(), "prefix-marker") {
+			t.Fatalf("error retained dropped prefix: %q", err.Error())
+		}
+		if !strings.Contains(err.Error(), "tail-marker") {
+			t.Fatalf("error = %q, want retained tail marker", err.Error())
+		}
+	})
+}
+
 // waitForPID polls pidFile until the fake script has recorded its background
 // helper's PID, failing rather than hanging if it never does.
 func waitForPID(t *testing.T, pidFile string) int {
@@ -294,4 +524,134 @@ func waitForPID(t *testing.T, pidFile string) int {
 	}
 	t.Fatalf("fake script never wrote a PID to %s", pidFile)
 	return 0
+}
+
+// TestUpdatePropagatesContextCancellation proves the Update All fix: the Homebrew
+// phase runs under the run's context, so cancelling the run stops the in-flight
+// update instead of the command ignoring the parent and running to its own
+// 30-minute budget.
+func TestUpdatePropagatesContextCancellation(t *testing.T) {
+	// A fake brew that sleeps far past the cancellation: a version of Update
+	// that ignored the context would run to its 30-minute mutation budget. The
+	// script is named "brew" so the command resolves it on PATH.
+	dir := t.TempDir()
+	script := filepath.Join(dir, "brew")
+	pidFile := filepath.Join(dir, "self.pid")
+	content := "#!/bin/sh\necho $$ > \"" + pidFile + "\"\nsleep 30\n"
+	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if pid, err := readPID(pidFile); err == nil {
+			killPID(pid)
+		}
+	})
+	// Resolve the fake "brew" on PATH while keeping the real tools the
+	// script's `sleep` still needs.
+	origPath := os.Getenv("PATH")
+	t.Setenv("PATH", filepath.Dir(script)+string(os.PathListSeparator)+origPath)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- Update(ctx) }()
+
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+
+	err := awaitErr(t, done)
+	if err == nil {
+		t.Fatal("Update = nil error, want cancellation failure")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("Update error = %v, want errors.Is(err, context.Canceled)", err)
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		t.Error("Update error must not classify as a deadline")
+	}
+}
+
+func TestUpgradeHonorsCanceledContext(t *testing.T) {
+	argvLog := fakeBrewOnPath(t, "exit 0")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := Upgrade(ctx, ""); !errors.Is(err, context.Canceled) {
+		t.Errorf("Upgrade(canceled context) = %v, want context.Canceled", err)
+	}
+	assertArgv(t, argvLog, nil)
+}
+
+// A read-only command that fails keeps its whole stderr in the error: nothing
+// else preserves it (the failure log line is reserved for state-changing
+// commands), and callers such as searchKind match on the full text.
+func TestReadOnlyFailureKeepsFullStderr(t *testing.T) {
+	exe := fakeBrew(t, `echo "Warning: tap is shallow" >&2
+echo "Error: No formulae or casks found for \"demo\"." >&2
+exit 1`)
+
+	_, err := runBrewCommandAt(context.Background(), exe, "search", "--formula", "demo")
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	for _, want := range []string{"Warning: tap is shallow", `Error: No formulae or casks found for "demo".`} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("read-only failure lost %q: %q", want, err.Error())
+		}
+	}
+}
+
+// A state-changing command is distilled to the installer's own error line so
+// the toast stays readable; the full output goes to the log instead.
+func TestStateChangingFailureIsSummarized(t *testing.T) {
+	exe := fakeBrew(t, `echo "==> Installing demo"
+echo "==> Pouring demo.bottle.tar.gz"
+echo "Error: donor bottle is corrupt" >&2
+exit 1`)
+
+	_, err := runBrewCommandAt(context.Background(), exe, "install", "demo")
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if got, want := err.Error(), "Brew command failed: Error: donor bottle is corrupt"; got != want {
+		t.Errorf("state-changing failure = %q, want %q", got, want)
+	}
+}
+
+// A failed `brew bundle install` exposes the entry's own diagnosis as Detail,
+// so the Apps page can say which entry failed and why instead of a generic
+// "try again" (issue #732). The output is the reported Fonts failure: brew
+// replays the failing entry on stdout and restates it on stderr.
+func TestBundleFailureCarriesTheEntryDiagnosis(t *testing.T) {
+	exe := fakeBrew(t, `echo "Using colindean/fonts-nonfree"
+echo "Installing font-opendyslexic"
+echo "Using font-arial"
+echo "Error: font-opendyslexic: Cask 'font-opendyslexic' has been disabled because it is no longer reliably reachable upstream! It was disabled on 2026-09-27."
+echo "Installing font-opendyslexic has failed!" >&2
+echo "brew bundle failed! 1 Brewfile dependency failed to install" >&2
+exit 1`)
+
+	_, err := runBrewCommandAt(context.Background(), exe, "bundle", "install", "--file=/b/fonts.Brewfile")
+	var brewErr *Error
+	if !errors.As(err, &brewErr) {
+		t.Fatalf("error = %v (%T), want *homebrew.Error", err, err)
+	}
+	want := "Error: font-opendyslexic: Cask 'font-opendyslexic' has been disabled because it is no longer reliably reachable upstream! It was disabled on 2026-09-27."
+	if brewErr.Detail != want {
+		t.Errorf("Detail = %q, want %q", brewErr.Detail, want)
+	}
+}
+
+// A read-only failure keeps its whole stderr in Message and offers no Detail:
+// that text is not a bounded one-line diagnosis a toast could quote.
+func TestReadOnlyFailureHasNoDetail(t *testing.T) {
+	exe := fakeBrew(t, `echo "Error: No formulae or casks found for \"demo\"." >&2
+exit 1`)
+
+	_, err := runBrewCommandAt(context.Background(), exe, "search", "--formula", "demo")
+	var brewErr *Error
+	if !errors.As(err, &brewErr) {
+		t.Fatalf("error = %v (%T), want *homebrew.Error", err, err)
+	}
+	if brewErr.Detail != "" {
+		t.Errorf("Detail = %q, want empty for a read-only command", brewErr.Detail)
+	}
 }

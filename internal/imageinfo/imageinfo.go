@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
 )
 
@@ -32,6 +33,13 @@ type Info struct {
 	Ref    string `json:"image-ref"`
 	Vendor string `json:"image-vendor"`
 	Flavor string `json:"image-flavor"`
+
+	// BootedRef is the reference the machine actually booted, recorded at
+	// boot rather than baked at build time. It is not part of the
+	// descriptor: Detect fills it from BootedImagePath, and it stays empty
+	// on a host that does not publish the marker. See EffectiveTag for why
+	// the baked image-tag cannot be trusted on its own.
+	BootedRef string `json:"-"`
 }
 
 // Variant identifies which supported OS is running.
@@ -113,7 +121,6 @@ type imageChannels struct {
 //
 //	ghcr.io/ublue-os/bluefin:latest                 200
 //	ghcr.io/ublue-os/bluefin:stable                 200
-//	ghcr.io/ublue-os/bluefin:gts                    200
 //	ghcr.io/ublue-os/bluefin:beta                   200
 //	ghcr.io/ublue-os/bluefin:lts                    200
 //	ghcr.io/ublue-os/bluefin:lts-testing            200
@@ -128,6 +135,83 @@ type imageChannels struct {
 //	ghcr.io/projectbluefin/dakota:stable            200
 //	ghcr.io/projectbluefin/dakota:testing           200
 //
+// Every tag above was re-probed on 2026-09-21, and the dakota family was
+// extended, because the alpha's own host runs
+// ghcr.io/projectbluefin/dakota-gaming — a separately published image that
+// no entry covered, so a gaming host was offered no channel switch at all:
+//
+//	ghcr.io/ublue-os/bluefin:latest                      200
+//	ghcr.io/ublue-os/bluefin:stable                      200
+//	ghcr.io/ublue-os/bluefin:stable-daily                200
+//	ghcr.io/ublue-os/bluefin:lts                         200
+//	ghcr.io/ublue-os/bluefin:lts-hwe                     200
+//	ghcr.io/ublue-os/bluefin:lts-testing                 200
+//	ghcr.io/ublue-os/bluefin:lts-hwe-testing             200
+//	ghcr.io/ublue-os/bluefin:beta                        404  <- was 200 on 2026-08-17
+//	ghcr.io/ublue-os/bluefin:testing                     404
+//	ghcr.io/ublue-os/bluefin-nvidia:latest               200
+//	ghcr.io/ublue-os/bluefin-nvidia:stable               200
+//	ghcr.io/ublue-os/bluefin-nvidia:stable-daily         200
+//	ghcr.io/ublue-os/bluefin-nvidia:beta                 200  <- base is 404, so unreachable
+//	ghcr.io/ublue-os/bluefin-nvidia:lts                  404
+//	ghcr.io/ublue-os/bluefin-nvidia:lts-hwe              404
+//	ghcr.io/ublue-os/bluefin-nvidia-open:latest          200
+//	ghcr.io/ublue-os/bluefin-nvidia-open:stable          200
+//	ghcr.io/ublue-os/bluefin-nvidia-open:stable-daily    200
+//	ghcr.io/ublue-os/bluefin-nvidia-open:beta            404
+//	ghcr.io/ublue-os/bluefin-nvidia-open:lts             404
+//	ghcr.io/ublue-os/bluefin-nvidia-open:lts-hwe         404
+//	ghcr.io/projectbluefin/bluefin-lts:lts               200
+//	ghcr.io/projectbluefin/bluefin-lts:stable            200
+//	ghcr.io/projectbluefin/bluefin-lts:testing           200
+//	ghcr.io/projectbluefin/bluefin-lts:lts-testing       404
+//	ghcr.io/projectbluefin/dakota:latest                 200
+//	ghcr.io/projectbluefin/dakota:stable                 200
+//	ghcr.io/projectbluefin/dakota:testing                200
+//	ghcr.io/projectbluefin/dakota:next                   200
+//	ghcr.io/projectbluefin/dakota:btw                    200
+//	ghcr.io/projectbluefin/dakota:beta                   404
+//	ghcr.io/projectbluefin/dakota-nvidia:latest          404  <- was 200 on 2026-08-17
+//	ghcr.io/projectbluefin/dakota-nvidia:stable          200
+//	ghcr.io/projectbluefin/dakota-nvidia:testing         200
+//	ghcr.io/projectbluefin/dakota-nvidia:next            200
+//	ghcr.io/projectbluefin/dakota-nvidia:btw             200
+//	ghcr.io/projectbluefin/dakota-gaming:latest          404  <- the descriptor's own tag
+//	ghcr.io/projectbluefin/dakota-gaming:stable          200
+//	ghcr.io/projectbluefin/dakota-gaming:testing         200
+//	ghcr.io/projectbluefin/dakota-gaming:next            200
+//	ghcr.io/projectbluefin/dakota-gaming:btw             200
+//	ghcr.io/projectbluefin/dakota-nvidia-gaming:latest   404
+//	ghcr.io/projectbluefin/dakota-nvidia-gaming:stable   200
+//	ghcr.io/projectbluefin/dakota-nvidia-gaming:testing  200
+//	ghcr.io/projectbluefin/dakota-nvidia-gaming:next     200
+//	ghcr.io/projectbluefin/dakota-nvidia-gaming:btw      200
+//
+// Three results from that pass are load-bearing rather than trivia.
+//
+// "beta" is retired. It was 200 on 2026-08-17 and is 404 now, so it is gone
+// from the bluefin entry below and from the driver table in variants.go —
+// bluefin-nvidia:beta still resolves, but with no base image to return to
+// it is a one-way trip and must not be offered.
+//
+// "next" and "btw" are the same image, not two streams: they resolved to
+// one digest on every dakota repository probed, and projectbluefin/dakota's
+// publish.yml pushes :btw as an alias immediately after :next, for builds
+// of the `next` branch only ("rolling GNOME master / bleeding edge"). That
+// makes them a third stream below testing, not a stable or testing
+// counterpart of anything, so neither is classified here — a guess in
+// either direction would be the tag-keyed-map mistake in another form.
+//
+// The gaming images publish no "latest", yet this machine's
+// /usr/share/ublue-os/image-info.json declares image-tag "latest" for
+// ghcr.io/projectbluefin/dakota-gaming — a tag GHCR answered 404 for on
+// 2026-09-21. That is not a table problem and must not be papered over by
+// listing a dead tag. It is a Dakota build property: promotion retags an
+// existing digest instead of rebuilding, so every Dakota image bakes
+// "latest" whatever stream it ships on, which projectbluefin/dakota states
+// in elements/bluefin/common.bst. The machine's real stream comes from the
+// boot-time marker instead — see EffectiveTag and BootedImagePath.
+//
 // Do not collapse this back into a single tag-keyed map: a wrong target is
 // not a cosmetic bug, it is a failed `bootc switch` on someone's OS.
 //
@@ -137,10 +221,14 @@ type imageChannels struct {
 // override rather than by editing this map; see channels.go.
 var imageChannelMap = map[string]imageChannels{
 	// Bluefin Stable and the LTS streams published on the same image. Only
-	// the LTS streams have testing counterparts; latest/stable/gts/beta do
-	// not, so a Bluefin Stable host correctly offers no channel switch.
+	// the LTS streams have testing counterparts; latest/stable/stable-daily
+	// do not, so a Bluefin Stable host correctly offers no channel switch.
+	// "beta" is gone: it was 200 on 2026-08-17 and 404 on 2026-09-21.
+	// "gts" is not offered by product decision, not because it vanished:
+	// ghcr.io/ublue-os/bluefin:gts still answered 200 on 2026-09-26. Do not
+	// add it back to match the registry.
 	"ghcr.io/ublue-os/bluefin": {
-		stableTags:  []string{"latest", "stable", "stable-daily", "gts", "beta", "lts", "lts-hwe"},
+		stableTags:  []string{"latest", "stable", "stable-daily", "lts", "lts-hwe"},
 		testingTags: []string{"lts-testing", "lts-hwe-testing"},
 		toTesting: map[string]string{
 			"lts":     "lts-testing",
@@ -175,26 +263,27 @@ var imageChannelMap = map[string]imageChannels{
 		},
 		toStable: map[string]string{"testing": "stable"},
 	},
+	// The gaming flavour is a separate published image, not a tag of the
+	// base one, and its name does not reduce to "dakota" — so without its
+	// own row a gaming host matched no entry and was offered no switch.
+	// It publishes "stable" and "testing" but no "latest".
+	"ghcr.io/projectbluefin/dakota-gaming": {
+		stableTags:  []string{"stable"},
+		testingTags: []string{"testing"},
+		toTesting:   map[string]string{"stable": "testing"},
+		toStable:    map[string]string{"testing": "stable"},
+	},
 }
 
 // channelsFor returns the channel table entry for a clean registry path. It
 // resolves through the active table, which is the compiled-in
 // imageChannelMap unless an administrator or image maintainer has supplied
-// an override — see channels.go. Images beyond the three Bluefin-family ones
-// (TunaOS, a downstream rebuild, a private registry) are added that way,
-// without a code change.
+// an override — see channels.go. Images beyond the Bluefin-family ones the
+// table names (TunaOS, a downstream rebuild, a private registry) are added
+// that way, without a code change.
 func channelsFor(cleanRef string) (imageChannels, bool) {
 	channels, ok := activeTable[cleanRef]
 	return channels, ok
-}
-
-func contains(values []string, want string) bool {
-	for _, value := range values {
-		if value == want {
-			return true
-		}
-	}
-	return false
 }
 
 // Parse decodes an image descriptor. It returns an error for malformed JSON
@@ -228,9 +317,46 @@ func Load(path string) (Info, error) {
 	return Parse(file)
 }
 
-// Detect loads the descriptor from its fixed system path.
+// BootedImagePath is the fixed path ublue-booted-image.service writes the
+// booted image reference to at boot. It is root-owned, world-readable, and
+// lives on tmpfs, so reading it needs no privilege and cannot be forged by
+// an unprivileged user — which matters, because the privileged helper
+// resolves its `bootc switch` target through the same Info this produces.
+//
+// It exists because the descriptor's baked image-tag is not a reliable
+// statement of the running stream on every image. See EffectiveTag.
+const BootedImagePath = "/run/ublue-os/booted-image"
+
+// Detect loads the descriptor from its fixed system path and overlays the
+// boot-time reference when the host records one. Both the GUI and the
+// privileged helper call this, so both see the same running stream.
 func Detect() (Info, error) {
-	return Load(DescriptorPath)
+	info, err := Load(DescriptorPath)
+	if err != nil {
+		return info, err
+	}
+	info.BootedRef = readBootedRef(BootedImagePath)
+	return info, nil
+}
+
+// readBootedRef returns the first line of the boot-time marker, or "" when
+// the host does not publish one. A missing marker is the ordinary case on
+// every image that bakes its tag correctly, so it is not an error.
+func readBootedRef(path string) string {
+	file, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer func() { _ = file.Close() }()
+
+	// The marker holds one reference. Bound the read so a corrupt or
+	// substituted file cannot make startup allocate without limit.
+	data, err := io.ReadAll(io.LimitReader(file, 1024))
+	if err != nil {
+		return ""
+	}
+	line, _, _ := strings.Cut(string(data), "\n")
+	return strings.TrimSpace(line)
 }
 
 // Variant identifies the running OS from the image name, falling back to the
@@ -248,6 +374,37 @@ func (i Info) Variant() Variant {
 	default:
 		return VariantUnknown
 	}
+}
+
+// gamingFlavor is the value ublue-os writes to image-flavor on the images
+// that ship the gaming stack preinstalled.
+const gamingFlavor = "gaming"
+
+// gamingSuffix is the image-name suffix those images carry, e.g.
+// "dakota-gaming" and "dakota-nvidia-gaming".
+const gamingSuffix = "-gaming"
+
+// IsGaming reports whether the running image already ships the gaming stack.
+//
+// The gaming images (dakota-gaming, dakota-nvidia-gaming) carry Steam and the
+// rest of the stack as system packages. This classification drives the Game
+// Mode image switch and the default gaming panel mark, not Flatpak management.
+//
+// Two signals are accepted because only the first is authoritative and it is
+// not present on every descriptor: the descriptor's own image-flavor, and the
+// "-gaming" suffix on the image name. Either one is enough. Both are compared
+// case-insensitively, and the suffix is checked against the image name and
+// the clean ref so a descriptor carrying only one of them still matches.
+func (i Info) IsGaming() bool {
+	if strings.EqualFold(strings.TrimSpace(i.Flavor), gamingFlavor) {
+		return true
+	}
+	for _, name := range []string{i.Name, i.CleanRef()} {
+		if strings.HasSuffix(strings.ToLower(strings.TrimSpace(name)), gamingSuffix) {
+			return true
+		}
+	}
+	return false
 }
 
 // CleanRef returns the image ref with any ostree/docker transport prefix and
@@ -306,18 +463,73 @@ func stripTag(ref string) string {
 	return ref[:index]
 }
 
-// EffectiveTag returns the running image tag, falling back to the tag
-// embedded in the image ref when the descriptor omits image-tag.
+// hasTag reports whether ref carries a trailing image tag, e.g.
+// "ghcr.io/org/img:latest". A colon that sits before the first slash is a
+// registry port ("registry.example:5000/org/img"), which the channel-table
+// validation accepts; only a trailing tag is rejected.
+func hasTag(ref string) bool {
+	if index := strings.LastIndex(ref, ":"); index >= 0 {
+		return !strings.Contains(ref[index:], "/")
+	}
+	return false
+}
+
+// EffectiveTag returns the running image tag: the boot-time marker's tag
+// when the host records one for this same image, then the descriptor's
+// image-tag, then the tag embedded in the image ref.
+//
+// The marker comes first because the baked image-tag is not a per-stream
+// value on every image. Dakota promotes a stream by retagging an existing
+// digest rather than rebuilding, so every Dakota image — base, nvidia, and
+// gaming — bakes image-tag "latest" whatever stream it is published on.
+// (projectbluefin/dakota states this in elements/bluefin/common.bst, where
+// it patches fastfetch to read the same marker.) Trusting the baked value
+// on a gaming host claims the tag "latest", which that image does not
+// publish at all — observed 2026-09-21 on a dakota-gaming machine whose
+// descriptor said "latest" while the marker said
+// ghcr.io/projectbluefin/dakota-gaming:testing.
+//
+// The marker is only honoured for the image the descriptor names, so a
+// stale marker left by a previous deployment of a different image cannot
+// move this host onto another image's streams. A marker that names this
+// image by digest rather than by tag yields no tag at all, which is the
+// honest answer for a pinned host: no stream, and no switch offered.
 func (i Info) EffectiveTag() string {
+	if tag, ok := i.bootedTag(); ok {
+		return tag
+	}
 	if i.Tag != "" {
 		return i.Tag
 	}
-	ref := stripTransport(i.Ref)
-	index := strings.LastIndex(ref, ":")
-	if index < 0 || strings.Contains(ref[index:], "/") {
+	return tagOf(stripTransport(i.Ref))
+}
+
+// bootedTag returns the tag recorded by the boot-time marker. ok is false
+// when there is no usable marker for this image, which is every host that
+// does not publish one.
+func (i Info) bootedTag() (string, bool) {
+	ref := stripTransport(i.BootedRef)
+	if ref == "" {
+		return "", false
+	}
+	// A digest-pinned marker names no stream. Report that rather than
+	// letting the baked tag answer for it.
+	if index := strings.LastIndex(ref, "@"); index >= 0 {
+		return "", stripTag(ref[:index]) == i.CleanRef()
+	}
+	if stripTag(ref) != i.CleanRef() {
+		return "", false
+	}
+	return tagOf(ref), true
+}
+
+// tagOf returns the trailing image tag of a transport-free reference, or ""
+// when it carries none.
+func tagOf(ref string) string {
+	if !hasTag(ref) {
 		return ""
 	}
-	return ref[index+1:]
+	return ref[strings.LastIndex(ref, ":")+1:]
 }
 
 // Channel reports the release stream the running tag tracks. It is resolved
@@ -335,9 +547,9 @@ func (i Info) Channel() Channel {
 		return ChannelUnknown
 	}
 	switch {
-	case contains(channels.testingTags, tag):
+	case slices.Contains(channels.testingTags, tag):
 		return ChannelTesting
-	case contains(channels.stableTags, tag):
+	case slices.Contains(channels.stableTags, tag):
 		return ChannelStable
 	default:
 		return ChannelUnknown
@@ -351,7 +563,7 @@ func (i Info) Channel() Channel {
 // tag whose image publishes no testing counterpart.
 //
 // That last case is not hypothetical: it is every ghcr.io/ublue-os/bluefin
-// host on latest, stable, gts, or beta.
+// host on latest or stable.
 func TargetTag(cleanRef, currentTag string, channel Channel) (string, bool) {
 	if currentTag == "" {
 		return "", false
@@ -363,13 +575,13 @@ func TargetTag(cleanRef, currentTag string, channel Channel) (string, bool) {
 
 	switch channel {
 	case ChannelTesting:
-		if contains(channels.testingTags, currentTag) {
+		if slices.Contains(channels.testingTags, currentTag) {
 			return "", false // already on testing
 		}
 		target, ok := channels.toTesting[currentTag]
 		return target, ok
 	case ChannelStable:
-		if contains(channels.stableTags, currentTag) {
+		if slices.Contains(channels.stableTags, currentTag) {
 			return "", false // already on stable
 		}
 		target, ok := channels.toStable[currentTag]
@@ -394,4 +606,11 @@ func (i Info) SwitchTarget(channel Channel) (string, bool) {
 		return "", false
 	}
 	return ref + ":" + tag, true
+}
+
+// KnownStream reports whether stream belongs to this image's authoritative
+// channel table. Dated tags must recover their stream before calling it.
+func KnownStream(cleanRef, stream string) bool {
+	channels, ok := channelsFor(cleanRef)
+	return ok && (slices.Contains(channels.stableTags, stream) || slices.Contains(channels.testingTags, stream))
 }

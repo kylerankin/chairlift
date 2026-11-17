@@ -1,27 +1,20 @@
-# Documentation Consistency Checklist
+# Documentation changes
 
-The current-state vs historical classification below, and its enforcement by
-string-matching unit tests in `internal/installcheck/documentation_test.go`,
-are decision record
-[ADR-0010](adr/0010-docs-are-a-ci-gated-artifact.md).
+Update a guide when a scoped change makes its existing claims inaccurate.
+Do not require a documentation edit for every source change.
 
-Use this checklist whenever behavior, configuration, dependencies, or
-installation layout changes:
+- Verify configuration against `internal/config` and `config.yml`; built-in
+  defaults and image overrides are different inputs. [CONFIG.md](../CONFIG.md)
+  is the configuration reference, not a second schema to maintain elsewhere.
+- Verify commands, privilege paths, and install layout against live callers,
+  `Makefile`, `.goreleaser.yaml`, and the matching PolicyKit policies.
+- Prefer links to owners over copied versions, symbol inventories and code.
+- Keep accepted ADRs as decision history. When retiring a referenced artifact,
+  repair a historical citation with a revision-pinned history link rather than
+  retaining an obsolete design or rewriting the decision.
+- Fix inbound links when deleting docs. Do not replace removed material with
+  another archive, correction ledger, audit snapshot, or compulsory skill update.
+- Root `README.md` is human-owned. Report drift there rather than editing it.
 
-- Compare documented page/group keys with `config.yml`, `Config`, and the
-  actual `IsGroupEnabled` guards. Run
-  `go test ./internal/config ./internal/navigation`.
-- Copy dependency versions from `go.mod`; do not retain a version claim from a
-  plan or release note.
-- Trace optional-tool visibility in the page builder and its async loader.
-  Distinguish static config-driven page omission from runtime group hiding,
-  unavailable placeholders, and visible error/status rows.
-- Check commands and installation destinations against `Makefile`,
-  `.goreleaser.yaml`, fixed helper constants, and PolicyKit annotations. Run a
-  `make -n install` dry run when installation text changes.
-- Treat `README-go-port.md` and files under `docs/plans/` (except category
-  `TEMPLATE.md` files) and `docs/superpowers/` as historical. Current-state
-  claims belong in `README.md`, `CONFIG.md`, `docs/index.md`,
-  `docs/reference.md`, `docs/design/` (formerly `yeti/`), and `docs/specs/`.
-- Run `make ci`, then grep current-state documentation for the obsolete term,
-  key, version, or path that prompted the change.
+Check the affected links and relevant gates. A test pinning incidental prose or
+requiring duplicate inventories is not a reason to retain that prose.

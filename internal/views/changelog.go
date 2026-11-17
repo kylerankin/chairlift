@@ -25,11 +25,9 @@ const changelogTimeout = 3 * time.Minute
 // to the registry; the pure diff it feeds is covered by fixtures.
 var fetchSBOM sbom.FetchFunc = (&sbom.RegistryClient{}).Fetch
 
-// buildChangelogRow adds the "What's Changing" drill-down inside the
-// staged-update expander. It is a row rather than a page: the diff only
-// means anything relative to a specific staged update, and a top-level page
-// would have to invent an answer for a system with nothing staged.
-func (uh *UserHome) buildChangelogRow(expander *adw.ExpanderRow) {
+// buildChangelogRow keeps Compare visible beside the optional download details.
+// Its result sections remain expandable, but the action needs no disclosure.
+func (uh *UserHome) buildChangelogRow(group *adw.PreferencesGroup) {
 	row := adw.NewActionRow()
 	presentation := pageview.ChangelogRow(false)
 	row.SetTitle(presentation.Title)
@@ -46,7 +44,8 @@ func (uh *UserHome) buildChangelogRow(expander *adw.ExpanderRow) {
 	button.ConnectClicked(&clickedCb)
 	row.AddSuffix(&button.Widget)
 
-	expander.AddRow(&row.Widget)
+	group.Add(&row.Widget)
+	uh.changelogGroup = group
 	uh.changelogRow = row
 	uh.changelogButton = button
 }
@@ -63,13 +62,24 @@ func (uh *UserHome) refreshChangelogAvailability(status *bootc.Status) {
 		booted = sbom.PinnedReference(status.Status.Booted.ImageRef(), status.Status.Booted.Digest())
 		staged = sbom.PinnedReference(status.Status.Staged.ImageRef(), status.Status.Staged.Digest())
 	}
+	changed := booted != uh.changelogBooted || staged != uh.changelogStaged
+	if changed {
+		if uh.changelogGroup != nil {
+			for _, section := range uh.changelogSections {
+				uh.changelogGroup.Remove(&section.Widget)
+			}
+		}
+		uh.changelogSections = nil
+	}
 
 	uh.changelogBooted = booted
 	uh.changelogStaged = staged
 
 	available := booted != "" && staged != ""
-	uh.changelogButton.SetSensitive(available)
-	uh.changelogRow.SetSubtitle(pageview.ChangelogRow(available).Subtitle)
+	if changed && uh.changelogButton.GetLabel() != pageview.ChangelogComparingLabel {
+		uh.changelogButton.SetSensitive(available)
+		uh.changelogRow.SetSubtitle(pageview.ChangelogRow(available).Subtitle)
+	}
 }
 
 // onChangelogClicked fetches both SBOMs and renders the diff.
@@ -83,25 +93,31 @@ func (uh *UserHome) onChangelogClicked() {
 	booted, staged := uh.changelogBooted, uh.changelogStaged
 
 	button.SetSensitive(false)
-	button.SetLabel("Comparing...")
-	row.SetSubtitle("Downloading both package lists...")
+	button.SetLabel(pageview.ChangelogComparingLabel)
+	row.SetSubtitle("Downloading details of both versions…")
 
 	go func() {
-		defer uh.changelogGate.Reset()
-
 		ctx, cancel := context.WithTimeout(context.Background(), changelogTimeout)
 		defer cancel()
 
 		result, err := sbom.Compare(ctx, fetchSBOM, booted, staged)
 
 		sgtk.RunOnMainThread(func() {
+			defer uh.changelogGate.Reset()
+			if booted != uh.changelogBooted || staged != uh.changelogStaged {
+				available := uh.changelogBooted != "" && uh.changelogStaged != ""
+				button.SetSensitive(available)
+				button.SetLabel("Compare")
+				row.SetSubtitle(pageview.ChangelogRow(available).Subtitle)
+				return
+			}
 			button.SetSensitive(true)
 			button.SetLabel("Compare")
 
 			if err != nil {
 				log.Printf("changelog: %v", err)
 				row.SetSubtitle(pageview.ChangelogRow(true).Subtitle)
-				uh.toastAdder.ShowErrorToast(fmt.Sprintf("Could not compare images: %v", err))
+				uh.toastAdder.ShowErrorToast("Couldn't compare the two versions. Check your internet connection.")
 				return
 			}
 
@@ -115,7 +131,7 @@ func (uh *UserHome) onChangelogClicked() {
 // changelog row. A repeat comparison must replace them rather than stack a
 // second copy underneath the first.
 func (uh *UserHome) renderChangelogSections(result sbom.Result) {
-	parent := uh.bootcStageExpander
+	parent := uh.changelogGroup
 	if parent == nil {
 		return
 	}
@@ -128,16 +144,26 @@ func (uh *UserHome) renderChangelogSections(result sbom.Result) {
 	for _, section := range pageview.ChangelogSections(result) {
 		expander := adw.NewExpanderRow()
 		expander.SetTitle(section.Title)
-		expander.SetSubtitle(fmt.Sprintf("%d package(s)", len(section.Entries)))
+		expander.SetSubtitle(programCount(len(section.Entries)))
 
 		for _, entry := range section.Entries {
 			row := adw.NewActionRow()
+			row.SetUseMarkup(false)
 			row.SetTitle(entry.Title)
 			row.SetSubtitle(entry.Subtitle)
 			expander.AddRow(&row.Widget)
 		}
 
-		parent.AddRow(&expander.Widget)
+		parent.Add(&expander.Widget)
 		uh.changelogSections = append(uh.changelogSections, expander)
 	}
+}
+
+// programCount names what a section holds in words a person reads, rather
+// than the "N package(s)" shape a report generator would produce.
+func programCount(count int) string {
+	if count == 1 {
+		return "1 program"
+	}
+	return fmt.Sprintf("%d programs", count)
 }

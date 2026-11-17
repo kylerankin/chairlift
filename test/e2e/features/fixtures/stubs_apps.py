@@ -1,0 +1,328 @@
+"""Prelaunch stubs for the Apps destination (applications_page).
+
+The Apps page reads the installed Homebrew inventory, the installed Flatpak
+inventory, and configured Brewfiles. PATH stubs serve a fixed inventory and
+record calls.
+
+Every stub records its argv, one invocation per line, in
+<scenario>/<program>-calls.log. Under --dry-run ChairLift must never execute
+a state-changing command, so the log is also the evidence that a mutation was
+only previewed.
+"""
+
+import json
+import os
+
+from stubs import fake_executable, stub
+
+# The installed inventory `brew info --installed --json=v2` reports. Only
+# the fields internal/homebrew.parsePackagesJSON reads are populated, plus
+# the qualified name and the tap, which are what tell a tap package from a
+# homebrew/core one.
+FORMULAE = [
+    {"name": "jq", "full_name": "jq", "tap": "homebrew/core", "installed": [{"version": "1.7.1", "installed_on_request": True}], "pinned": False},
+    {"name": "ripgrep", "full_name": "ripgrep", "tap": "homebrew/core", "installed": [{"version": "14.1.1", "installed_on_request": True}], "pinned": True},
+    # Installed dependency is real inventory, but not a requested tool.
+    {"name": "libunistring", "full_name": "libunistring", "tap": "homebrew/core", "installed": [{"version": "1.3", "installed_on_request": False}], "pinned": False},
+    # A formula brew knows about but has no installed keg for is skipped.
+    {"name": "not-installed", "full_name": "not-installed", "tap": "homebrew/core", "installed": [], "pinned": False},
+]
+CASKS = [
+    {"token": "visual-studio-code", "full_token": "visual-studio-code", "tap": "homebrew/cask", "version": "1.104.0", "installed": "1.104.0"},
+]
+
+# `flatpak list --<scope> --app --columns=name,application,version,branch` rows.
+FLATPAK_USER = (("Firefox", "org.mozilla.firefox", "140.0"),)
+FLATPAK_SYSTEM = (("Text Editor", "org.gnome.TextEditor", "48.0"),)
+
+# The Flatpak applications the Apps page finds already installed, and the
+# remote each came from. This is the query `brew bundle` itself uses.
+FLATPAK_INSTALLED = (("app.drey.Damask", "flathub"),)
+
+APP_COLLECTIONS = {
+    # A collection Bluefin ships: its title and summary come from
+    # internal/views/bundleview's curated table, never from the file.
+    "cli.Brewfile": (
+        '# Bluefin terminal environment\n'
+        'brew "just"\n'
+    ),
+    "fonts.Brewfile": (
+        'cask "font-noto-sans"\n'
+    ),
+    "fonts-dev.Brewfile": (
+        "# Developer Fonts\n"
+        'brew "font-fira-code"\n'
+        'cask "font-jetbrains-mono"\n'
+        'cask "font-hack"\n'
+    ),
+    # Artwork is retired; the discovered slideshow identifier uses managed setup.
+    "artwork.Brewfile": (
+        'cask "bluefin-wallpapers"\n'
+    ),
+    "wallpaper-slideshow.Brewfile": (
+        '# Legacy image payload: ChairLift must not execute it.\n'
+        'flatpak "app.drey.Damask"\n'
+        'cask "ublue-os/tap/bluefin-wallpapers-extra"\n'
+    ),
+    # Full Desktop Suite (defaults unchecked)
+    "full-desktop.Brewfile": (
+        'flatpak "org.gnome.Calculator"\n'
+        'flatpak "app.drey.Damask"\n'
+        'flatpak "org.gnome.Notes"\n'
+    ),
+    # An administrator's own collection: humanized id, readable comment.
+    "team-tools.Brewfile": (
+        "# tools our team relies on every day\n"
+        'brew "just"\n'
+    ),
+    # An administrator's collection that names a tap. The tap is not
+    # trusted, so installing one of its entries has to trust the package
+    # on its own first.
+    "tap-tools.Brewfile": (
+        'tap "anomalyco/tap"\n'
+        'brew "anomalyco/tap/opencode-v2"\n'
+        'brew "gh"\n'
+    ),
+    "marketplace-tools.Brewfile": (
+        'brew "gh"\n'
+        'mas "Xcode", id: 497799835\n'
+        'vscode "ms-vscode-remote.remote-containers"\n'
+    ),
+    "opaque-tools.Brewfile": (
+        'brew "gh"\n'
+        'npm "typescript"\n'
+        'system "touch /tmp/chairlift-should-never-evaluate-brewfiles"\n'
+    ),
+    "trusted-tools.Brewfile": (
+        'brew "gh", trusted: true\n'
+        'cask "font-hack", trusted: false\n'
+    ),
+}
+
+
+def calls_log(context, program):
+    return os.path.join(context.scenario_dir, f"{program}-calls.log")
+
+
+def _record(context, program):
+    return f'printf \'%s\\n\' "$*" >> "{calls_log(context, program)}"\n'
+
+
+def _brew(
+    context,
+    fail=(),
+    installed_collections=(),
+    extra_formulae=(),
+    extra_casks=(),
+    trusted_taps=(),
+    tap_installed=(),
+):
+    """A brew serving the fixed catalog above.
+
+    fail names read operations that exit 1 when brew cannot read its API.
+    installed_collections names the Brewfiles `brew bundle check` reports
+    satisfied; every other collection reports unmet dependencies (exit 1),
+    as brew does for a collection nobody installed.
+    extra_formulae and extra_casks add installed packages, so a scenario can
+    show a collection entry that is already on the system.
+    trusted_taps names the taps the trust store holds; every other tap is
+    untrusted, which is what an entry from a third-party tap looks like
+    before a person trusts it.
+    tap_installed names the taps that are already cloned.
+    """
+    formulae = json.dumps({"formulae": FORMULAE + list(extra_formulae), "casks": []})
+    casks = json.dumps({"formulae": [], "casks": CASKS + list(extra_casks)})
+    trust = json.dumps(
+        {
+            "taps": list(trusted_taps),
+            "formulae": [],
+            "casks": [],
+            "commands": [],
+        }
+    )
+    info_fail = "echo 'Error: Failed to load the API' >&2; exit 1\n" if "info" in fail else ""
+    satisfied = ""
+    if installed_collections:
+        patterns = "|".join(f"*/{name}" for name in installed_collections)
+        satisfied = f'case "$*" in {patterns}) exit 0 ;; esac\n        '
+    installed = " ".join(tap_installed)
+    script = _record(context, "brew") + f"""
+case "$1" in
+--version) echo "Homebrew 4.6.0"; exit 0 ;;
+--prefix) echo "{context.scenario_dir}/brew-prefix"; exit 0 ;;
+--caskroom) echo "{context.scenario_dir}/brew-prefix/Caskroom/bluefin-wallpapers-extra"; exit 0 ;;
+info)
+    {info_fail}case "$*" in
+    'info --json=v2 --formula just') echo '{{"formulae":[{{"name":"just","desc":"Save and run project commands"}}]}}' ;;
+    'info --json=v2 --cask ublue-os/tap/bluefin-wallpapers-extra'|'info --json=v2 --cask bluefin-wallpapers-extra')
+        echo '{{"formulae":[],"casks":[{{"token":"bluefin-wallpapers-extra","full_token":"ublue-os/tap/bluefin-wallpapers-extra","desc":"Extra Bluefin backgrounds","version":"fixture","installed":"fixture"}}]}}' ;;
+    *--formula*) cat <<'EOF'
+{formulae}
+EOF
+    ;;
+    *--cask*) cat <<'EOF'
+{casks}
+EOF
+    ;;
+    esac
+    exit 0 ;;
+outdated) echo '{{"formulae":[],"casks":[]}}'; exit 0 ;;
+tap-info)
+    case "$*" in
+    *--installed*) echo '[]' ;;
+    *) case " {installed} " in
+       *" $3 "*) printf '[{{"name":"%s","installed":true,"trusted":true}}]\n' "$3" ;;
+       *) printf '[{{"name":"%s","installed":false,"trusted":false}}]\n' "$3" ;;
+       esac ;;
+    esac
+    exit 0 ;;
+trust)
+    if [ "$2" = "--json=v1" ]; then
+        printf '%s\n' '{trust}'
+        exit 0
+    fi
+    exit 0 ;;
+tap) echo 'ublue-os/tap'; exit 0 ;;
+bundle)
+    if [ "$2" = check ]; then
+        {satisfied}echo "brew bundle can't satisfy your Brewfile's dependencies." >&2
+        exit 1
+    fi
+    exit 0 ;;
+esac
+exit 0
+"""
+    fake_executable(context, "brew", script)
+
+
+@stub("bluefin-cli-missing-tools")
+def bluefin_cli_missing_tools(context):
+    """An existing Bash integration remains removable with missing formulae."""
+    _brew(context)
+    directory = os.path.join(context.launch_env["XDG_DATA_HOME"], "chairlift", "bluefin-cli")
+    os.makedirs(directory, exist_ok=True)
+    for name in ("bluefin-cli.bash", "homebrew.bash", "bash-preexec-rearm.bash", "cli.Brewfile"):
+        with open(os.path.join(directory, name), "w", encoding="utf-8") as handle:
+            handle.write("# Previously installed payload\n")
+    quoted = "'" + os.path.join(directory, "bluefin-cli.bash").replace("'", "'\\''") + "'"
+    with open(os.path.join(context.home, ".bashrc"), "w", encoding="utf-8") as handle:
+        handle.write(
+            "### bluefin-cli source start\n"
+            f"test -f {quoted} && source {quoted}\n"
+            "### bluefin-cli source end\n"
+        )
+
+
+def _rows(rows):
+    return "".join(f"{name}\t{app_id}\t{version}\tstable\n" for name, app_id, version in rows)
+
+
+def _origin_rows(rows):
+    return "".join(f"{app_id}\t{origin}\n" for app_id, origin in rows)
+
+
+@stub("apps-brew")
+def apps_brew(context):
+    """Homebrew with two requested formulae (one pinned) and one cask."""
+    _brew(context)
+
+
+@stub("apps-brew-team-tools-installed")
+def apps_brew_team_tools_installed(context):
+    """Homebrew on which the Team tools collection is already installed."""
+    _brew(
+        context,
+        extra_formulae=[
+            {"name": "just", "full_name": "just", "tap": "homebrew/core", "installed": [{"version": "1.36.0", "installed_on_request": True}], "pinned": False},
+        ],
+    )
+
+
+@stub("apps-brew-developer-installed")
+def apps_brew_developer_installed(context):
+    """The relocated collection's entries are all installed."""
+    _brew(
+        context,
+        extra_formulae=[
+            {"name": "font-fira-code", "full_name": "font-fira-code", "tap": "homebrew/core", "installed": [{"version": "1", "installed_on_request": True}]},
+        ],
+        extra_casks=[
+            {"token": name, "full_token": name, "tap": "homebrew/cask", "installed": "1"}
+            for name in ("font-jetbrains-mono", "font-hack")
+        ],
+    )
+
+
+@stub("apps-brew-unreadable")
+def apps_brew_unreadable(context):
+    """Homebrew whose installed-package listing fails."""
+    _brew(context, fail=("info",))
+
+
+@stub("apps-brew-tap-trusted")
+def apps_brew_tap_trusted(context):
+    """Homebrew on which the administrator's tap is trusted wholesale."""
+    _brew(context, trusted_taps=("anomalyco/tap",), tap_installed=("anomalyco/tap",))
+
+
+@stub("apps-flatpak")
+def apps_flatpak(context):
+    """Flatpak with one app installed for the user and one for everyone."""
+    _flatpak(context, FLATPAK_SYSTEM)
+
+
+
+def _flatpak(context, system_rows, manual_folders=(), active_source="wallhaven"):
+    script = _record(context, "flatpak") + f"""
+case "$1" in
+--version) echo "Flatpak 1.16.1"; exit 0 ;;
+search)
+    case "$3" in
+    org.gnome.Calculator) printf 'org.gnome.Calculator\tPerform arithmetic calculations\n' ;;
+    io.github.tunix.valhalla) printf 'io.github.tunix.valhalla\tValhalla wallpaper slideshow\n' ;;
+    *) echo "No matches found" ;;
+    esac
+    exit 0 ;;
+list)
+    case "$*" in
+    *--columns=application)
+        cat <<'EOF'
+{''.join(app_id + chr(10) for _, app_id, _ in system_rows)}EOF
+        ;;
+    *--runtime*) exit 0 ;;
+    *--columns=application,origin*) cat <<'EOF'
+{_origin_rows(FLATPAK_INSTALLED)}EOF
+    ;;
+    *--user*) cat <<'EOF'
+{_rows(FLATPAK_USER)}EOF
+    ;;
+    *--system*) cat <<'EOF'
+{_rows(system_rows)}EOF
+    ;;
+    esac
+    exit 0 ;;
+run)
+    case "$*" in
+    *' get io.github.tunix.valhalla manual-folders') echo '{json.dumps(list(manual_folders))}'; exit 0 ;;
+    *' get io.github.tunix.valhalla active-source') echo "'{active_source}'"; exit 0 ;;
+    *' --command=test io.github.tunix.valhalla -r '*)
+        for path in "$@"; do :; done
+        test -r "$path"
+        exit $? ;;
+    esac
+    echo "unexpected sandbox command: $*" >&2
+    exit 64 ;;
+esac
+exit 0
+"""
+    fake_executable(context, "flatpak", script)
+
+
+@stub("apps-collections")
+def apps_collections(context):
+    """Image-style collections, including a legacy Damask slideshow Brewfile."""
+    directory = os.path.join(context.scenario_dir, "bundles")
+    os.makedirs(directory, exist_ok=True)
+    for filename, body in APP_COLLECTIONS.items():
+        with open(os.path.join(directory, filename), "w", encoding="utf-8") as handle:
+            handle.write(body)

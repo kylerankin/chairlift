@@ -1,27 +1,26 @@
-// Package aistack implements ChairLift's local-AI switch: one container that
-// serves a local large language model on this machine's graphics hardware.
+// Package aistack implements Agent Mode's runtime: llmman served as a
+// systemd user unit on loopback, installed through Homebrew.
 //
-// It is ChairLift's port of bluefinctl's AI stacks, deliberately reduced.
-// bluefinctl ships twelve quadlet definitions across two vendor directories
-// (NIM, Triton, NeMo, RAPIDS, TensorFlow and PyTorch labs for NVIDIA; vLLM,
-// Lemonade, two llama.cpp builds and RamaLama for AMD) and asks the user to
-// pick one. That is a catalog for someone who already knows which serving
-// runtime they want, and it has no answer at all for an Intel or a GPU-less
-// host. ChairLift instead ships the single runtime that covers all four
-// cases: RamaLama publishes a per-accelerator image, so the hardware picks
-// the image and the user sees one switch.
+// ChairLift owns exactly three things here (ADR-0015): the Brewfile it hands
+// to `brew bundle`, the user unit ServiceName, and the environment.d fragment
+// EnvFragmentName that publishes OLLAMA_HOST to future sessions. llmman owns
+// model storage, engine selection and inference; Homebrew owns the binary.
+// Disabling removes only the unit and the fragment — the binary and
+// every downloaded model stay, because deleting gigabytes is a disk-space
+// decision nobody made by turning a switch off.
 //
-// Nothing here is privileged. Quadlet units are written under the user's
-// ~/.config/containers/systemd and started with `systemctl --user`, so the
-// container runs rootless in the invoking account — the same reasoning that
-// keeps gaming mode off the pkexec path. On a bootc host that also means
-// nothing is layered onto the image.
+// Nothing here is privileged. The unit lives in the user's
+// ~/.config/systemd/user and is driven with `systemctl --user`, so there is
+// no pkexec route and there must not become one.
 package aistack
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -29,279 +28,460 @@ import (
 	"time"
 
 	"github.com/projectbluefin/chairlift/internal/dryrun"
-	"github.com/projectbluefin/chairlift/internal/gpu"
+	"github.com/projectbluefin/chairlift/internal/homebrew"
 )
 
-const commandTimeout = 5 * time.Minute
+const commandTimeout = 30 * time.Minute
 
-// UnitName is the quadlet file ChairLift writes. It is deliberately not
-// `ramalama.container`: bluefinctl installs its stacks under their own
-// names into the same directory, and a user who has run both tools must not
-// have one silently overwrite the other's unit.
-const UnitName = "chairlift-ai.container"
+// Address is where the daemon listens. Loopback only: llmman serves without
+// authentication on a loopback bind, and refuses to start on a reachable one
+// without keys, which ChairLift does not provision.
+const Address = "127.0.0.1:17434"
 
-// ServiceName is the systemd unit quadlet generates from UnitName.
-const ServiceName = "chairlift-ai.service"
+// ServiceName is the systemd user unit ChairLift writes and owns. It is not
+// llmman's own name so `brew services` and ChairLift can never manage the
+// same file.
+const ServiceName = "chairlift-llmman.service"
 
-// containerName is the running container's name, matched to the unit so
-// `podman ps` output is recognizable.
-const containerName = "chairlift-ai"
+// EnvFragmentName is the environment.d fragment that publishes OLLAMA_HOST
+// to sessions started after Agent Mode is enabled.
+const EnvFragmentName = "10-chairlift-llmman.conf"
 
-// Port is the host port the OpenAI-compatible API is published on.
-const Port = 8080
+// Tap is the Homebrew tap llmman is published in.
+const Tap = "llmmanorg/tap"
 
-// servedModel is the model served. The default is small enough to run on a
-// 4 GB card or on CPU, which matters because the stack is offered on every
-// host including those with no GPU at all; ApplyOverrides replaces it.
-var servedModel = "ollama://llama3.2:3b"
+// Formula is the Homebrew formula that provides llmman.
+const Formula = Tap + "/llmman"
 
-// Stack is the accelerator-specific container definition selected for this
-// machine's hardware.
-type Stack struct {
-	// Vendor is the graphics vendor this stack targets.
-	Vendor gpu.Vendor
-	// Image is the RamaLama image built for that accelerator.
-	Image string
-	// Accelerator names the compute stack in user-facing text.
-	Accelerator string
-	// Devices are the quadlet AddDevice= values needed to reach the GPU.
-	Devices []string
-	// PodmanArgs are the quadlet PodmanArgs= values needed alongside them.
-	PodmanArgs []string
+// State is Agent Mode's lifecycle state, as ADR-0015 defines it.
+type State int
+
+const (
+	// StateUnavailable: this host cannot run Agent Mode (no Homebrew).
+	StateUnavailable State = iota
+	// StateUnconfigured: never set up — no llmman and no unit.
+	StateUnconfigured
+	// StateProvisioning: an enable is in flight, or the unit is installed
+	// and readiness has not been checked yet.
+	StateProvisioning
+	// StateReady: the unit is installed and /llmman/node answers.
+	StateReady
+	// StateDegraded: the unit is installed but /llmman/node does not answer.
+	StateDegraded
+	// StateDisabled: llmman is installed but ChairLift's unit is not — the
+	// user turned Agent Mode off, and its models were kept.
+	StateDisabled
+)
+
+// Facts are the observations Resolve derives a State from.
+type Facts struct {
+	// Capable is the host capability floor (Homebrew present).
+	Capable bool
+	// Installed reports whether an llmman executable resolves.
+	Installed bool
+	// UnitPresent reports whether ChairLift's unit file exists.
+	UnitPresent bool
+	// Working is true while an enable or disable is in flight.
+	Working bool
+	// Checked is true once a readiness probe has run.
+	Checked bool
+	// Healthy is the readiness probe's answer; meaningful only if Checked.
+	Healthy bool
 }
 
-// Accelerated reports whether this stack reaches a GPU. The CPU stack is a
-// real, working choice — it is just markedly slower, which the UI says.
-func (s Stack) Accelerated() bool {
-	return s.Vendor != gpu.VendorNone
-}
-
-// stacks maps each vendor to its RamaLama image. Every reference was
-// verified against quay.io by manifest request on 2026-08-17: the
-// ramalama namespace publishes `ramalama` (CPU), `cuda`, `rocm`, and
-// `intel-gpu`, each returning 200 for :latest.
-var stacks = map[gpu.Vendor]Stack{
-	gpu.VendorNVIDIA: {
-		Vendor:      gpu.VendorNVIDIA,
-		Image:       "quay.io/ramalama/cuda:latest",
-		Accelerator: "CUDA",
-		Devices:     []string{"nvidia.com/gpu=all"},
-		PodmanArgs:  []string{"--security-opt=label=disable"},
-	},
-	gpu.VendorAMD: {
-		Vendor:      gpu.VendorAMD,
-		Image:       "quay.io/ramalama/rocm:latest",
-		Accelerator: "ROCm",
-		Devices:     []string{"/dev/kfd", "/dev/dri"},
-		PodmanArgs:  []string{"--security-opt=label=disable", "--group-add=video"},
-	},
-	gpu.VendorIntel: {
-		Vendor:      gpu.VendorIntel,
-		Image:       "quay.io/ramalama/intel-gpu:latest",
-		Accelerator: "Intel oneAPI",
-		Devices:     []string{"/dev/dri"},
-		PodmanArgs:  []string{"--security-opt=label=disable"},
-	},
-	gpu.VendorNone: {
-		Vendor:      gpu.VendorNone,
-		Image:       "quay.io/ramalama/ramalama:latest",
-		Accelerator: "CPU",
-	},
-}
-
-// ApplyOverrides replaces the image for one or more vendors, and the served
-// model, from configuration. Both are ordinary config.yml settings rather
-// than root-only ones: the container runs rootless in the invoking account,
-// so pointing it at another image grants nothing a user could not get by
-// running podman themselves. An air-gapped site mirrors the images; someone
-// with a 24 GB card serves a larger model.
-//
-// An unknown vendor key is an error rather than a silent no-op, since a
-// typo'd key would otherwise leave the site believing its mirror was in use.
-func ApplyOverrides(images map[string]string, model string) error {
-	for name, image := range images {
-		vendor := gpu.Vendor(name)
-		stack, known := stacks[vendor]
-		if !known {
-			return fmt.Errorf("ai_images: unknown vendor %q", name)
-		}
-		if image == "" {
-			return fmt.Errorf("ai_images: vendor %q has an empty image", name)
-		}
-		stack.Image = image
-		stacks[vendor] = stack
+// Resolve maps observations to a State. The unit file's presence decides
+// whether Agent Mode is on; health decides whether "on" means ready.
+func Resolve(f Facts) State {
+	switch {
+	case !f.Capable:
+		return StateUnavailable
+	case f.Working:
+		return StateProvisioning
+	case f.UnitPresent && !f.Checked:
+		return StateProvisioning
+	case f.UnitPresent && f.Healthy:
+		return StateReady
+	case f.UnitPresent:
+		return StateDegraded
+	case f.Installed:
+		return StateDisabled
+	default:
+		return StateUnconfigured
 	}
-	if model != "" {
-		servedModel = model
+}
+
+// On reports whether the switch should read on in this state.
+func (s State) On() bool {
+	return s == StateProvisioning || s == StateReady || s == StateDegraded
+}
+
+// Brewfile installs only the missing local model runtime. Client setup is
+// separate; enabling the runtime never installs a chat application.
+func Brewfile(haveLLMMan bool) string {
+	if haveLLMMan {
+		return ""
 	}
-	return nil
+	return "tap \"" + Tap + "\"\nbrew \"" + Formula + "\"\n"
 }
 
-// Select returns the stack for the detected hardware. It reuses
-// gpu.Set.Primary, so a hybrid laptop gets the NVIDIA stack for the same
-// reason it gets the NVIDIA image: that is the card the workload should run
-// on.
-func Select(set gpu.Set) Stack {
-	return stacks[set.Primary()]
-}
-
-// Detect returns the stack for this machine.
-func Detect() Stack {
-	return Select(gpu.Detect())
-}
-
-// RenderUnit returns the quadlet .container file for a stack.
-//
-// There is no companion .network file. bluefinctl gives every stack its own
-// podman network because its catalog anticipates stacks talking to each
-// other; ChairLift runs exactly one container that talks only to the host
-// over a published port, so a dedicated network would be a second file to
-// install, remove, and keep in step for no behavior.
-func RenderUnit(stack Stack) string {
-	var b strings.Builder
-
-	fmt.Fprintf(&b, "[Unit]\nDescription=Local AI model server (%s)\nAfter=network-online.target\n\n", stack.Accelerator)
-
-	b.WriteString("[Container]\n")
-	fmt.Fprintf(&b, "ContainerName=%s\n", containerName)
-	fmt.Fprintf(&b, "Image=%s\n", stack.Image)
-	fmt.Fprintf(&b, "Exec=serve --port %d %s\n", Port, servedModel)
-	for _, device := range stack.Devices {
-		fmt.Fprintf(&b, "AddDevice=%s\n", device)
+// RenderUnit returns the systemd user unit for the llmman executable at exe.
+// exe must be the absolute path resolved at setup time; no Homebrew prefix is
+// assumed.
+func RenderUnit(exe string) (string, error) {
+	if !filepath.IsAbs(exe) || strings.ContainsAny(exe, " \t\n\"'\\%$;") {
+		return "", fmt.Errorf("llmman path %q is not a plain absolute path", exe)
 	}
-	for _, arg := range stack.PodmanArgs {
-		fmt.Fprintf(&b, "PodmanArgs=%s\n", arg)
-	}
-	// Bind loopback explicitly: Podman publishes on 0.0.0.0 when no host IP
-	// is given, which would expose the unauthenticated model API to the LAN.
-	fmt.Fprintf(&b, "PublishPort=127.0.0.1:%d:%d\n", Port, Port)
-	b.WriteString("Volume=%h/ai-workspaces/ramalama:/root/.cache/ramalama:z\n\n")
-
-	b.WriteString("[Service]\nRestart=on-failure\nRestartSec=10\n\n")
-	b.WriteString("[Install]\nWantedBy=default.target\n")
-
-	return b.String()
+	return "[Unit]\n" +
+		"Description=Agent Mode local model server (llmman)\n" +
+		"Documentation=https://github.com/llmmanorg/llmman\n\n" +
+		"[Service]\n" +
+		"ExecStart=" + exe + " serve\n" +
+		"Environment=LLMMAN_HOST=" + Address + "\n" +
+		// No hidden legacy offload survives removal of the peer controls.
+		"Environment=LLMMAN_PEERS=\n" +
+		// The web UI's Shell tab is a terminal as this user; never serve it.
+		"Environment=LLMMAN_SHELL=off\n" +
+		// Troubleshooting prompts carry system details; do not keep them.
+		"Environment=LLMMAN_NOHISTORY=1\n" +
+		"Restart=on-failure\n" +
+		"RestartSec=10\n\n" +
+		"[Install]\n" +
+		"WantedBy=default.target\n", nil
 }
 
-// unitDir is an injection seam for the quadlet directory, so the install and
-// remove paths are testable without writing into a real home directory.
-var unitDir = defaultUnitDir
+// EnvFragment is the environment.d fragment's content. It carries only
+// OLLAMA_HOST: redirecting OpenAI SDK users session-wide is not a default.
+func EnvFragment() string {
+	return "OLLAMA_HOST=" + Address + "\n"
+}
 
-func defaultUnitDir() (string, error) {
-	config, err := os.UserConfigDir()
+// Seams, replaced by tests.
+var (
+	configDir     = os.UserConfigDir
+	lookPath      = exec.LookPath
+	brewPath      = homebrew.ExecutablePath
+	installBundle = homebrew.BundleInstall
+	tapRepo       = homebrew.Tap
+	trustFormula  = homebrew.TrustFormula
+	run           = execCommand
+	nodeURL       = "http://" + Address + "/llmman/node"
+)
+
+// WebUIURL is llmman's built-in models page — pulls, removal, and chat —
+// served by the Agent Mode daemon itself. ChairLift links directly to the
+// models view rather than re-implementing a picker (#568).
+func WebUIURL() string { return "http://" + Address + "/#/models" }
+
+func execCommand(ctx context.Context, name string, args ...string) (string, error) {
+	output, err := exec.CommandContext(ctx, name, args...).CombinedOutput()
+	trimmed := strings.TrimSpace(string(output))
 	if err != nil {
-		return "", err
+		return trimmed, fmt.Errorf("%s %s: %w: %s", filepath.Base(name), strings.Join(args, " "), err, lastLine(trimmed))
 	}
-	return filepath.Join(config, "containers", "systemd"), nil
+	return trimmed, nil
 }
 
-// runSystemctl is an injection seam for the `systemctl --user` calls.
-var runSystemctl = execSystemctl
-
-func execSystemctl(ctx context.Context, args ...string) error {
-	runCtx, cancel := context.WithTimeout(ctx, commandTimeout)
-	defer cancel()
-
-	full := append([]string{"--user"}, args...)
-	cmd := exec.CommandContext(runCtx, "systemctl", full...)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("systemctl %s: %s", strings.Join(full, " "), strings.TrimSpace(string(output)))
+func lastLine(s string) string {
+	if i := strings.LastIndexByte(s, '\n'); i >= 0 {
+		return s[i+1:]
 	}
-	return nil
+	return s
 }
 
-// IsAvailable reports whether this host can run the stack at all. Quadlet is
-// a Podman feature, so without Podman there is nothing to install into.
-func IsAvailable() bool {
-	_, err := exec.LookPath("podman")
-	return err == nil
+func systemctl(ctx context.Context, args ...string) (string, error) {
+	return run(ctx, "systemctl", append([]string{"--user"}, args...)...)
 }
 
-// UnitPath returns the absolute path of the quadlet file.
+// UnitPath returns the absolute path of ChairLift's user unit.
 func UnitPath() (string, error) {
-	dir, err := unitDir()
+	dir, err := configDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, UnitName), nil
+	return filepath.Join(dir, "systemd", "user", ServiceName), nil
 }
 
-// IsEnabled reports whether ChairLift's quadlet is installed. The unit file's
-// presence is the state, not the container's running status: a stack whose
-// container is restarting or whose image is still pulling is enabled, and
-// reading it any other way would make the switch flicker during a multi-
-// gigabyte first pull.
-func IsEnabled() bool {
-	path, err := UnitPath()
+// EnvFragmentPath returns the absolute path of the environment.d fragment.
+func EnvFragmentPath() (string, error) {
+	dir, err := configDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "environment.d", EnvFragmentName), nil
+}
+
+// Executable resolves llmman: $PATH first, then beside the brew that
+// internal/homebrew resolves, which is where the formula links it. It
+// returns "" when neither exists.
+func Executable() string {
+	if path, err := lookPath("llmman"); err == nil && filepath.IsAbs(path) {
+		return path
+	}
+	if brew := brewPath(); brew != "" {
+		candidate := filepath.Join(filepath.Dir(brew), "llmman")
+		if info, err := os.Stat(candidate); err == nil && info.Mode().IsRegular() {
+			return candidate
+		}
+	}
+	return ""
+}
+
+// Observe returns the non-blocking facts (no health probe), safe on the
+// GTK main thread.
+func Observe(capable bool) Facts {
+	f := Facts{Capable: capable, Installed: Executable() != ""}
+	if path, err := UnitPath(); err == nil {
+		_, statErr := os.Stat(path)
+		f.UnitPresent = statErr == nil
+	}
+	return f
+}
+
+// Healthy performs one bounded GET of /llmman/node and reports whether it
+// answered 200 with a JSON object. systemctl is-active alone is not
+// readiness: the process can be up and still be fetching its engine.
+func Healthy(ctx context.Context) bool {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, nodeURL, nil)
 	if err != nil {
 		return false
 	}
-	_, err = os.Stat(path)
-	return err == nil
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = resp.Body.Close() }()
+	var node map[string]json.RawMessage
+	return resp.StatusCode == http.StatusOK && json.NewDecoder(resp.Body).Decode(&node) == nil && node != nil
 }
 
-// Enable writes the quadlet for the given stack and starts it.
-func Enable(ctx context.Context, stack Stack) error {
-	path, err := UnitPath()
+// WaitHealthy polls Healthy until it succeeds or within elapses.
+func WaitHealthy(ctx context.Context, within time.Duration) bool {
+	ctx, cancel := context.WithTimeout(ctx, within)
+	defer cancel()
+	for {
+		if Healthy(ctx) {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(time.Second):
+		}
+	}
+}
+
+// Enable installs llmman through `brew bundle`,
+// validates the runtime with `llmman serve --pull-only`, writes the unit and
+// the environment fragment atomically, and starts the service. A failure
+// after the files were written removes what this call created, unless the
+// unit already existed before it ran.
+func Enable(ctx context.Context) error {
+	unit, err := UnitPath()
 	if err != nil {
 		return err
 	}
-
+	fragment, err := EnvFragmentPath()
+	if err != nil {
+		return err
+	}
 	if dryrun.Enabled() {
-		log.Printf("[DRY-RUN] would write %s for %s and start %s", path, stack.Image, ServiceName)
+		log.Printf("[DRY-RUN] would install %s, run llmman serve --pull-only, write %s and %s, and start %s",
+			Formula, unit, fragment, ServiceName)
 		return nil
 	}
 
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := installRuntime(); err != nil {
 		return err
 	}
-	if err := os.WriteFile(path, []byte(RenderUnit(stack)), 0o644); err != nil {
+	exe := Executable()
+	if exe == "" {
+		return fmt.Errorf("%s installed but no llmman executable resolves", Formula)
+	}
+	content, err := RenderUnit(exe)
+	if err != nil {
 		return err
+	}
+	// Fetch the engine in the foreground so a runtime that cannot be
+	// obtained is reported here, before anything claims to be ready.
+	out, err := run(ctx, exe, "serve", "--pull-only")
+	if err != nil {
+		return fmt.Errorf("llmman runtime check: %w", err)
+	}
+	log.Printf("aistack: llmman serve --pull-only: %s", out)
+
+	_, statErr := os.Stat(unit)
+	existed := statErr == nil
+	rollback := func() {
+		if existed {
+			return
+		}
+		_ = os.Remove(unit)
+		_ = os.Remove(fragment)
+		_, _ = systemctl(ctx, "daemon-reload")
 	}
 
-	if err := runSystemctl(ctx, "daemon-reload"); err != nil {
-		// The unit is on disk but systemd has not seen it. Take it back off
-		// rather than leaving a host whose switch reads "on" and whose
-		// service does not exist.
-		_ = os.Remove(path)
+	if err := writeAtomic(unit, content); err != nil {
 		return err
 	}
-	if err := runSystemctl(ctx, "start", ServiceName); err != nil {
-		_ = os.Remove(path)
-		_ = runSystemctl(ctx, "daemon-reload")
+	if err := writeAtomic(fragment, EnvFragment()); err != nil {
+		rollback()
 		return err
+	}
+	if _, err := systemctl(ctx, "enable", "--no-reload", ServiceName); err != nil {
+		rollback()
+		return err
+	}
+	if err := restartService(ctx); err != nil {
+		if !existed {
+			// A post-start policy probe/write may fail with the daemon alive.
+			// Reuse disable's stopped-state proof before removing its handle.
+			return errors.Join(err, Disable(ctx))
+		}
+		return err
+	}
+	// Best effort: processes started from now on in this session see it.
+	// Nothing already running changes, and the UI says so.
+	if _, err := run(ctx, "dbus-update-activation-environment", "--systemd", "OLLAMA_HOST="+Address); err != nil {
+		log.Printf("aistack: publishing OLLAMA_HOST to the session: %v", err)
 	}
 	return nil
 }
 
-// Disable stops the stack and removes its quadlet. The pulled image and the
-// model cache under ~/ai-workspaces are left alone: they are large, they are
-// expensive to re-fetch, and removing them is a disk-space decision the user
-// did not make by turning a switch off.
-func Disable(ctx context.Context) error {
-	path, err := UnitPath()
+// installRuntime installs llmman with one Brewfile.
+//
+// Homebrew refuses to load a formula from a tap the user has not trusted,
+// and llmmanorg/tap is not trusted on a stock host, so the bundle failed
+// with "Refusing to load formula llmmanorg/tap/llmman from untrusted tap".
+// Turning Agent Mode on is the user's consent to install that one formula,
+// so it trusts exactly that formula — not the tap — after tapping and
+// before the bundle loads it. Trust is per-user; nothing here is privileged.
+func installRuntime() error {
+	haveLLMMan := Executable() != ""
+	bundle := Brewfile(haveLLMMan)
+	if bundle == "" {
+		return nil
+	}
+	if !haveLLMMan {
+		if err := tapRepo(Tap); err != nil {
+			return err
+		}
+		if err := trustFormula(Formula); err != nil {
+			return err
+		}
+	}
+	file, err := os.CreateTemp("", "agent-mode-*.Brewfile")
 	if err != nil {
 		return err
 	}
+	defer func() { _ = os.Remove(file.Name()) }()
+	if _, err := file.WriteString(bundle); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	return installBundle(file.Name())
+}
 
+// Disable stops the service and removes ChairLift's unit and fragment. If
+// the stop fails, both stay unless systemd confirms the service is no longer
+// active: removing the unit while it may still run would make the switch lie
+// and drop the user's handle on the process.
+func Disable(ctx context.Context) error {
+	unit, err := UnitPath()
+	if err != nil {
+		return err
+	}
+	fragment, err := EnvFragmentPath()
+	if err != nil {
+		return err
+	}
 	if dryrun.Enabled() {
-		log.Printf("[DRY-RUN] would stop %s and remove %s", ServiceName, path)
+		log.Printf("[DRY-RUN] would stop %s and remove %s and %s", ServiceName, unit, fragment)
 		return nil
 	}
 
-	// A stop failure is not fatal: the service may already be down, and the
-	// unit still has to come off disk for the switch to mean anything.
-	if err := runSystemctl(ctx, "stop", ServiceName); err != nil {
-		log.Printf("aistack: stopping %s: %v", ServiceName, err)
+	if _, err := systemctl(ctx, "disable", "--now", ServiceName); err != nil {
+		if verifyErr := verifyStopped(ctx, err); verifyErr != nil {
+			return verifyErr
+		}
 	}
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return err
+	for _, path := range []string{unit, fragment} {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
 	}
-	return runSystemctl(ctx, "daemon-reload")
+	if _, err := systemctl(ctx, "unset-environment", "OLLAMA_HOST"); err != nil {
+		log.Printf("aistack: clearing OLLAMA_HOST from the session: %v", err)
+	}
+	_, err = systemctl(ctx, "daemon-reload")
+	return err
 }
 
-// DefaultContext returns a context with the package's standard timeout.
+func verifyStopped(ctx context.Context, stopErr error) error {
+	state, err := systemctl(ctx, "is-active", ServiceName)
+	switch state = strings.TrimSpace(state); state {
+	case "inactive", "failed", "unknown":
+		return nil
+	case "":
+		return fmt.Errorf("%w; could not verify %s stopped: %v", stopErr, ServiceName, err)
+	default:
+		return fmt.Errorf("%w; %s is %s", stopErr, ServiceName, state)
+	}
+}
+
+func writeAtomic(dest, content string) error {
+	dir := filepath.Dir(dest)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, filepath.Base(dest)+".tmp.*")
+	if err != nil {
+		return err
+	}
+	// A no-op after the rename succeeds; cleans the temp file otherwise.
+	defer func() { _ = os.Remove(tmp.Name()) }()
+	if _, err := tmp.WriteString(content); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(0o644); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), dest)
+}
+
+// DefaultContext returns a context bounded for the whole enable: a first
+// `brew bundle` plus the engine fetch can take many minutes.
 func DefaultContext() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), commandTimeout)
+}
+
+// ActiveModelAlias is the llmman alias configured for the selected model.
+// Goose launches on this alias verbatim, starting on the active model.
+const ActiveModelAlias = "bluefin-active"
+
+// ReadActiveModel returns the model ref currently mapped to ActiveModelAlias
+// via `llmman config get`. It returns ("", nil) when no alias has been set
+// yet, so a fresh runtime is not an error.
+func ReadActiveModel(ctx context.Context) (string, error) {
+	exe := Executable()
+	if exe == "" {
+		return "", errors.New("llmman executable not found")
+	}
+	out, err := run(ctx, exe, "config", "get", "aliases."+ActiveModelAlias)
+	if err != nil {
+		if strings.TrimSpace(out) == "Error: aliases."+ActiveModelAlias+": not set" {
+			return "", nil
+		}
+		return "", fmt.Errorf("llmman config get alias: %w", err)
+	}
+	return strings.TrimSpace(out), nil
 }

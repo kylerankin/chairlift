@@ -1,10 +1,15 @@
-# ChairLift
+# Control Center
 
-ChairLift is a GTK4/Libadwaita system management GUI for [Snow Linux](https://github.com/frostyard/snosi), written in Go using [puregotk](https://codeberg.org/puregotk/puregotk) bindings (no CGO). It provides a unified interface for managing Homebrew and Flatpak applications, bootc system updates, system features (via updex), and maintenance tasks.
+Control Center is a GTK4/Libadwaita system management GUI for [Bluefin](https://github.com/projectbluefin/bluefin), written in Go using [puregotk](https://codeberg.org/puregotk/puregotk) bindings (no CGO). It provides a unified interface for managing Homebrew applications, Homebrew and Flatpak updates, bootc system updates, system features (via updex), and maintenance tasks.
+
+The project, its repository, and its binaries are named ChairLift; Control
+Center is the name the product ships under, so the paths, package names, and
+application ID on this page keep the code name deliberately (see
+[ADR-0012](adr/0012-ship-as-control-center-keep-chairlift-code-name.md)).
 
 The UI is YAML-configuration-driven, making it portable to other Linux distributions by toggling feature groups on or off.
 
-This page is the user-facing docs-site home. Contributor- and agent-facing
+This page is the user-facing overview. Contributor- and agent-facing
 documentation — architecture, ADRs, specs, and plans — is indexed in
 [docs/README.md](README.md), with
 [docs/design/overview.md](design/overview.md) as the architecture entry
@@ -12,16 +17,20 @@ point.
 
 ## Pages
 
-ChairLift provides six configurable pages:
+Control Center has seven primary destinations, in sidebar order. Both Apps
+groups are enabled in the shipped [`config.yml`](../config.yml); their controls
+require Homebrew. This inventory describes the available surface, not controls
+guaranteed on every host.
 
 | Page | Description |
 |------|-------------|
-| **Applications** | Search/install Homebrew formulae and casks; uninstall installed formulae/casks; pin/unpin formulae; install curated Brewfile bundles. List/uninstall Flatpaks and launch the configured external manager for Flatpak discovery and installation. |
-| **Maintenance** | Run cleanup tasks for Homebrew and Flatpak, and execute custom maintenance scripts. |
-| **Updates** | Stage bootc or native A/B (systemd-sysupdate) system updates, apply Flatpak updates, upgrade Homebrew packages, and trust Homebrew taps. |
-| **System** | View OS information, bootc deployment status, and launch a system health monitor. |
-| **Features** | Toggle system features managed by updex. |
-| **Help** | Links to the project website, issue tracker, and community chat. |
+| **Updates** | Update everything in one action or per provider: stage bootc system updates, apply Flatpak updates, upgrade Homebrew packages, trust Homebrew taps, read the booted/staged system version, and switch release channel or graphics-driver variant. |
+| **Apps** | App Collections first (checkbox selection with a unified Install button), then Installed Apps (installed casks), Command-Line Tools (explicitly requested formulae), and Backup with the Export app list row (a Brewfile export). Installed packages offer uninstall and formula pin/unpin actions. No Flatpak inventory, external catalog launcher, or package search. |
+| **Agents** | Agent Mode: run a language model on this computer (llmman); Troubleshooting: set up Goose Desktop with read-only Linux tools and launch it on that model; and contribute to Bluefin. |
+| **Features** | Distribution features, a Developer Mode detail with WSL, Docker, and six native Development Apps install rows (ublue-os Homebrew Visual Studio Code, VSCodium, JetBrains Toolbox; system FlatPark Cursor and Antigravity; system Flathub Zed), the image-only Game Mode switch, OEM hardware support, and printer applications for this computer. Sublime Text is deliberately excluded for now by user approval. |
+| **Livery** | Choose your profile picture and the marks shown on the app launcher button, the top-bar menu, and Files. |
+| **Maintenance** | Free Up Space, run administrator-configured maintenance scripts, and Powerwash: Roll Back (with bootc updates), plus Powerwash and Factory Reset when an administrator opts in. |
+| **Help** | Links to the project website, issue tracker, and community documentation, plus system diagnostics. |
 
 A functional page is omitted when all of its groups are disabled. Help is
 always retained so the window always has a valid destination.
@@ -30,40 +39,57 @@ always retained so the window always has a valid destination.
 
 | Shortcut | Action |
 |----------|--------|
+| `Ctrl+,` | Preferences |
 | `Ctrl+Q` | Quit |
 | `Ctrl+?` | Show shortcuts dialog |
 | `Alt+1` … `Alt+N` | Open the first through Nth visible page in sidebar order; omitted pages leave no gaps |
 | `F1` | Help |
+| `F10` | Open the main menu |
+| `Escape` | Close the shortcuts dialog |
 
 ## Command-Line Flags
 
 | Flag | Description |
 |------|-------------|
 | `--dry-run`, `-d` | Run without making any changes to the system. Propagated to all package manager wrappers. |
+| `--first-run`, `--setup`, `-s` | Start the same explicit Features → Apps → Agents → Livery tour on existing page controls. A running tour retains its current step. Ordinary activation never starts setup. |
+| `--ask-bluefin` | Launch Goose Desktop with the active model when Agent Mode is ready, or open Control Center to the Agents page naming the missing requirement. |
+| `--prompt-file PATH` | With `--ask-bluefin`, open Goose with the text in `PATH` (a regular UTF-8 file of at most 4 KiB) prefilled as the first message. When Goose is not ready yet, the prompt is kept until Goose is opened from the Agents page. |
+| `--dx-mode` | Open Control Center directly to the Developer Mode detail under Features. |
 
 ## Optional Dependencies
 
 Runtime visibility depends on the group:
 
-- bootc status/staging groups, the native A/B staging group, and unavailable
-  Homebrew/Flatpak maintenance groups are hidden when their tool-specific
-  runtime gates fail;
+- bootc status/staging groups are hidden
+  when their tool-specific runtime gates fail;
 - the Homebrew untrusted-taps group stays hidden unless actionable taps exist;
-- Features replaces its main group with an explicit unavailable message when
-  Updex is not configured;
-- Applications and Updates groups for Homebrew and Flatpak remain visible and
-  report that the tool is unavailable.
+- Agents is hidden where Homebrew is absent, because Agent Mode installs
+  llmman through it;
+- Apps requires Homebrew; an Updates source whose backing tool is absent is
+  omitted from the page by the capability floor, as is one configuration
+  excludes for the whole machine; a tool that is
+  present but fails reports the failure in its row;
+- Features hides its optional-features group when Updex lists none, and keeps
+  it with an error description when the listing fails;
+- Livery hides its top-bar section on KDE Plasma or when the Custom Command
+  Menu extension is not installed;
+- Maintenance's "Free Up Space" action is shown when its configuration group
+  is enabled. The cleanup runner skips absent providers rather than asking
+  the user to choose a package manager.
 
-Page omission is separate and static: it depends only on which builder-backed
-groups configuration enables, not on runtime tool availability.
+Page omission uses configuration composed with the host capability floor.
+Runtime readiness checks remain separate and may hide or explain individual
+controls after construction. See the [configuration reference](reference.md).
 
 | Tool | Used For |
 |------|----------|
 | Homebrew | Package management (formulae, casks, bundles) |
-| Flatpak | Installed-application listing/uninstall and updates; new installs are delegated to the configured external manager |
+| Flatpak | Updates, Development Apps, Compass, wallpaper setup, optional Pulp installation, and maintenance/reset operations; no Game Mode mutations, Apps inventory or catalog launcher |
 | bootc + `/usr/libexec/bootc-update-stage` | Staged bootc system updates |
-| `/usr/lib/snosi/native-ab` marker + `/usr/libexec/snosi-sysupdate-stage` | Staged native A/B (systemd-sysupdate) system updates |
 | Updex | System feature toggles |
+| llmman (installed by Agent Mode through Homebrew) | The Agents page's local model server |
+| `uupd.timer` systemd unit | The automatic-updates switch. ChairLift reads the unit's state and enables or masks it (masking and unmasking `uupd-resume.timer` alongside, when present); it never executes the `uupd` binary |
 
 ## Building
 
@@ -71,42 +97,54 @@ groups configuration enables, not on runtime tool availability.
 make build
 ```
 
-This produces two binaries in `build/`:
+This produces three binaries in `build/`:
 
 - `chairlift` — the main application
 - `chairlift-updex-helper` — privileged helper for updex write operations
+- `chairlift-helper` — privileged helper for Bluefin-family system writes
 
-Both are built with `CGO_ENABLED=0`.
+All are built with `CGO_ENABLED=0`.
 
 ### Installation
+
+Control Center is distributed through Homebrew only: the cask installs the
+GoReleaser release archive, `chairlift_<version>_linux_<arch>.tar.gz`. There
+are no deb, rpm, or apk packages.
+
+The Homebrew cask installs in user scope and cannot place root-owned files, so
+the same archive also carries the privileged pieces: `chairlift-updex-helper`,
+`chairlift-helper`, the bootc, updex, and ublue PolicyKit policies in `data/`,
+`config.yml`, and `channels.example.yml`. An OS image that wants the
+privileged features installs, from that archive, the helpers at
+`/usr/bin/chairlift-updex-helper` and `/usr/bin/chairlift-helper` and the
+policies at
+`/usr/share/polkit-1/actions/io.projectbluefin.chairlift.bootc.policy`,
+`/usr/share/polkit-1/actions/io.projectbluefin.chairlift.updex.policy`, and
+`/usr/share/polkit-1/actions/io.projectbluefin.chairlift.ublue.policy`. Bootc
+staging additionally requires the image to provide its trusted implementation
+at `/usr/libexec/bootc-update-stage`; ChairLift does not supply one.
+
+From a source checkout:
 
 ```bash
 sudo make install
 ```
 
-Installs binaries, desktop file, icons, PolicyKit policies, the updex helper,
-and maintainer configuration defaults to `PREFIX` (default `/usr`). The
-maintainer configuration is installed at `/usr/share/chairlift/config.yml`;
-`/etc/chairlift/config.yml` is reserved for administrator overrides and is
-never created or overwritten by ChairLift's source or nFPM packages. PolicyKit
-integration requires the default prefix.
-
-For distributions that install the GUI through a user-scoped Homebrew cask,
-releases also provide a `projectbluefin-chairlift-system-integration` deb/rpm/apk.
-It installs the fixed-path updex helper, PolicyKit policies, and maintainer
-configuration without installing the GUI. It intentionally conflicts with the
-self-contained `projectbluefin-chairlift` package. Bootc staging additionally
-requires the distribution to provide its trusted implementation at
-`/usr/libexec/bootc-update-stage`; the integration package does not supply
-one. Native A/B staging uses `/usr/libexec/snosi-sysupdate-stage`, which
-ships with the OS image itself.
+Installs binaries, desktop file, icons, PolicyKit policies, both privileged
+helpers, maintainer configuration defaults, and the documented channel-table
+example (`/usr/share/doc/chairlift/channels.example.yml`) and compiled GSettings
+schemas to `PREFIX`
+(default `/usr`). The maintainer configuration is installed at
+`/usr/share/chairlift/config.yml`; `/etc/chairlift/config.yml` is reserved for
+administrator overrides and is never created or overwritten by ChairLift's
+install paths. PolicyKit integration requires the default prefix.
 
 ### Development
 
 The [quality dashboard](quality.md) links to live CI, coverage, build-artifact,
 and release signals and explains how to reproduce the enforced checks locally.
-The [public metrics catalog](metrics/) collects the public, read-only sources
-and documents their interpretation and agent-provenance boundaries.
+The [PR metrics definition](metrics.md) explains the outcome query and its
+agent-provenance limits.
 
 ```bash
 make run      # Build and run with --dry-run

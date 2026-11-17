@@ -65,6 +65,17 @@ func TestSchemaPagesMatchesPageNames(t *testing.T) {
 	}
 }
 
+func TestAppsSchemaContainsOnlyHomebrewGroups(t *testing.T) {
+	groups, err := SchemaGroups("applications_page")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"brew_bundles_group", "brew_group"}
+	if !reflect.DeepEqual(groups, want) {
+		t.Fatalf("Apps groups = %v, want %v", groups, want)
+	}
+}
+
 // TestSchemaGroupsMatchesDefaultConfigForEveryPage loops over every page
 // from SchemaPages(), calls SchemaGroups(page), and asserts the result is
 // exactly the key set of pagesOf(defaultConfig())[page]: equal lengths,
@@ -156,14 +167,14 @@ func TestSchemaPagesReturnsFreshSlice(t *testing.T) {
 // TestSchemaGroupsReturnsFreshSlice mutates the slice returned by
 // SchemaGroups(page) and asserts a subsequent call is unaffected.
 func TestSchemaGroupsReturnsFreshSlice(t *testing.T) {
-	const page = "system_page"
+	const page = "updates_page"
 
 	first, err := SchemaGroups(page)
 	if err != nil {
 		t.Fatalf("SchemaGroups(%q): %v", page, err)
 	}
 	if len(first) == 0 {
-		t.Fatal("SchemaGroups(system_page) returned no groups")
+		t.Fatal("SchemaGroups(updates_page) returned no groups")
 	}
 
 	original := make([]string, len(first))
@@ -228,7 +239,7 @@ func TestYamlTagName(t *testing.T) {
 		tag  string
 		want string
 	}{
-		{"plain name", "system_page", "system_page"},
+		{"plain name", "agents_page", "agents_page"},
 		{"name with omitempty", "app_id,omitempty", "app_id"},
 		{"only options, no name", ",omitempty", ""},
 		{"empty tag", "", ""},
@@ -346,11 +357,7 @@ func TestSchemaPageGroups(t *testing.T) {
 
 // TestRawConfigMatchesConfigFields proves rawConfig's exported fields match
 // Config's exactly: same field count, same field names in the same order,
-// same yaml tag names in the same order. This is the parity test required
-// by docs/agents/skills/derive-schema-from-canonical-struct-not-shadow-representation.md
-// — rawConfig is a decoding mirror held to Config by this test, never a
-// second schema authority (the derivation in this file reads Config /
-// defaultConfig(), never rawConfig).
+// same yaml tags. rawConfig is a decoding mirror, not a second schema authority.
 func TestRawConfigMatchesConfigFields(t *testing.T) {
 	configType := reflect.TypeOf(Config{})
 	rawType := reflect.TypeOf(rawConfig{})
@@ -381,12 +388,8 @@ func TestRawConfigMatchesConfigFields(t *testing.T) {
 // in the same declaration order, same yaml tags after removing only the
 // omitempty option in the same order per index, and per field,
 // rawGroupConfig's type equal to
-// GroupConfig's type or exactly a pointer to it. This is the parity test
-// required by docs/agents/skills/derive-schema-from-canonical-struct-not-shadow-representation.md:
-// SchemaGroupFields() reads rawGroupConfig (what yaml.v3 actually decodes
-// into) because the spec designates it the field source, while this test
-// holds it to GroupConfig, the semantic authority, so the two cannot
-// silently drift apart.
+// GroupConfig's type or exactly a pointer to it. SchemaGroupFields reads the
+// decoding shape; this test holds it to the semantic GroupConfig authority.
 func TestRawGroupConfigMatchesGroupConfigFields(t *testing.T) {
 	groupType := reflect.TypeOf(GroupConfig{})
 	rawType := reflect.TypeOf(rawGroupConfig{})
@@ -445,7 +448,7 @@ func TestSchemaGroupFieldsMatchesGroupConfigTags(t *testing.T) {
 		}
 	}
 
-	wantOrder := []string{"enabled", "app_id", "actions", "website", "issues", "chat", "bundles_paths", "ai_images", "ai_model"}
+	wantOrder := []string{"enabled", "app_id", "actions", "website", "issues", "chat", "bundles_paths", "install_pulp", "stage_feeds", "install_dev_apps", "wsl_backend"}
 	if len(got) != len(wantOrder) {
 		t.Fatalf("SchemaGroupFields() has %d fields, want %d: got %v, want %v", len(got), len(wantOrder), got, wantOrder)
 	}

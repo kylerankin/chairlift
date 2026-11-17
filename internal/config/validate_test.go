@@ -5,6 +5,8 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -32,7 +34,7 @@ func wantSchema(t *testing.T, err *LoadError, path string) {
 // a nil error, as required for a document-level no-op overlay.
 func wantNoopRawConfig(t *testing.T, path string, data []byte) {
 	t.Helper()
-	raw, err := parseAndValidate(path, data)
+	raw, err := parseAndValidate(configSourceForPath(path), data)
 	if err != nil {
 		t.Fatalf("parseAndValidate(%q, %q) error = %v, want nil", path, data, err)
 	}
@@ -40,11 +42,12 @@ func wantNoopRawConfig(t *testing.T, path string, data []byte) {
 		t.Fatalf("parseAndValidate(%q, %q) rawConfig = nil, want non-nil", path, data)
 	}
 	pages := map[string]rawPageConfig{
-		"system_page":       raw.SystemPage,
+		"agents_page":       raw.AgentsPage,
 		"updates_page":      raw.UpdatesPage,
 		"applications_page": raw.ApplicationsPage,
 		"maintenance_page":  raw.MaintenancePage,
 		"features_page":     raw.FeaturesPage,
+		"livery_page":       raw.LiveryPage,
 		"help_page":         raw.HelpPage,
 	}
 	for name, page := range pages {
@@ -81,7 +84,7 @@ func TestParseAndValidateNoopOverlay(t *testing.T) {
 func TestParseAndValidateTopLevelScalarRejected(t *testing.T) {
 	const path = "/etc/chairlift/config.yml"
 
-	raw, err := parseAndValidate(path, []byte("just a scalar\n"))
+	raw, err := parseAndValidate(configSourceForPath(path), []byte("just a scalar\n"))
 	if raw != nil {
 		t.Fatalf("parseAndValidate(...) rawConfig = %+v, want nil", raw)
 	}
@@ -97,7 +100,7 @@ func TestParseAndValidateTopLevelScalarRejected(t *testing.T) {
 func TestParseAndValidateTopLevelSequenceRejected(t *testing.T) {
 	const path = "/etc/chairlift/config.yml"
 
-	raw, err := parseAndValidate(path, []byte("- a\n- b\n"))
+	raw, err := parseAndValidate(configSourceForPath(path), []byte("- a\n- b\n"))
 	if raw != nil {
 		t.Fatalf("parseAndValidate(...) rawConfig = %+v, want nil", raw)
 	}
@@ -113,7 +116,7 @@ func TestParseAndValidateTopLevelSequenceRejected(t *testing.T) {
 func TestParseAndValidateMalformedYAML(t *testing.T) {
 	const path = "/etc/chairlift/config.yml"
 
-	raw, err := parseAndValidate(path, []byte("a: [\n"))
+	raw, err := parseAndValidate(configSourceForPath(path), []byte("a: [\n"))
 	if raw != nil {
 		t.Fatalf("parseAndValidate(...) rawConfig = %+v, want nil", raw)
 	}
@@ -129,7 +132,7 @@ func TestParseAndValidateMalformedYAML(t *testing.T) {
 func TestParseAndValidateExtraDocumentRejected(t *testing.T) {
 	const path = "/etc/chairlift/config.yml"
 
-	raw, err := parseAndValidate(path, []byte("a: 1\n---\nb: 2\n"))
+	raw, err := parseAndValidate(configSourceForPath(path), []byte("a: 1\n---\nb: 2\n"))
 	if raw != nil {
 		t.Fatalf("parseAndValidate(...) rawConfig = %+v, want nil", raw)
 	}
@@ -145,7 +148,7 @@ func TestParseAndValidateExtraDocumentRejected(t *testing.T) {
 func TestParseAndValidateMalformedSourceGraphRejected(t *testing.T) {
 	const path = "/etc/chairlift/config.yml"
 
-	raw, err := parseAndValidate(path, []byte("a:\n  <<: 5\n"))
+	raw, err := parseAndValidate(configSourceForPath(path), []byte("a:\n  <<: 5\n"))
 	if raw != nil {
 		t.Fatalf("parseAndValidate(...) rawConfig = %+v, want nil", raw)
 	}
@@ -158,22 +161,22 @@ func TestParseAndValidateMalformedSourceGraphRejected(t *testing.T) {
 func TestParseAndValidateMinimalMapping(t *testing.T) {
 	const path = "/etc/chairlift/config.yml"
 
-	raw, err := parseAndValidate(path, []byte("system_page:\n  system_info_group:\n    enabled: false\n"))
+	raw, err := parseAndValidate(configSourceForPath(path), []byte("agents_page:\n  agents_group:\n    enabled: false\n"))
 	if err != nil {
 		t.Fatalf("parseAndValidate(...) error = %v, want nil", err)
 	}
 	if raw == nil {
 		t.Fatalf("parseAndValidate(...) rawConfig = nil, want non-nil")
 	}
-	group, ok := raw.SystemPage["system_info_group"]
+	group, ok := raw.AgentsPage["agents_group"]
 	if !ok {
-		t.Fatalf("raw.SystemPage[%q] missing", "system_info_group")
+		t.Fatalf("raw.AgentsPage[%q] missing", "agents_group")
 	}
 	if group.Enabled == nil {
-		t.Fatalf("raw.SystemPage[%q].Enabled = nil, want a non-nil *bool", "system_info_group")
+		t.Fatalf("raw.AgentsPage[%q].Enabled = nil, want a non-nil *bool", "agents_group")
 	}
 	if *group.Enabled != false {
-		t.Fatalf("*raw.SystemPage[%q].Enabled = %v, want false", "system_info_group", *group.Enabled)
+		t.Fatalf("*raw.AgentsPage[%q].Enabled = %v, want false", "agents_group", *group.Enabled)
 	}
 }
 
@@ -216,7 +219,7 @@ func TestRuntimeLoadUsesStrictValidator(t *testing.T) {
 func TestParseAndValidateUnknownPageRejected(t *testing.T) {
 	const path = "/etc/chairlift/config.yml"
 
-	raw, err := parseAndValidate(path, []byte("not_a_page: 1\n"))
+	raw, err := parseAndValidate(configSourceForPath(path), []byte("not_a_page: 1\n"))
 	if raw != nil {
 		t.Fatalf("parseAndValidate(...) rawConfig = %+v, want nil", raw)
 	}
@@ -235,7 +238,7 @@ func TestParseAndValidateUnknownPageRejected(t *testing.T) {
 func TestParseAndValidateKnownPageNull(t *testing.T) {
 	const path = "/etc/chairlift/config.yml"
 
-	raw, err := parseAndValidate(path, []byte("system_page:\n"))
+	raw, err := parseAndValidate(configSourceForPath(path), []byte("agents_page:\n"))
 	if err != nil {
 		t.Fatalf("parseAndValidate(...) error = %v, want nil", err)
 	}
@@ -254,12 +257,12 @@ func TestParseAndValidateKnownPageWrongShape(t *testing.T) {
 		name string
 		data string
 	}{
-		{"scalar value", "system_page: 3\n"},
-		{"sequence value", "system_page:\n  - a\n"},
+		{"scalar value", "agents_page: 3\n"},
+		{"sequence value", "agents_page:\n  - a\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			raw, err := parseAndValidate(path, []byte(tt.data))
+			raw, err := parseAndValidate(configSourceForPath(path), []byte(tt.data))
 			if raw != nil {
 				t.Fatalf("parseAndValidate(%q) rawConfig = %+v, want nil", tt.data, raw)
 			}
@@ -273,9 +276,7 @@ func TestParseAndValidateKnownPageWrongShape(t *testing.T) {
 
 // TestParseAndValidateEveryCanonicalPageAccepted iterates every page name
 // SchemaPages() returns and confirms each is accepted with a null value, so
-// no canonical page is accidentally rejected by validatePageEntries's known-
-// page check (docs/agents/skills/regression-tests-must-cover-every-
-// collection-entry.md).
+// no canonical page is accidentally rejected by the known-page check.
 func TestParseAndValidateEveryCanonicalPageAccepted(t *testing.T) {
 	const path = "/etc/chairlift/config.yml"
 
@@ -290,7 +291,7 @@ func TestParseAndValidateEveryCanonicalPageAccepted(t *testing.T) {
 	for _, page := range pages {
 		t.Run(page, func(t *testing.T) {
 			data := page + ":\n"
-			raw, loadErr := parseAndValidate(path, []byte(data))
+			raw, loadErr := parseAndValidate(configSourceForPath(path), []byte(data))
 			if loadErr != nil {
 				t.Fatalf("parseAndValidate(%q) error = %v, want nil", data, loadErr)
 			}
@@ -322,7 +323,7 @@ func TestParseAndValidateNonStringPageKeyRejected(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			raw, err := parseAndValidate(path, []byte(tt.data))
+			raw, err := parseAndValidate(configSourceForPath(path), []byte(tt.data))
 			if raw != nil {
 				t.Fatalf("parseAndValidate(%q) rawConfig = %+v, want nil", tt.data, raw)
 			}
@@ -335,7 +336,7 @@ func TestParseAndValidateNonStringPageKeyRejected(t *testing.T) {
 // alias-to-non-string page key is KindParseType, not KindSchema, proving the
 // fixture reaches the alias key rather than failing earlier on an unknown
 // page name. The fixture introduces the anchor through a structurally valid
-// canonical subtree (system_page/system_info_group/enabled, a *bool field,
+// canonical subtree (agents_page/agents_group/enabled, a *bool field,
 // so its own entry is valid) so the alias key really is the first failing
 // entry (interpretation I3/O2).
 //
@@ -345,9 +346,9 @@ func TestParseAndValidateNonStringPageKeyRejected(t *testing.T) {
 // (interpretation I6).
 func TestParseAndValidateAliasToNonStringPageKeyRejected(t *testing.T) {
 	const path = "/etc/chairlift/config.yml"
-	const data = "system_page:\n  system_info_group:\n    enabled: &n true\n*n: x\n"
+	const data = "agents_page:\n  agents_group:\n    enabled: &n true\n*n: x\n"
 
-	raw, err := parseAndValidate(path, []byte(data))
+	raw, err := parseAndValidate(configSourceForPath(path), []byte(data))
 	if raw != nil {
 		t.Fatalf("parseAndValidate(...) rawConfig = %+v, want nil", raw)
 	}
@@ -365,7 +366,7 @@ func TestParseAndValidateAliasToNonStringPageKeyRejected(t *testing.T) {
 func TestParseAndValidateQuotedMergeKeyIsSchemaError(t *testing.T) {
 	const path = "/etc/chairlift/config.yml"
 
-	raw, err := parseAndValidate(path, []byte("\"<<\": x\n"))
+	raw, err := parseAndValidate(configSourceForPath(path), []byte("\"<<\": x\n"))
 	if raw != nil {
 		t.Fatalf("parseAndValidate(...) rawConfig = %+v, want nil", raw)
 	}
@@ -380,16 +381,16 @@ func TestParseAndValidateQuotedMergeKeyIsSchemaError(t *testing.T) {
 // subtree must not produce a KindSchema "<<" error. resolveEffective's
 // merge-key handling consumes the bare merge key entirely before the
 // validator's per-entry walk ever sees it, so this document is simply
-// valid — the merge stays confined to system_page's own canonical group
-// map, which the merge produces no unknown key from. ("health_group" is
-// used, rather than an arbitrary name, because c3 now validates group
+// valid — the merge stays confined to updates_page's own canonical group
+// map, which the merge produces no unknown key from. ("brew_updates_group"
+// is used, rather than an arbitrary name, because c3 now validates group
 // names too: an unrecognized group name would itself be a KindSchema
 // error, which is not what this test is proving.)
 func TestParseAndValidateBareMergeKeyNotSchemaError(t *testing.T) {
 	const path = "/etc/chairlift/config.yml"
-	const data = "system_page:\n  system_info_group: &g\n    enabled: true\n  health_group:\n    <<: *g\n"
+	const data = "updates_page:\n  automatic_updates_group: &g\n    enabled: true\n  brew_updates_group:\n    <<: *g\n"
 
-	_, err := parseAndValidate(path, []byte(data))
+	_, err := parseAndValidate(configSourceForPath(path), []byte(data))
 	if err != nil {
 		t.Fatalf("parseAndValidate(...) error = %v, want nil", err)
 	}
@@ -413,7 +414,7 @@ func TestParseAndValidateUnknownPagePrecedesValueInspection(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			raw, err := parseAndValidate(path, []byte(tt.data))
+			raw, err := parseAndValidate(configSourceForPath(path), []byte(tt.data))
 			if raw != nil {
 				t.Fatalf("parseAndValidate(%q) rawConfig = %+v, want nil", tt.data, raw)
 			}
@@ -425,19 +426,19 @@ func TestParseAndValidateUnknownPagePrecedesValueInspection(t *testing.T) {
 // TestParseAndValidateEntryOrderConsequence confirms interpretation I3's
 // per-entry ordering consequence: entries are classified in effective
 // Content order, so which error surfaces depends on which failing entry
-// comes first. "nope: x\nsystem_page: 3\n" fails on "nope" (KindSchema)
-// before "system_page: 3\n"'s shape is ever inspected; reversing the entries
-// makes "system_page: 3\n" the first failing entry (KindParseType) before
+// comes first. "nope: x\nagents_page: 3\n" fails on "nope" (KindSchema)
+// before "agents_page: 3\n"'s shape is ever inspected; reversing the entries
+// makes "agents_page: 3\n" the first failing entry (KindParseType) before
 // "nope" is ever looked up.
 func TestParseAndValidateEntryOrderConsequence(t *testing.T) {
 	const path = "/etc/chairlift/config.yml"
 
 	t.Run("unknown page first", func(t *testing.T) {
-		_, err := parseAndValidate(path, []byte("nope: x\nsystem_page: 3\n"))
+		_, err := parseAndValidate(configSourceForPath(path), []byte("nope: x\nagents_page: 3\n"))
 		wantSchema(t, err, path)
 	})
 	t.Run("known page with wrong shape first", func(t *testing.T) {
-		_, err := parseAndValidate(path, []byte("system_page: 3\nnope: x\n"))
+		_, err := parseAndValidate(configSourceForPath(path), []byte("agents_page: 3\nnope: x\n"))
 		wantParseType(t, err, path)
 	})
 }
@@ -446,9 +447,9 @@ func TestParseAndValidateEntryOrderConsequence(t *testing.T) {
 // group name is KindSchema, naming the offending name and its line.
 func TestParseAndValidateUnknownGroupRejected(t *testing.T) {
 	const path = "/etc/chairlift/config.yml"
-	const data = "system_page:\n  nope_group:\n    enabled: true\n"
+	const data = "agents_page:\n  nope_group:\n    enabled: true\n"
 
-	raw, err := parseAndValidate(path, []byte(data))
+	raw, err := parseAndValidate(configSourceForPath(path), []byte(data))
 	if raw != nil {
 		t.Fatalf("parseAndValidate(...) rawConfig = %+v, want nil", raw)
 	}
@@ -465,9 +466,9 @@ func TestParseAndValidateUnknownGroupRejected(t *testing.T) {
 // null value is a no-op, returning a nil error and a non-nil *rawConfig.
 func TestParseAndValidateKnownGroupNull(t *testing.T) {
 	const path = "/etc/chairlift/config.yml"
-	const data = "system_page:\n  system_info_group:\n"
+	const data = "agents_page:\n  agents_group:\n"
 
-	raw, err := parseAndValidate(path, []byte(data))
+	raw, err := parseAndValidate(configSourceForPath(path), []byte(data))
 	if err != nil {
 		t.Fatalf("parseAndValidate(...) error = %v, want nil", err)
 	}
@@ -485,12 +486,12 @@ func TestParseAndValidateKnownGroupWrongShape(t *testing.T) {
 		name string
 		data string
 	}{
-		{"scalar value", "system_page:\n  system_info_group: 3\n"},
-		{"sequence value", "system_page:\n  system_info_group:\n    - a\n"},
+		{"scalar value", "agents_page:\n  agents_group: 3\n"},
+		{"sequence value", "agents_page:\n  agents_group:\n    - a\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			raw, err := parseAndValidate(path, []byte(tt.data))
+			raw, err := parseAndValidate(configSourceForPath(path), []byte(tt.data))
 			if raw != nil {
 				t.Fatalf("parseAndValidate(%q) rawConfig = %+v, want nil", tt.data, raw)
 			}
@@ -506,9 +507,9 @@ func TestParseAndValidateKnownGroupWrongShape(t *testing.T) {
 // unrecognized field name is KindSchema, naming it and its line.
 func TestParseAndValidateUnknownGroupFieldRejected(t *testing.T) {
 	const path = "/etc/chairlift/config.yml"
-	const data = "system_page:\n  system_info_group:\n    nope_field: 1\n"
+	const data = "agents_page:\n  agents_group:\n    nope_field: 1\n"
 
-	raw, err := parseAndValidate(path, []byte(data))
+	raw, err := parseAndValidate(configSourceForPath(path), []byte(data))
 	if raw != nil {
 		t.Fatalf("parseAndValidate(...) rawConfig = %+v, want nil", raw)
 	}
@@ -531,13 +532,13 @@ func TestParseAndValidateGroupFieldTypeMismatchRejected(t *testing.T) {
 		name string
 		data string
 	}{
-		{"bool field given a sequence", "system_page:\n  system_info_group:\n    enabled: [1, 2]\n"},
-		{"string field given a mapping", "system_page:\n  system_info_group:\n    app_id: {a: 1}\n"},
-		{"string slice field given a scalar", "system_page:\n  system_info_group:\n    bundles_paths: 5\n"},
+		{"bool field given a sequence", "agents_page:\n  agents_group:\n    enabled: [1, 2]\n"},
+		{"string field given a mapping", "agents_page:\n  agents_group:\n    app_id: {a: 1}\n"},
+		{"string slice field given a scalar", "agents_page:\n  agents_group:\n    bundles_paths: 5\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			raw, err := parseAndValidate(path, []byte(tt.data))
+			raw, err := parseAndValidate(configSourceForPath(path), []byte(tt.data))
 			if raw != nil {
 				t.Fatalf("parseAndValidate(%q) rawConfig = %+v, want nil", tt.data, raw)
 			}
@@ -562,14 +563,14 @@ func TestParseAndValidateUnknownGroupPrecedesValueInspection(t *testing.T) {
 		name string
 		data string
 	}{
-		{"null value", "system_page:\n  nope_group:\n"},
-		{"scalar value", "system_page:\n  nope_group: 3\n"},
-		{"sequence value", "system_page:\n  nope_group: [a]\n"},
-		{"mapping value", "system_page:\n  nope_group: {k: 1}\n"},
+		{"null value", "agents_page:\n  nope_group:\n"},
+		{"scalar value", "agents_page:\n  nope_group: 3\n"},
+		{"sequence value", "agents_page:\n  nope_group: [a]\n"},
+		{"mapping value", "agents_page:\n  nope_group: {k: 1}\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			raw, err := parseAndValidate(path, []byte(tt.data))
+			raw, err := parseAndValidate(configSourceForPath(path), []byte(tt.data))
 			if raw != nil {
 				t.Fatalf("parseAndValidate(%q) rawConfig = %+v, want nil", tt.data, raw)
 			}
@@ -587,14 +588,14 @@ func TestParseAndValidateUnknownGroupFieldPrecedesValueInspection(t *testing.T) 
 		name string
 		data string
 	}{
-		{"null value", "system_page:\n  system_info_group:\n    nope_field:\n"},
-		{"scalar value", "system_page:\n  system_info_group:\n    nope_field: 3\n"},
-		{"sequence value", "system_page:\n  system_info_group:\n    nope_field: [a]\n"},
-		{"mapping value", "system_page:\n  system_info_group:\n    nope_field: {k: 1}\n"},
+		{"null value", "agents_page:\n  agents_group:\n    nope_field:\n"},
+		{"scalar value", "agents_page:\n  agents_group:\n    nope_field: 3\n"},
+		{"sequence value", "agents_page:\n  agents_group:\n    nope_field: [a]\n"},
+		{"mapping value", "agents_page:\n  agents_group:\n    nope_field: {k: 1}\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			raw, err := parseAndValidate(path, []byte(tt.data))
+			raw, err := parseAndValidate(configSourceForPath(path), []byte(tt.data))
 			if raw != nil {
 				t.Fatalf("parseAndValidate(%q) rawConfig = %+v, want nil", tt.data, raw)
 			}
@@ -613,16 +614,16 @@ func TestParseAndValidateNonStringGroupKeyRejected(t *testing.T) {
 		name string
 		data string
 	}{
-		{"integer key", "system_page:\n  1: x\n"},
-		{"boolean key", "system_page:\n  true: x\n"},
-		{"null key", "system_page:\n  ~: x\n"},
-		{"custom-tagged scalar key", "system_page:\n  !custom foo: x\n"},
-		{"sequence key", "system_page:\n  ? [a]\n  : x\n"},
-		{"mapping key", "system_page:\n  ? {a: 1}\n  : x\n"},
+		{"integer key", "agents_page:\n  1: x\n"},
+		{"boolean key", "agents_page:\n  true: x\n"},
+		{"null key", "agents_page:\n  ~: x\n"},
+		{"custom-tagged scalar key", "agents_page:\n  !custom foo: x\n"},
+		{"sequence key", "agents_page:\n  ? [a]\n  : x\n"},
+		{"mapping key", "agents_page:\n  ? {a: 1}\n  : x\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			raw, err := parseAndValidate(path, []byte(tt.data))
+			raw, err := parseAndValidate(configSourceForPath(path), []byte(tt.data))
 			if raw != nil {
 				t.Fatalf("parseAndValidate(%q) rawConfig = %+v, want nil", tt.data, raw)
 			}
@@ -640,16 +641,16 @@ func TestParseAndValidateNonStringGroupFieldKeyRejected(t *testing.T) {
 		name string
 		data string
 	}{
-		{"integer key", "system_page:\n  system_info_group:\n    1: x\n"},
-		{"boolean key", "system_page:\n  system_info_group:\n    true: x\n"},
-		{"null key", "system_page:\n  system_info_group:\n    ~: x\n"},
-		{"custom-tagged scalar key", "system_page:\n  system_info_group:\n    !custom foo: x\n"},
-		{"sequence key", "system_page:\n  system_info_group:\n    ? [a]\n    : x\n"},
-		{"mapping key", "system_page:\n  system_info_group:\n    ? {a: 1}\n    : x\n"},
+		{"integer key", "agents_page:\n  agents_group:\n    1: x\n"},
+		{"boolean key", "agents_page:\n  agents_group:\n    true: x\n"},
+		{"null key", "agents_page:\n  agents_group:\n    ~: x\n"},
+		{"custom-tagged scalar key", "agents_page:\n  agents_group:\n    !custom foo: x\n"},
+		{"sequence key", "agents_page:\n  agents_group:\n    ? [a]\n    : x\n"},
+		{"mapping key", "agents_page:\n  agents_group:\n    ? {a: 1}\n    : x\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			raw, err := parseAndValidate(path, []byte(tt.data))
+			raw, err := parseAndValidate(configSourceForPath(path), []byte(tt.data))
 			if raw != nil {
 				t.Fatalf("parseAndValidate(%q) rawConfig = %+v, want nil", tt.data, raw)
 			}
@@ -663,9 +664,9 @@ func TestParseAndValidateNonStringGroupFieldKeyRejected(t *testing.T) {
 // page case (O2), reporting the anchor's line (3), not the alias's (I6).
 func TestParseAndValidateAliasToNonStringGroupKeyRejected(t *testing.T) {
 	const path = "/etc/chairlift/config.yml"
-	const data = "system_page:\n  system_info_group:\n    enabled: &n true\n  *n: x\n"
+	const data = "agents_page:\n  agents_group:\n    enabled: &n true\n  *n: x\n"
 
-	raw, err := parseAndValidate(path, []byte(data))
+	raw, err := parseAndValidate(configSourceForPath(path), []byte(data))
 	if raw != nil {
 		t.Fatalf("parseAndValidate(...) rawConfig = %+v, want nil", raw)
 	}
@@ -677,12 +678,12 @@ func TestParseAndValidateAliasToNonStringGroupKeyRejected(t *testing.T) {
 
 // TestParseAndValidateAliasToNonStringGroupFieldKeyRejected is the
 // group-field-level counterpart, with the alias key a sibling field name
-// within system_info_group's own mapping; the reported line is again 3.
+// within agents_group's own mapping; the reported line is again 3.
 func TestParseAndValidateAliasToNonStringGroupFieldKeyRejected(t *testing.T) {
 	const path = "/etc/chairlift/config.yml"
-	const data = "system_page:\n  system_info_group:\n    enabled: &n true\n    *n: x\n"
+	const data = "agents_page:\n  agents_group:\n    enabled: &n true\n    *n: x\n"
 
-	raw, err := parseAndValidate(path, []byte(data))
+	raw, err := parseAndValidate(configSourceForPath(path), []byte(data))
 	if raw != nil {
 		t.Fatalf("parseAndValidate(...) rawConfig = %+v, want nil", raw)
 	}
@@ -712,7 +713,7 @@ func TestParseAndValidateEveryCanonicalGroupAccepted(t *testing.T) {
 		for _, group := range groups {
 			t.Run(page+"/"+group, func(t *testing.T) {
 				data := page + ":\n  " + group + ":\n"
-				raw, loadErr := parseAndValidate(path, []byte(data))
+				raw, loadErr := parseAndValidate(configSourceForPath(path), []byte(data))
 				if loadErr != nil {
 					t.Fatalf("parseAndValidate(%q) error = %v, want nil", data, loadErr)
 				}
@@ -782,8 +783,12 @@ func TestParseAndValidateEveryGroupFieldAccepted(t *testing.T) {
 			t.Fatalf("no reflect.Type found for group field %q", field)
 		}
 		t.Run(field, func(t *testing.T) {
-			data := "system_page:\n  system_info_group:\n    " + field + ": " + sampleYAMLValueForType(fieldType) + "\n"
-			raw, loadErr := parseAndValidate(path, []byte(data))
+			value := sampleYAMLValueForType(fieldType)
+			if field == "wsl_backend" {
+				value = "lima"
+			}
+			data := "agents_page:\n  agents_group:\n    " + field + ": " + value + "\n"
+			raw, loadErr := parseAndValidate(configSourceForPath(path), []byte(data))
 			if loadErr != nil {
 				t.Fatalf("parseAndValidate(%q) error = %v, want nil", data, loadErr)
 			}
@@ -805,12 +810,12 @@ func TestParseAndValidateActionsValueWrongShape(t *testing.T) {
 		name string
 		data string
 	}{
-		{"scalar value", "system_page:\n  system_info_group:\n    actions: 5\n"},
-		{"mapping value", "system_page:\n  system_info_group:\n    actions:\n      k: 1\n"},
+		{"scalar value", "agents_page:\n  agents_group:\n    actions: 5\n"},
+		{"mapping value", "agents_page:\n  agents_group:\n    actions:\n      k: 1\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			raw, err := parseAndValidate(path, []byte(tt.data))
+			raw, err := parseAndValidate(configSourceForPath(path), []byte(tt.data))
 			if raw != nil {
 				t.Fatalf("parseAndValidate(%q) rawConfig = %+v, want nil", tt.data, raw)
 			}
@@ -822,8 +827,8 @@ func TestParseAndValidateActionsValueWrongShape(t *testing.T) {
 	}
 
 	t.Run("null value", func(t *testing.T) {
-		const data = "system_page:\n  system_info_group:\n    actions:\n"
-		raw, err := parseAndValidate(path, []byte(data))
+		const data = "agents_page:\n  agents_group:\n    actions:\n"
+		raw, err := parseAndValidate(configSourceForPath(path), []byte(data))
 		if err != nil {
 			t.Fatalf("parseAndValidate(...) error = %v, want nil", err)
 		}
@@ -843,24 +848,24 @@ func TestParseAndValidateActionEntryWrongShape(t *testing.T) {
 	const path = "/etc/chairlift/config.yml"
 
 	t.Run("null entry", func(t *testing.T) {
-		const data = "system_page:\n  system_info_group:\n    actions:\n      - ~\n"
-		raw, err := parseAndValidate(path, []byte(data))
+		const data = "agents_page:\n  agents_group:\n    actions:\n      - ~\n"
+		raw, err := parseAndValidate(configSourceForPath(path), []byte(data))
 		if raw != nil {
 			t.Fatalf("parseAndValidate(...) rawConfig = %+v, want nil (a null action entry is not a zero action)", raw)
 		}
 		wantParseType(t, err, path)
 	})
 	t.Run("scalar entry", func(t *testing.T) {
-		const data = "system_page:\n  system_info_group:\n    actions:\n      - 5\n"
-		raw, err := parseAndValidate(path, []byte(data))
+		const data = "agents_page:\n  agents_group:\n    actions:\n      - 5\n"
+		raw, err := parseAndValidate(configSourceForPath(path), []byte(data))
 		if raw != nil {
 			t.Fatalf("parseAndValidate(...) rawConfig = %+v, want nil", raw)
 		}
 		wantParseType(t, err, path)
 	})
 	t.Run("sequence entry", func(t *testing.T) {
-		const data = "system_page:\n  system_info_group:\n    actions:\n      - [a]\n"
-		raw, err := parseAndValidate(path, []byte(data))
+		const data = "agents_page:\n  agents_group:\n    actions:\n      - [a]\n"
+		raw, err := parseAndValidate(configSourceForPath(path), []byte(data))
 		if raw != nil {
 			t.Fatalf("parseAndValidate(...) rawConfig = %+v, want nil", raw)
 		}
@@ -874,9 +879,9 @@ func TestParseAndValidateActionEntryWrongShape(t *testing.T) {
 // catches what yaml.v3's Node.Decode silently ignores (I5).
 func TestParseAndValidateUnknownActionFieldRejected(t *testing.T) {
 	const path = "/etc/chairlift/config.yml"
-	const data = "system_page:\n  system_info_group:\n    actions:\n      - bogus: 1\n"
+	const data = "agents_page:\n  agents_group:\n    actions:\n      - bogus: 1\n"
 
-	raw, err := parseAndValidate(path, []byte(data))
+	raw, err := parseAndValidate(configSourceForPath(path), []byte(data))
 	if raw != nil {
 		t.Fatalf("parseAndValidate(...) rawConfig = %+v, want nil", raw)
 	}
@@ -900,14 +905,14 @@ func TestParseAndValidateUnknownActionFieldPrecedesValueInspection(t *testing.T)
 		name string
 		data string
 	}{
-		{"null value", "system_page:\n  system_info_group:\n    actions:\n      - bogus:\n"},
-		{"scalar value", "system_page:\n  system_info_group:\n    actions:\n      - bogus: 3\n"},
-		{"sequence value", "system_page:\n  system_info_group:\n    actions:\n      - bogus: [a]\n"},
-		{"mapping value", "system_page:\n  system_info_group:\n    actions:\n      - bogus: {k: 1}\n"},
+		{"null value", "agents_page:\n  agents_group:\n    actions:\n      - bogus:\n"},
+		{"scalar value", "agents_page:\n  agents_group:\n    actions:\n      - bogus: 3\n"},
+		{"sequence value", "agents_page:\n  agents_group:\n    actions:\n      - bogus: [a]\n"},
+		{"mapping value", "agents_page:\n  agents_group:\n    actions:\n      - bogus: {k: 1}\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			raw, err := parseAndValidate(path, []byte(tt.data))
+			raw, err := parseAndValidate(configSourceForPath(path), []byte(tt.data))
 			if raw != nil {
 				t.Fatalf("parseAndValidate(%q) rawConfig = %+v, want nil", tt.data, raw)
 			}
@@ -921,9 +926,9 @@ func TestParseAndValidateUnknownActionFieldPrecedesValueInspection(t *testing.T)
 // KindParseType with a non-nil Err.
 func TestParseAndValidateActionFieldTypeMismatchRejected(t *testing.T) {
 	const path = "/etc/chairlift/config.yml"
-	const data = "system_page:\n  system_info_group:\n    actions:\n      - sudo: {a: 1}\n"
+	const data = "agents_page:\n  agents_group:\n    actions:\n      - sudo: {a: 1}\n"
 
-	raw, err := parseAndValidate(path, []byte(data))
+	raw, err := parseAndValidate(configSourceForPath(path), []byte(data))
 	if raw != nil {
 		t.Fatalf("parseAndValidate(...) rawConfig = %+v, want nil", raw)
 	}
@@ -943,16 +948,16 @@ func TestParseAndValidateNonStringActionFieldKeyRejected(t *testing.T) {
 		name string
 		data string
 	}{
-		{"integer key", "system_page:\n  system_info_group:\n    actions:\n      - 1: x\n"},
-		{"boolean key", "system_page:\n  system_info_group:\n    actions:\n      - true: x\n"},
-		{"null key", "system_page:\n  system_info_group:\n    actions:\n      - ~: x\n"},
-		{"custom-tagged scalar key", "system_page:\n  system_info_group:\n    actions:\n      - !custom foo: x\n"},
-		{"sequence key", "system_page:\n  system_info_group:\n    actions:\n      - ? [a]\n        : x\n"},
-		{"mapping key", "system_page:\n  system_info_group:\n    actions:\n      - ? {a: 1}\n        : x\n"},
+		{"integer key", "agents_page:\n  agents_group:\n    actions:\n      - 1: x\n"},
+		{"boolean key", "agents_page:\n  agents_group:\n    actions:\n      - true: x\n"},
+		{"null key", "agents_page:\n  agents_group:\n    actions:\n      - ~: x\n"},
+		{"custom-tagged scalar key", "agents_page:\n  agents_group:\n    actions:\n      - !custom foo: x\n"},
+		{"sequence key", "agents_page:\n  agents_group:\n    actions:\n      - ? [a]\n        : x\n"},
+		{"mapping key", "agents_page:\n  agents_group:\n    actions:\n      - ? {a: 1}\n        : x\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			raw, err := parseAndValidate(path, []byte(tt.data))
+			raw, err := parseAndValidate(configSourceForPath(path), []byte(tt.data))
 			if raw != nil {
 				t.Fatalf("parseAndValidate(%q) rawConfig = %+v, want nil", tt.data, raw)
 			}
@@ -970,9 +975,9 @@ func TestParseAndValidateNonStringActionFieldKeyRejected(t *testing.T) {
 // alias's.
 func TestParseAndValidateAliasToNonStringActionFieldKeyRejected(t *testing.T) {
 	const path = "/etc/chairlift/config.yml"
-	const data = "system_page:\n  system_info_group:\n    actions:\n      - sudo: &n true\n        *n: x\n"
+	const data = "agents_page:\n  agents_group:\n    actions:\n      - sudo: &n true\n        *n: x\n"
 
-	raw, err := parseAndValidate(path, []byte(data))
+	raw, err := parseAndValidate(configSourceForPath(path), []byte(data))
 	if raw != nil {
 		t.Fatalf("parseAndValidate(...) rawConfig = %+v, want nil", raw)
 	}
@@ -1016,8 +1021,13 @@ func TestParseAndValidateEveryActionFieldAccepted(t *testing.T) {
 			t.Fatalf("no reflect.Type found for action field %q", field)
 		}
 		t.Run(field, func(t *testing.T) {
-			data := "system_page:\n  system_info_group:\n    actions:\n      - " + field + ": " + sampleYAMLValueForType(fieldType) + "\n"
-			raw, loadErr := parseAndValidate(path, []byte(data))
+			val := sampleYAMLValueForType(fieldType)
+			extra := ""
+			if field == "sudo" {
+				extra = "        script: /usr/bin/clean\n"
+			}
+			data := "agents_page:\n  agents_group:\n    actions:\n      - " + field + ": " + val + "\n" + extra
+			raw, loadErr := parseAndValidate(configSourceForPath(path), []byte(data))
 			if loadErr != nil {
 				t.Fatalf("parseAndValidate(%q) error = %v, want nil", data, loadErr)
 			}
@@ -1036,8 +1046,8 @@ func TestParseAndValidateTypeErrorRegression(t *testing.T) {
 	const path = "/etc/chairlift/config.yml"
 
 	t.Run("group field", func(t *testing.T) {
-		const data = "system_page:\n  system_info_group:\n    enabled: [1, 2]\n"
-		_, loadErr := parseAndValidate(path, []byte(data))
+		const data = "agents_page:\n  agents_group:\n    enabled: [1, 2]\n"
+		_, loadErr := parseAndValidate(configSourceForPath(path), []byte(data))
 		wantParseType(t, loadErr, path)
 
 		var typeErr *yaml.TypeError
@@ -1047,8 +1057,8 @@ func TestParseAndValidateTypeErrorRegression(t *testing.T) {
 	})
 
 	t.Run("action field", func(t *testing.T) {
-		const data = "system_page:\n  system_info_group:\n    actions:\n      - sudo: [1, 2]\n"
-		_, loadErr := parseAndValidate(path, []byte(data))
+		const data = "agents_page:\n  agents_group:\n    actions:\n      - sudo: [1, 2]\n"
+		_, loadErr := parseAndValidate(configSourceForPath(path), []byte(data))
 		wantParseType(t, loadErr, path)
 
 		var typeErr *yaml.TypeError
@@ -1066,18 +1076,18 @@ func TestParseAndValidateTypeErrorRegression(t *testing.T) {
 // set values, not converted to omission.
 func TestParseAndValidateExplicitZeroPreserved(t *testing.T) {
 	const path = "/etc/chairlift/config.yml"
-	const data = "system_page:\n  system_info_group:\n    enabled: false\n    app_id: \"\"\n    bundles_paths: []\n"
+	const data = "agents_page:\n  agents_group:\n    enabled: false\n    app_id: \"\"\n    bundles_paths: []\n"
 
-	raw, err := parseAndValidate(path, []byte(data))
+	raw, err := parseAndValidate(configSourceForPath(path), []byte(data))
 	if err != nil {
 		t.Fatalf("parseAndValidate(...) error = %v, want nil", err)
 	}
 	if raw == nil {
 		t.Fatalf("parseAndValidate(...) rawConfig = nil, want non-nil")
 	}
-	group, ok := raw.SystemPage["system_info_group"]
+	group, ok := raw.AgentsPage["agents_group"]
 	if !ok {
-		t.Fatalf("raw.SystemPage[%q] missing", "system_info_group")
+		t.Fatalf("raw.AgentsPage[%q] missing", "agents_group")
 	}
 
 	if group.Enabled == nil {
@@ -1119,13 +1129,13 @@ func TestParseAndValidatePathSchemaName(t *testing.T) {
 		data string
 	}{
 		{"unknown page", "not_a_page: 1\n"},
-		{"unknown group", "system_page:\n  nope_group:\n    enabled: true\n"},
-		{"unknown group field", "system_page:\n  system_info_group:\n    nope_field: 1\n"},
-		{"unknown action field", "system_page:\n  system_info_group:\n    actions:\n      - bogus: 1\n"},
+		{"unknown group", "agents_page:\n  nope_group:\n    enabled: true\n"},
+		{"unknown group field", "agents_page:\n  agents_group:\n    nope_field: 1\n"},
+		{"unknown action field", "agents_page:\n  agents_group:\n    actions:\n      - bogus: 1\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := parseAndValidate(path, []byte(tt.data))
+			_, err := parseAndValidate(configSourceForPath(path), []byte(tt.data))
 			if err == nil {
 				t.Fatalf("parseAndValidate(%q) error = nil, want non-nil", tt.data)
 			}
@@ -1149,14 +1159,14 @@ func TestParseAndValidatePathValidatorShape(t *testing.T) {
 		data string
 	}{
 		{"document (top-level sequence)", "- a\n- b\n"},
-		{"page value (scalar)", "system_page: 3\n"},
-		{"group value (scalar)", "system_page:\n  system_info_group: 3\n"},
-		{"actions value (scalar)", "system_page:\n  system_info_group:\n    actions: 5\n"},
-		{"null action entry", "system_page:\n  system_info_group:\n    actions:\n      - ~\n"},
+		{"page value (scalar)", "agents_page: 3\n"},
+		{"group value (scalar)", "agents_page:\n  agents_group: 3\n"},
+		{"actions value (scalar)", "agents_page:\n  agents_group:\n    actions: 5\n"},
+		{"null action entry", "agents_page:\n  agents_group:\n    actions:\n      - ~\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := parseAndValidate(path, []byte(tt.data))
+			_, err := parseAndValidate(configSourceForPath(path), []byte(tt.data))
 			if err == nil {
 				t.Fatalf("parseAndValidate(%q) error = nil, want non-nil", tt.data)
 			}
@@ -1184,12 +1194,12 @@ func TestParseAndValidatePathDeclaredType(t *testing.T) {
 		name string
 		data string
 	}{
-		{"group field", "system_page:\n  system_info_group:\n    enabled: [1, 2]\n"},
-		{"action field", "system_page:\n  system_info_group:\n    actions:\n      - sudo: {a: 1}\n"},
+		{"group field", "agents_page:\n  agents_group:\n    enabled: [1, 2]\n"},
+		{"action field", "agents_page:\n  agents_group:\n    actions:\n      - sudo: {a: 1}\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := parseAndValidate(path, []byte(tt.data))
+			_, err := parseAndValidate(configSourceForPath(path), []byte(tt.data))
 			if err == nil {
 				t.Fatalf("parseAndValidate(%q) error = nil, want non-nil", tt.data)
 			}
@@ -1198,4 +1208,116 @@ func TestParseAndValidatePathDeclaredType(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestParseAndValidateSudoActionProvenanceAndPath(t *testing.T) {
+	t.Run("untrusted config with sudo true rejected", func(t *testing.T) {
+		const path = "/home/user/.config/chairlift/config.yml"
+		const data = "maintenance_page:\n  maintenance_cleanup_group:\n    actions:\n      - title: Run\n        script: /usr/bin/clean\n        sudo: true\n"
+		raw, err := parseAndValidate(configSourceForPath(path), []byte(data))
+		if raw != nil {
+			t.Fatalf("parseAndValidate(...) raw = %+v, want nil", raw)
+		}
+		wantSchema(t, err, path)
+		if !strings.Contains(err.Detail, "sudo actions are only permitted in trusted configurations") {
+			t.Fatalf("err.Detail = %q, want provenance error", err.Detail)
+		}
+	})
+
+	t.Run("untrusted config with non-sudo action accepted", func(t *testing.T) {
+		const path = "/home/user/.config/chairlift/config.yml"
+		const data = "maintenance_page:\n  maintenance_cleanup_group:\n    actions:\n      - title: Run\n        script: /usr/bin/clean\n        sudo: false\n"
+		raw, err := parseAndValidate(configSourceForPath(path), []byte(data))
+		if err != nil {
+			t.Fatalf("parseAndValidate(...) err = %v, want nil", err)
+		}
+		if raw == nil {
+			t.Fatalf("parseAndValidate(...) raw = nil, want non-nil")
+		}
+	})
+
+	t.Run("path traversal out of trusted dir rejected", func(t *testing.T) {
+		const path = "/etc/chairlift/../tmp/evil/config.yml"
+		const data = "maintenance_page:\n  maintenance_cleanup_group:\n    actions:\n      - title: Run\n        script: /usr/bin/clean\n        sudo: true\n"
+		raw, err := parseAndValidate(configSourceForPath(path), []byte(data))
+		if raw != nil {
+			t.Fatalf("parseAndValidate(...) raw = %+v, want nil", raw)
+		}
+		wantSchema(t, err, path)
+		if !strings.Contains(err.Detail, "sudo actions are only permitted in trusted configurations") {
+			t.Fatalf("err.Detail = %q, want provenance error", err.Detail)
+		}
+	})
+
+	t.Run("trusted config with sudo true and relative script rejected", func(t *testing.T) {
+		const path = "/etc/chairlift/config.yml"
+		const data = "maintenance_page:\n  maintenance_cleanup_group:\n    actions:\n      - title: Run\n        script: ./clean.sh\n        sudo: true\n"
+		raw, err := parseAndValidate(configSourceForPath(path), []byte(data))
+		if raw != nil {
+			t.Fatalf("parseAndValidate(...) raw = %+v, want nil", raw)
+		}
+		wantSchema(t, err, path)
+		if !strings.Contains(err.Detail, "must be an absolute path") {
+			t.Fatalf("err.Detail = %q, want absolute path error", err.Detail)
+		}
+	})
+
+	t.Run("trusted config with sudo true and missing script rejected", func(t *testing.T) {
+		const path = "/etc/chairlift/config.yml"
+		const data = "maintenance_page:\n  maintenance_cleanup_group:\n    actions:\n      - title: Run\n        sudo: true\n"
+		raw, err := parseAndValidate(configSourceForPath(path), []byte(data))
+		if raw != nil {
+			t.Fatalf("parseAndValidate(...) raw = %+v, want nil", raw)
+		}
+		wantSchema(t, err, path)
+		if !strings.Contains(err.Detail, "must be an absolute path") {
+			t.Fatalf("err.Detail = %q, want absolute path error", err.Detail)
+		}
+	})
+
+	t.Run("symlink out of trusted dir rejected", func(t *testing.T) {
+		tmp := t.TempDir()
+		evilDir := filepath.Join(tmp, "evil")
+		if err := os.MkdirAll(evilDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		evilConfig := filepath.Join(evilDir, "config.yml")
+		const data = "maintenance_page:\n  maintenance_cleanup_group:\n    actions:\n      - title: Run\n        script: /usr/bin/clean\n        sudo: true\n"
+		if err := os.WriteFile(evilConfig, []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		// Create a symlink in a trusted dir pointing to evilConfig
+		trustedFake := filepath.Join(tmp, "trusted")
+		if err := os.MkdirAll(trustedFake, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		linkPath := filepath.Join(trustedFake, "config.yml")
+		if err := os.Symlink(evilConfig, linkPath); err != nil {
+			t.Fatal(err)
+		}
+
+		withTrustedConfigDirectories(t, []string{trustedFake})
+
+		raw, err := parseAndValidate(configSourceForPath(linkPath), []byte(data))
+		if raw != nil {
+			t.Fatalf("parseAndValidate(...) raw = %+v, want nil", raw)
+		}
+		wantSchema(t, err, linkPath)
+		if !strings.Contains(err.Detail, "sudo actions are only permitted in trusted configurations") {
+			t.Fatalf("err.Detail = %q, want provenance error", err.Detail)
+		}
+	})
+
+	t.Run("trusted config with sudo true and absolute script accepted", func(t *testing.T) {
+		const path = "/etc/chairlift/config.yml"
+		const data = "maintenance_page:\n  maintenance_cleanup_group:\n    actions:\n      - title: Run\n        script: /usr/bin/clean\n        sudo: true\n"
+		raw, err := parseAndValidate(configSourceForPath(path), []byte(data))
+		if err != nil {
+			t.Fatalf("parseAndValidate(...) err = %v, want nil", err)
+		}
+		if raw == nil {
+			t.Fatalf("parseAndValidate(...) raw = nil, want non-nil")
+		}
+	})
 }

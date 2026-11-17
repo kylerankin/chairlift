@@ -6,9 +6,16 @@
 
 ## Related issue
 
-<!-- Use a closing keyword when this pull request fully resolves the issue. -->
+<!-- Use Closes #N when this pull request resolves the issue, Refs #N when it is only related. See how issues and PRs work here: https://github.com/projectbluefin/common/blob/main/docs/skills/label-workflow.md -->
 
 Closes #
+
+## Delivery
+
+<!-- For product fixes, name the affected Homebrew app and any image-installed helpers. Image-installed helpers reach users through the OS image, not the Homebrew release. For code-only work, write "not applicable". -->
+
+- Affected app/package or image-installed component:
+- Release/delivery remaining steps:
 
 ## Change classification
 
@@ -23,13 +30,6 @@ Closes #
 
 - [ ] `make ci`
 - [ ] Additional relevant checks (including `make e2e` when applicable):
-
-## Factory Self-Improvement & Two-Output Rule
-
-<!-- Every task has two outputs: the work and the learning. -->
-
-- [ ] Discovered a workaround, pattern, or convention?
-- [ ] Skill package in `docs/skills/` updated (or created) in this same PR, or verified correction recorded in `.memory/`?
 
 ## Tests and documentation
 

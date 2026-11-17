@@ -1,0 +1,322 @@
+package homebrew
+
+import (
+	"errors"
+	"path/filepath"
+	"reflect"
+	"testing"
+)
+
+// noTrustedPackages is `brew trust --json=v1` with no per-package entries.
+const noTrustedPackages = `{"taps":[],"formulae":[],"casks":[],"commands":[]}`
+
+// brewTrustStub builds a fake-brew body that answers the commands
+// ListUntrustedTaps issues — `tap-info --installed --json`, `--prefix` and
+// `trust --json=v1` — and fails loudly on anything else, so an unexpected
+// invocation surfaces as a test failure rather than as empty output.
+func brewTrustStub(tapInfo, prefix string) string {
+	return brewTrustStubWithTrust(tapInfo, prefix, noTrustedPackages)
+}
+
+// brewTrustStubWithTrust is brewTrustStub with the per-package trust store
+// `brew trust --json=v1` prints.
+func brewTrustStubWithTrust(tapInfo, prefix, trustJSON string) string {
+	return "case \"$1 $2\" in\n" +
+		"tap-info*) printf '%s' '" + tapInfo + "' ;;\n" +
+		"--prefix*) printf '%s\\n' '" + prefix + "' ;;\n" +
+		"'trust --json=v1') printf '%s' '" + trustJSON + "' ;;\n" +
+		"*) echo \"unexpected: $*\" >&2; exit 1 ;;\n" +
+		"esac"
+}
+
+// brewTrustPrefix stages a Homebrew prefix whose Cellar and Caskroom carry
+// the install receipts installedFormulaeByTap and installedCasksByTap read.
+// formulae maps keg name -> source tap; casks maps cask token -> source tap.
+func brewTrustPrefix(t *testing.T, formulae, casks map[string]string) string {
+	t.Helper()
+	prefix := t.TempDir()
+	for keg, tap := range formulae {
+		writeFile(t, filepath.Join(prefix, "Cellar", keg, "1.0", "INSTALL_RECEIPT.json"),
+			`{"source": {"tap": "`+tap+`"}}`)
+	}
+	for token, tap := range casks {
+		writeFile(t, filepath.Join(prefix, "Caskroom", token, ".metadata", "INSTALL_RECEIPT.json"),
+			`{"source": {"tap": "`+tap+`"}}`)
+	}
+	return prefix
+}
+
+// TestListUntrustedTapsReportsInstalledPackages drives the whole composition
+// end to end: brew reports four taps, two of them untrusted, and the receipts
+// on disk decide which of those two are actionable. The result must carry
+// fully qualified names — that is what `brew trust` is handed by
+// TrustPackages — and must be sorted at both levels so the remediation UI
+// does not reorder between refreshes.
+func TestListUntrustedTapsReportsInstalledPackages(t *testing.T) {
+	prefix := brewTrustPrefix(t,
+		map[string]string{
+			"multica": "multica-ai/tap",
+			"zx":      "multica-ai/tap",
+			"jq":      "homebrew/core",
+		},
+		map[string]string{
+			"somecask": "ublue-os/tap",
+			"codex":    "homebrew/cask",
+		})
+	argvLog := fakeBrewOnPath(t, brewTrustStub(tapInfoJSON, prefix))
+
+	taps, err := ListUntrustedTaps()
+	if err != nil {
+		t.Fatalf("ListUntrustedTaps: %v", err)
+	}
+
+	want := []UntrustedTap{
+		{
+			Name:     "multica-ai/tap",
+			Formulae: []string{"multica-ai/tap/multica", "multica-ai/tap/zx"},
+		},
+		{
+			Name:  "ublue-os/tap",
+			Casks: []string{"ublue-os/tap/somecask"},
+		},
+	}
+	if !reflect.DeepEqual(taps, want) {
+		t.Errorf("ListUntrustedTaps() = %#v, want %#v", taps, want)
+	}
+
+	assertArgv(t, argvLog, []string{"tap-info --installed --json", "--prefix", "trust --json=v1"})
+}
+
+// TestListUntrustedTapsOmitsPackagesTrustedOnTheirOwn covers issue #537's
+// reload symptom: `brew trust --formula` leaves the tap itself untrusted in
+// tap-info, so the per-package trust store must be read or the trusted
+// program is listed as paused again on the next load. A tap whose every
+// installed package is trusted drops out entirely. brew stores entries
+// lowercased, so the match ignores case.
+func TestListUntrustedTapsOmitsPackagesTrustedOnTheirOwn(t *testing.T) {
+	prefix := brewTrustPrefix(t,
+		map[string]string{
+			"multica": "multica-ai/tap",
+			"zx":      "multica-ai/tap",
+		},
+		map[string]string{
+			"somecask": "ublue-os/tap",
+		})
+	trustJSON := `{"taps":[],"formulae":["multica-ai/tap/multica"],"casks":["ublue-os/tap/SomeCask"],"commands":[]}`
+	fakeBrewOnPath(t, brewTrustStubWithTrust(tapInfoJSON, prefix, trustJSON))
+
+	taps, err := ListUntrustedTaps()
+	if err != nil {
+		t.Fatalf("ListUntrustedTaps: %v", err)
+	}
+	want := []UntrustedTap{{
+		Name:     "multica-ai/tap",
+		Formulae: []string{"multica-ai/tap/zx"},
+	}}
+	if !reflect.DeepEqual(taps, want) {
+		t.Errorf("ListUntrustedTaps() = %#v, want %#v", taps, want)
+	}
+}
+
+// TestListUntrustedTapsWithoutTrustListingKeepsEveryPackage covers a
+// Homebrew without `brew trust --json=v1`: the listing fails, and every
+// installed package of an untrusted tap is listed rather than the whole
+// check failing.
+func TestListUntrustedTapsWithoutTrustListingKeepsEveryPackage(t *testing.T) {
+	prefix := brewTrustPrefix(t, map[string]string{"multica": "multica-ai/tap"}, nil)
+	body := "case \"$1\" in\n" +
+		"tap-info) printf '%s' '" + tapInfoJSON + "' ;;\n" +
+		"--prefix) printf '%s\\n' '" + prefix + "' ;;\n" +
+		"*) echo 'Error: invalid option: --json=v1' >&2; exit 1 ;;\n" +
+		"esac"
+	fakeBrewOnPath(t, body)
+
+	taps, err := ListUntrustedTaps()
+	if err != nil {
+		t.Fatalf("ListUntrustedTaps: %v", err)
+	}
+	want := []UntrustedTap{{Name: "multica-ai/tap", Formulae: []string{"multica-ai/tap/multica"}}}
+	if !reflect.DeepEqual(taps, want) {
+		t.Errorf("ListUntrustedTaps() = %#v, want %#v", taps, want)
+	}
+}
+
+// TestListUntrustedTapsSkipsTapsWithNothingInstalled pins the "not
+// actionable" rule: a tap brew marks untrusted but from which nothing is
+// installed has no package to hand `brew trust`, so it must be dropped
+// entirely rather than surfaced as an empty row.
+func TestListUntrustedTapsSkipsTapsWithNothingInstalled(t *testing.T) {
+	prefix := brewTrustPrefix(t, map[string]string{"jq": "homebrew/core"}, nil)
+	fakeBrewOnPath(t, brewTrustStub(tapInfoJSON, prefix))
+
+	taps, err := ListUntrustedTaps()
+	if err != nil {
+		t.Fatalf("ListUntrustedTaps: %v", err)
+	}
+	if len(taps) != 0 {
+		t.Errorf("ListUntrustedTaps() = %#v, want no actionable taps", taps)
+	}
+}
+
+// TestListUntrustedTapsWithoutUntrustedTapsSkipsPrefix covers the early
+// return: when every installed tap is trusted there is nothing to correlate,
+// so the receipt scan — and the second brew invocation that locates it — must
+// not happen at all.
+func TestListUntrustedTapsWithoutUntrustedTapsSkipsPrefix(t *testing.T) {
+	const allTrusted = `[{"name":"homebrew/core","installed":true,"trusted":true}]`
+	argvLog := fakeBrewOnPath(t, brewTrustStub(allTrusted, t.TempDir()))
+
+	taps, err := ListUntrustedTaps()
+	if err != nil {
+		t.Fatalf("ListUntrustedTaps: %v", err)
+	}
+	if taps != nil {
+		t.Errorf("ListUntrustedTaps() = %#v, want nil", taps)
+	}
+	assertArgv(t, argvLog, []string{"tap-info --installed --json"})
+}
+
+// TestListUntrustedTapsMissingPrefixYieldsNoPackages covers a prefix that
+// exists but holds neither Cellar nor Caskroom: the directory reads fail, the
+// maps come back empty, and every untrusted tap is therefore non-actionable.
+// It must degrade to an empty result rather than an error.
+func TestListUntrustedTapsMissingPrefixYieldsNoPackages(t *testing.T) {
+	fakeBrewOnPath(t, brewTrustStub(tapInfoJSON, filepath.Join(t.TempDir(), "absent")))
+
+	taps, err := ListUntrustedTaps()
+	if err != nil {
+		t.Fatalf("ListUntrustedTaps: %v", err)
+	}
+	if len(taps) != 0 {
+		t.Errorf("ListUntrustedTaps() = %#v, want no actionable taps", taps)
+	}
+}
+
+// TestListUntrustedTapsPropagatesTapInfoFailure asserts the first brew call's
+// failure is returned, not swallowed into an empty list: an empty list is
+// indistinguishable from "everything is trusted" and would quietly hide
+// untrusted packages from the UI.
+func TestListUntrustedTapsPropagatesTapInfoFailure(t *testing.T) {
+	argvLog := fakeBrewOnPath(t, "echo 'Error: brew is broken' >&2; exit 1")
+
+	taps, err := ListUntrustedTaps()
+	if err == nil {
+		t.Fatalf("ListUntrustedTaps() = %#v, want error", taps)
+	}
+	if taps != nil {
+		t.Errorf("ListUntrustedTaps() = %#v, want nil result alongside the error", taps)
+	}
+	var brewErr *Error
+	if !errors.As(err, &brewErr) {
+		t.Errorf("error %v (%T), want *homebrew.Error", err, err)
+	}
+	assertArgv(t, argvLog, []string{"tap-info --installed --json"})
+}
+
+// TestListUntrustedTapsRejectsMalformedTapInfo covers brew answering
+// successfully with output that is not the expected JSON array.
+func TestListUntrustedTapsRejectsMalformedTapInfo(t *testing.T) {
+	fakeBrewOnPath(t, emit("not json"))
+
+	if taps, err := ListUntrustedTaps(); err == nil {
+		t.Fatalf("ListUntrustedTaps() = %#v, want parse error", taps)
+	}
+}
+
+// TestListUntrustedTapsPropagatesPrefixFailure covers the second brew call
+// failing after the first succeeded: brew answers tap-info but not --prefix,
+// so the Cellar location is unknown and the correlation cannot be completed.
+func TestListUntrustedTapsPropagatesPrefixFailure(t *testing.T) {
+	body := "case \"$1\" in\n" +
+		"tap-info) printf '%s' '" + tapInfoJSON + "' ;;\n" +
+		"*) exit 1 ;;\n" +
+		"esac"
+	argvLog := fakeBrewOnPath(t, body)
+
+	if taps, err := ListUntrustedTaps(); err == nil {
+		t.Fatalf("ListUntrustedTaps() = %#v, want the --prefix failure", taps)
+	}
+	assertArgv(t, argvLog, []string{"tap-info --installed --json", "--prefix"})
+}
+
+// TestBrewPrefixTrimsTrailingNewline pins the trim: `brew --prefix` prints a
+// trailing newline, and an untrimmed value would be joined into
+// "<prefix>\n/Cellar", a path that never exists.
+func TestBrewPrefixTrimsTrailingNewline(t *testing.T) {
+	argvLog := fakeBrewOnPath(t, "printf '%s\\n' '/home/linuxbrew/.linuxbrew'")
+
+	prefix, err := brewPrefix()
+	if err != nil {
+		t.Fatalf("brewPrefix: %v", err)
+	}
+	if prefix != "/home/linuxbrew/.linuxbrew" {
+		t.Errorf("brewPrefix() = %q, want the path with no surrounding whitespace", prefix)
+	}
+	assertArgv(t, argvLog, []string{"--prefix"})
+}
+
+// TestBrewPrefixWithoutBrewReportsNotFound covers brew being absent from
+// $PATH entirely, which must surface as the actionable NotFoundError rather
+// than a bare exec failure. The Linuxbrew fallback is pointed at a path that
+// does not exist, so the test asserts the same absence on a host that has a
+// real Homebrew installed there.
+func TestBrewPrefixWithoutBrewReportsNotFound(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	withHostResolution(t, "", absentPath(t))
+
+	prefix, err := brewPrefix()
+	if err == nil {
+		t.Fatalf("brewPrefix() = %q, want error with no brew on PATH", prefix)
+	}
+	var notFound *NotFoundError
+	if !errors.As(err, &notFound) {
+		t.Errorf("error %v (%T), want *homebrew.NotFoundError", err, err)
+	}
+	if prefix != "" {
+		t.Errorf("brewPrefix() = %q, want empty prefix alongside the error", prefix)
+	}
+}
+
+// TestTrustFormulaTrustsOnlyAnUntrustedTap pins when `brew trust` runs. Only
+// a tap brew reports untrusted needs it; a trusted tap already loads, and a
+// Homebrew older than 6 reports no "trusted" key and has no `brew trust`
+// command at all, so running it there failed Agent Mode's install.
+func TestTrustFormulaTrustsOnlyAnUntrustedTap(t *testing.T) {
+	for _, tc := range []struct {
+		name, tapInfo string
+		want          []string
+	}{
+		{"untrusted", `[{"name":"llmmanorg/tap","trusted":false}]`,
+			[]string{"tap-info --json llmmanorg/tap", "trust --formula llmmanorg/tap/llmman"}},
+		{"trusted", `[{"name":"llmmanorg/tap","trusted":true}]`,
+			[]string{"tap-info --json llmmanorg/tap"}},
+		{"homebrew before 6", `[{"name":"llmmanorg/tap"}]`,
+			[]string{"tap-info --json llmmanorg/tap"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			argvLog := fakeBrewOnPath(t, "case \"$1\" in\n"+
+				"tap-info) printf '%s' '"+tc.tapInfo+"' ;;\n"+
+				"trust) ;;\n"+
+				"*) echo \"unexpected: $*\" >&2; exit 1 ;;\n"+
+				"esac")
+			if err := TrustFormula("llmmanorg/tap/llmman"); err != nil {
+				t.Fatalf("TrustFormula: %v", err)
+			}
+			assertArgv(t, argvLog, tc.want)
+		})
+	}
+}
+
+// TestTrustCaskTrustsTheCaskNamespace pins that a cask is trusted with
+// --cask: `brew trust --formula` on a cask name trusts nothing.
+func TestTrustCaskTrustsTheCaskNamespace(t *testing.T) {
+	argvLog := fakeBrewOnPath(t, "case \"$1\" in\n"+
+		"tap-info) printf '%s' '[{\"name\":\"ublue-os/tap\",\"trusted\":false}]' ;;\n"+
+		"trust) ;;\n"+
+		"*) echo \"unexpected: $*\" >&2; exit 1 ;;\n"+
+		"esac")
+	if err := TrustCask("ublue-os/tap/goose-linux"); err != nil {
+		t.Fatalf("TrustCask: %v", err)
+	}
+	assertArgv(t, argvLog, []string{"tap-info --json ublue-os/tap", "trust --cask ublue-os/tap/goose-linux"})
+}

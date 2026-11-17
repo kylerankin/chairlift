@@ -81,6 +81,22 @@ func TestRunHelperPassesFixedHelperPathAndCommandOnly(t *testing.T) {
 			},
 			want: []string{HelperPath, "dx-disable"},
 		},
+		{
+			name: "pin dated build",
+			call: func(ctx context.Context, pkexec string) error {
+				_, _, err := runHelper(ctx, pkexec, ubluehelper.CommandPin, "20240229")
+				return err
+			},
+			want: []string{HelperPath, "pin", "20240229"},
+		},
+		{
+			name: "unpin",
+			call: func(ctx context.Context, pkexec string) error {
+				_, _, err := runHelper(ctx, pkexec, ubluehelper.CommandUnpin)
+				return err
+			},
+			want: []string{HelperPath, "unpin"},
+		},
 	}
 
 	for _, test := range tests {
@@ -225,11 +241,16 @@ func stubDetectionWithGPU(t *testing.T, info imageinfo.Info, infoErr error, grou
 	t.Helper()
 
 	previousInfo, previousGroups, previousGPU := detectInfo, lookupGroups, detectGPU
+	previousStat, previousDir := statHelper, policyActionsDir
 	detectInfo = func() (imageinfo.Info, error) { return info, infoErr }
 	lookupGroups = func() ([]string, error) { return groups, nil }
 	detectGPU = func() gpu.Set { return hardware }
+	// The real host's helper and policies must not leak into Detect's result.
+	statHelper = func(string) (os.FileInfo, error) { return nil, os.ErrNotExist }
+	policyActionsDir = t.TempDir()
 	t.Cleanup(func() {
 		detectInfo, lookupGroups, detectGPU = previousInfo, previousGroups, previousGPU
+		statHelper, policyActionsDir = previousStat, previousDir
 	})
 }
 
@@ -377,6 +398,94 @@ func TestDetectReportsMalformedDescriptor(t *testing.T) {
 	}
 }
 
+// Detect must fail closed when the authoritative channel table is broken:
+// it reports the error and offers no switch, even on an otherwise perfectly
+// recognized host, because the privileged helper re-reads channels.yml and
+// refuses after authentication.
+func TestDetectFailsClosedOnABrokenChannelTable(t *testing.T) {
+	dir := t.TempDir()
+	broken := filepath.Join(dir, "channels.yml")
+	if err := os.WriteFile(broken, []byte("images:\n  ghcr.io/x/y:\n    stable_tags: [latest]\n"), 0o644); err != nil {
+		t.Fatalf("writing broken table: %v", err)
+	}
+
+	t.Cleanup(imageinfo.ResetTable)
+
+	if _, err := imageinfo.LoadTable([]string{broken}); err == nil {
+		t.Fatal("LoadTable() error = nil, want a rejection for the broken table")
+	}
+
+	stubDetection(t,
+		imageinfo.Info{Name: "dakota", Tag: "latest", Ref: "docker://ghcr.io/projectbluefin/dakota"},
+		nil, nil)
+
+	got, err := Detect()
+	if err != nil {
+		t.Fatalf("Detect() error = %v, want nil", err)
+	}
+	if got.ChannelTableError == "" {
+		t.Error("Detect() left ChannelTableError empty on a broken channel table")
+	}
+	if got.CanSwitchTo != imageinfo.ChannelUnknown {
+		t.Errorf("Detect() CanSwitchTo = %v, want %v on a broken channel table", got.CanSwitchTo, imageinfo.ChannelUnknown)
+	}
+}
+
+// Detect must carry the gaming-image signal through to the views, which use
+// it to suppress the gaming-mode toggle. See imageinfo.IsGaming.
+func TestDetectReportsWhenTheImageShipsTheGamingStack(t *testing.T) {
+	tests := []struct {
+		name string
+		info imageinfo.Info
+		want bool
+	}{
+		{
+			name: "dakota-gaming",
+			info: imageinfo.Info{
+				Name:   "dakota-gaming",
+				Tag:    "next",
+				Ref:    "docker://ghcr.io/projectbluefin/dakota-gaming:next",
+				Flavor: "gaming",
+			},
+			want: true,
+		},
+		{
+			name: "dakota-nvidia-gaming",
+			info: imageinfo.Info{
+				Name:   "dakota-nvidia-gaming",
+				Tag:    "next",
+				Ref:    "docker://ghcr.io/projectbluefin/dakota-nvidia-gaming:next",
+				Flavor: "gaming",
+			},
+			want: true,
+		},
+		{
+			name: "plain dakota still offers the toggle",
+			info: imageinfo.Info{
+				Name:   "dakota",
+				Tag:    "latest",
+				Ref:    "docker://ghcr.io/projectbluefin/dakota",
+				Flavor: "main",
+			},
+			want: false,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			stubDetection(t, test.info, nil, nil)
+
+			got, err := Detect()
+			if err != nil {
+				t.Fatalf("Detect() error = %v, want nil", err)
+			}
+			if got.Gaming != test.want {
+				t.Errorf("Detect() Gaming = %v, want %v", got.Gaming, test.want)
+			}
+		})
+	}
+}
+
 // The driver recommendation must only appear where a switch is both possible
 // and useful, so Detect is asserted across the hardware/image matrix rather
 // than only on the machine the tests happen to run on.
@@ -391,7 +500,7 @@ func TestDetectRecommendsADriverOnlyWhenItHelps(t *testing.T) {
 	}{
 		{
 			name:            "nvidia card on the standard dakota image",
-			info:            imageinfo.Info{Name: "dakota", Tag: "latest", Ref: "docker://ghcr.io/projectbluefin/dakota"},
+			info:            imageinfo.Info{Name: "dakota", Tag: "stable", Ref: "docker://ghcr.io/projectbluefin/dakota"},
 			hardware:        gpu.Set{NVIDIA: true},
 			wantDriver:      imageinfo.DriverStandard,
 			wantRecommended: imageinfo.DriverNVIDIA,
@@ -478,8 +587,8 @@ func TestRunHelperJournalsEveryInvocation(t *testing.T) {
 	}
 
 	entries := readJournal(t, path)
-	if len(entries) != 1 {
-		t.Fatalf("journal has %d entries, want 1", len(entries))
+	if len(entries) != 2 {
+		t.Fatalf("journal has %d entries, want 2 (dispatch and outcome)", len(entries))
 	}
 	entry := entries[0]
 	if entry.Action != ubluehelper.CommandChannelSwitch {
@@ -491,6 +600,10 @@ func TestRunHelperJournalsEveryInvocation(t *testing.T) {
 	wantArgv := []string{pkexec, HelperPath, ubluehelper.CommandChannelSwitch, "testing"}
 	if !reflect.DeepEqual(entry.WouldRun, wantArgv) {
 		t.Errorf("journalled WouldRun = %v, want %v", entry.WouldRun, wantArgv)
+	}
+	outcome := entries[1]
+	if outcome.Action != ubluehelper.CommandChannelSwitch || outcome.Outcome != journal.OutcomeSucceeded {
+		t.Errorf("outcome = %+v, want action channel-switch outcome succeeded", outcome)
 	}
 }
 
@@ -543,4 +656,30 @@ func readJournal(t *testing.T, path string) []journal.Entry {
 		entries = append(entries, entry)
 	}
 	return entries
+}
+
+// Issue #495: the helper exits 0 after skipping a developer group the image
+// does not define, so the skipped groups must reach the caller rather than
+// the enable reading as a complete grant.
+func TestSetDeveloperModeReportsSkippedGroups(t *testing.T) {
+	fake := filepath.Join(t.TempDir(), "pkexec")
+	script := "#!/bin/sh\n" +
+		"echo \"usermod: group 'docker' does not exist\" >&2\n" +
+		"echo 'skipped group docker: exit status 6' >&2\n" +
+		"echo 'skipped group incus-admin: exit status 6' >&2\n" +
+		"echo 'dx-enable applied to 2 group(s) for user'\n"
+	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake pkexec: %v", err)
+	}
+	oldPkexec := pkexecCommand
+	pkexecCommand = fake
+	t.Cleanup(func() { pkexecCommand = oldPkexec })
+
+	skipped, err := SetDeveloperMode(context.Background(), true)
+	if err != nil {
+		t.Fatalf("SetDeveloperMode error = %v, want nil", err)
+	}
+	if want := []string{"docker", "incus-admin"}; !reflect.DeepEqual(skipped, want) {
+		t.Errorf("SetDeveloperMode skipped = %v, want %v", skipped, want)
+	}
 }

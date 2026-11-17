@@ -3,35 +3,31 @@
 # Set "enabled: false" to hide a preference group on any page. A functional
 # page is omitted when all of its groups are disabled; Help is always retained.
 
-system_page:
-  system_info_group:
+# Agent Mode: llmman served as a systemd user unit on 127.0.0.1:17434,
+# installed with Homebrew. Shown where Homebrew exists; nothing is installed
+# until the switch is turned on. Goose Desktop launches with the active model.
+agents_page:
+  agents_group:
     enabled: true
-  bootc_status_group:
+  # Troubleshooting: Goose on the Agent Mode model, with read-only
+  # tools for this system's logs, services, and network, plus online
+  # searches of the Project Bluefin knowledge base. Everything it installs
+  # comes from Homebrew, so the group hides itself where Homebrew is absent.
+  # Nothing is downloaded until the user presses Set Up. Accepted under
+  # help_page too, its old home. The Ask Bluefin menu entry opens it.
+  troubleshooting_group:
     enabled: true
-  # Which image this machine runs, and the graphics driver it carries. Hidden
-  # on a host with no /usr/share/ublue-os/image-info.json.
-  channel_group:
-    enabled: true
-  health_group:
-    enabled: true
-    app_id: io.missioncenter.MissionCenter
 
 updates_page:
-  # Update All leads the page; the per-provider groups below it remain
-  # available for anything it does not cover.
+  # Whether this system installs updates on its own schedule. Updating now
+  # is the status-first shell's single action and needs no config key; this
+  # switch is a preference about the future, so it gets its own group.
   #
-  # The Automatic Updates switch is rendered inside this group, because it
-  # answers the same question — how does this system get updated — and
-  # splitting it out would present two unrelated-looking settings. Disabling
-  # this group therefore hides that switch too. There is deliberately no
-  # separate key for it: an independent key could be enabled while this one
-  # was disabled, which would leave the Updates page claiming a group it does
-  # not draw.
-  update_all_group:
+  # Hidden entirely on a host with no unattended-update timer, so a machine
+  # that cannot update itself never shows a switch that would do nothing.
+  automatic_updates_group:
     enabled: true
   bootc_updates_group:
-    enabled: true
-  sysupdate_updates_group:
     enabled: true
   flatpak_updates_group:
     enabled: true
@@ -39,23 +35,22 @@ updates_page:
     enabled: true
   brew_trust_group:
     enabled: true
+  # Which release stream this machine follows, and the graphics driver the
+  # image carries. Both replace the operating system and need a restart, so
+  # they sit with updates. Hidden on a host with no image information.
+  channel_group:
+    enabled: true
+  # Compact system-version readout; technical identity stays behind details.
+  bootc_status_group:
+    enabled: true
 
 applications_page:
-  applications_installed_group:
-    enabled: true
-    app_id: io.github.kolunmi.Bazaar
-  flatpak_user_group:
-    enabled: true
-  flatpak_system_group:
-    enabled: true
   brew_group:
-    enabled: true
-  brew_search_group:
     enabled: true
   brew_bundles_group:
     enabled: true
     bundles_paths:
-      - /usr/share/snow/bundles
+      - /usr/share/ublue-os/homebrew
 
 maintenance_page:
   maintenance_cleanup_group:
@@ -64,11 +59,9 @@ maintenance_page:
       - title: Clean Up Boot Old Entries
         script: /usr/libexec/bls-gc
         sudo: true
-  maintenance_brew_group:
-    enabled: true
-  maintenance_flatpak_group:
-    enabled: true
-  maintenance_optimization_group:
+  # One routine cleanup action. It removes cached downloads and unused
+  # supporting software — never installed apps, documents, or containers.
+  maintenance_freespace_group:
     enabled: true
   # Powerwash (remove every user Flatpak and Distrobox container) and Factory
   # Reset (bootc install reset --experimental). Both are irreversible, so
@@ -77,38 +70,80 @@ maintenance_page:
     enabled: false
 
 features_page:
+  # Chairlift owns the package set and Bash integration; no image payload needed.
+  bluefin_cli_group:
+    enabled: true
+  # User-session GNOME extension switches; unavailable hosts explain why.
+  desktop_integrations_group:
+    enabled: true
   features_group:
     enabled: true
   # Capabilities you turn on. Each hides itself on a host with no
   # /usr/share/ublue-os/image-info.json, so leaving them enabled is safe on
   # every other system.
+  #
+  # install_pulp, stage_feeds, and install_dev_apps are optional follow-on
+  # steps for a confirmed Developer Mode enable, and all ship off. Turning the
+  # switch on grants developer access either way; these only add a system-wide
+  # Pulp Flatpak, a staged feed list the user imports themselves, and the
+  # dakota-dev-flatpaks app collection (needs Homebrew and brew_bundles_group). Switching Developer Mode
+  # back off removes neither, and never touches feeds already imported.
   dx_group:
     enabled: true
+    # wsl_backend: nsl
+    # install_pulp: true
+    # stage_feeds: true
+    # install_dev_apps: true
   gaming_group:
     enabled: true
-  # A language model served from a rootless container, on whichever
-  # accelerator this machine has. Shown everywhere Podman exists; the model
-  # is only downloaded once the switch is turned on.
-  #
-  # ai_images pins the container image per GPU vendor (nvidia, amd, intel,
-  # none) — for a site that mirrors registries — and ai_model changes what is
-  # served. Both are ordinary settings rather than root-only ones because the
-  # container runs unprivileged in the user's own account.
-  ai_group:
+  # Printer applications: one rootless Podman quadlet per driver family
+  # (Ghostscript, PostScript, HPLIP, Gutenprint), started with
+  # `systemctl --user` in the invoking account; nothing here is privileged. The group hides itself where
+  # podman is absent. Each application is published on 127.0.0.1 only
+  # (ADR-0020), so only this computer can print to it or open its settings.
+  printers_group:
     enabled: true
-    # ai_images:
-    #   nvidia: registry.example.internal/ramalama/cuda:latest
-    # ai_model: ollama://qwen2.5:7b
-  # An AI assistant that can read this system's logs, services, and network
-  # to help diagnose problems. Everything it installs comes from Homebrew, so
-  # the group hides itself where Homebrew is absent. Nothing is downloaded
-  # until the user presses Set Up.
-  troubleshooting_group:
+  # Compass, TunaOS's keyboard-first launcher: one switch that installs or
+  # removes org.tunaos.compass system-wide (`flatpak install --system`) from
+  # the FlatPark remote the image ships, authorized by Flatpak's own
+  # PolicyKit. Hidden where flatpak is absent.
+  compass_group:
+    enabled: true
+  # Agent Mode (llmman, installed with Homebrew and run as a systemd user
+  # unit) lives on its own Agents page; see agents_page above.
+
+# Desktop appearance and wallpaper setup. Icons and converted wallpaper
+# copies are user-owned; Valhalla installs system-wide through Flatpak's own
+# authorization. No wallpaper setup runs until Install is pressed.
+livery_page:
+  # The account's profile picture, chosen from Project Bluefin's dinosaur
+  # artwork. Nothing is downloaded until a picture is picked, and nothing is
+  # set until Apply; it goes through AccountsService, unprivileged.
+  account_group:
+    enabled: true
+  # More Dinosaurs installs Valhalla and extra backgrounds, converting
+  # SVG/JXL/AVIF artwork to PNG without changing the original pack.
+  wallpapers_group:
+    enabled: true
+  # The Show Applications mark, fetched from simpleicons.org by brand name.
+  # Set once — there is no rotation, because a personal mark that changed on
+  # its own would stop being personal.
+  livery_app_grid_group:
+    enabled: true
+  # The top-bar menu mark. Needs the Custom Command Menu GNOME extension;
+  # the section says so and stays insensitive where it is absent.
+  livery_foundation_group:
+    enabled: true
+  # The Files application mark. GNOME stores one icon per application, so
+  # this changes Files everywhere it is drawn, not only on the dock.
+  livery_dock_group:
     enabled: true
 
 help_page:
+  # website is titled "Browse Documentation" and chat "Ask for Help", matching
+  # projectbluefin/common's shipped configuration.
   help_resources_group:
     enabled: true
-    website: https://github.com/frostyard/snosi
-    issues: https://github.com/frostyard/snosi/issues
-    chat: https://github.com/frostyard/snosi/discussions
+    website: https://docs.projectbluefin.io/
+    issues: https://github.com/projectbluefin/dakota/issues
+    chat: https://ask.projectbluefin.io/
